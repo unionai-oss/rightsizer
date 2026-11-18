@@ -145,6 +145,14 @@ checks the patched object against each of the following:
 - pod-spec invariants: unique volume names and `mountPath`s. An existing
   `/dev/shm` mount is resized in place, never duplicated;
 - QoS preservation (SPEC §7.4);
+- **GKE Autopilot** (detected from the cluster): requests below the compute
+  class minimum are raised by Autopilot, requests above its maximum are
+  rejected, CPU:memory must lie within the class's ratio (for example 1:1 to
+  1:6.5 for general-purpose), CPU rounds up to 0.25 vCPU without bursting,
+  limits are set to requests on non-bursting clusters, and GPU pods have
+  per-GPU-count CPU and memory maximums. `validate` normalizes the candidate
+  by these rules first, so the decision describes what will actually run, and
+  a reduction Autopilot would undo is recorded as held (managed-ml.md §6);
 - the **effective pod request** against the largest node shape:
   `max(max over init containers, counting restartable sidecars started before each; sum(app) + sum(sidecars)) + RuntimeClass overhead`.
 

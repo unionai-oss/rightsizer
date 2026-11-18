@@ -130,7 +130,10 @@ script loads the table at load time. The table:
 - is keyed by `(account, key)` where `key` is the `#RIGHTSIZER key=` directive
   or an explicit `--job-name` — no script hashing under the controller lock;
 - is capped at 10,000 entries (most-submitted keys first);
-- applies only to untokenized batch jobs, under the rewriting rules of §3.
+- applies only to untokenized batch jobs, under the rewriting rules of §3;
+- skips jobs from the users in `[slurm] presized_submitters`: submitters such
+  as a SkyPilot API server that have already sized the job through their own
+  rightsizer integration (launchers.md §1.4).
 
 ## 5. Outcomes: `sacct`
 

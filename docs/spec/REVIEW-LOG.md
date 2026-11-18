@@ -150,3 +150,104 @@ confirmed against `_task.py:514-554`.
 | R13 | Resizing `salloc`/`srun` jobs could not be attributed. | slurm.md §2: `cli_filter` enforces only for `sbatch`. |
 | R14 | The `decide` result lacked the token, mode and summary fields. | plugins.md §3.1. |
 | R15–R23 | Wrong cross-reference targets, old enum forms, `--tmp` vs held disk, Slurm `--time`, GPU count opt-in, missing CLI commands, mode-string shorthand semantics, `env_vars=None`, postgres milestone, env var naming. | Fixed. |
+
+## Round 4: coverage research (v2 → v3 draft)
+
+Goal: as much platform coverage as possible for the package and the model,
+including commercial platforms. Four parallel research passes, each reading
+SDK source where it exists (sagemaker-python-sdk 7263f35, modal-client
+a7adb1d, skypilot, dstack, metaflow, airflow, dagster, prefect, kfp, zenml at
+their default branches on 2026-11-18) and the providers' API references:
+
+- **AWS:** SageMaker AI (training, processing, transform, Pipelines,
+  HyperPod, warm pools, spot, training plans) and AWS Batch (EC2, Fargate,
+  EKS, multi-node, service jobs).
+- **Modal and serverless GPU:** Modal in depth; RunPod, Baseten,
+  Replicate/Cog, Beam, fal, Lightning, Together, Lambda briefly.
+- **Other managed services:** Vertex AI (custom jobs, KFP on Vertex, batch
+  prediction), Cloud Batch, Cloud Run jobs, GKE Autopilot rules, Azure ML,
+  Azure Batch, Databricks, Snowflake.
+- **Orchestrators and launchers:** Airflow, Metaflow, Prefect, Dagster, KFP,
+  Argo, ZenML, SkyPilot, dstack, Kedro, MLflow Projects.
+
+Findings that shaped v3:
+
+- **No managed ML service has a mutating server-side hook.** IAM, SCPs, Org
+  Policy and Azure Policy only deny. Enforcement is therefore client-side
+  (a botocore hook, SDK wrappers) or through files (`apply`, `suggest`), and
+  every platform gets a read-only audit first. This became the integration
+  tiers (plugins.md §1.1) and the hook-point taxonomy (§1.2).
+- **Machine types are discrete** on SageMaker, Vertex, Azure ML and
+  Databricks, legal pairs on Fargate, and lower bounds handed to an optimizer
+  on SkyPilot and dstack. This became `RequestModel` (SPEC §5.8).
+- **Modal bills max(request, use)**, so under-asks save nothing. This became
+  the `usage-floor` price model (SPEC §7.2).
+- **No platform retry changes size.** Ladders come only from a wrapper that
+  owns the wait, or from orchestrator retries passing through a hook that sees
+  the attempt number. This became `LadderDriver` and escalate-on-retry
+  (SPEC §7.2).
+- **SkyPilot, dstack, Airflow and botocore fail closed** on hook errors,
+  which became the S1 "fail-closed hosts" rule.
+- **Adoption surfaces:** `rightsize audit`, `rightsize suggest` (pull
+  requests) and an MCP server (SPEC §12.3–12.5), with milestone A shipping
+  audit right after M0.
+
+Built in v3: aws.md (SageMaker AI, AWS Batch), modal.md, launchers.md
+(SkyPilot, dstack), orchestrators.md (Metaflow, Airflow; notes on KFP,
+Dagster, Prefect, Argo, ZenML), managed-ml.md (Vertex AI, Azure ML,
+Databricks, Cloud Batch/Run, Snowflake, Autopilot rules).
+
+## Round 5: v3 draft → v3
+
+Two independent reviewers: platform facts (29 findings, checked against the
+source clones and provider docs by the reviewer and three helpers) and design
+soundness (3 blockers, 11 majors, 20 minors). The blockers were spot-checked
+in source before being accepted: SkyPilot recovery re-running the policy
+(`recovery_strategy.py:1591`, `execution.py:326-345`), `METAFLOW_DEFAULT_DECOSPECS`
+replacing toggled decospecs (`metaflow_config.py:765-767`), and the separate
+`@kubernetes` merge loop (`kubernetes_decorator.py:366-384`).
+
+| # | finding (severity) | resolution |
+|---|---|---|
+| P-B1 | **Blocker.** Airflow `task_instance_mutation_hook` runs in the scheduler; a context it sets never reaches the worker. | orchestrators.md §3.2: not used; a worker-side listener publishes the attempt context; KPO reads it in `execute()`. |
+| P-B2 | **Blocker.** SkyPilot managed-job recovery re-runs the admin policy. | launchers.md §1.1: normative marker in task `envs`; marked tasks are never re-decided; §1.6 notes the future ladder hook. |
+| P-B3 | **Blocker.** Adding tags needs `AddTags`/`TagResource`, and `UpdatePipeline` has no `Tags`; errors occur after the guard. | aws.md §2.1: tags off by default; the marker is a container environment variable; edits are validated against the input shape before the handler returns. |
+| D-B1 | **Blocker.** Escalate-on-retry read attempt 1's decision by listing the decision log, and a missing record silently allowed a fresh reduction. | SPEC §7.2 and §8.1: synchronous attempt record before any reduced attempt (no record → no reduction); a missing record on attempt ≥ 2 means the origin prior; per-member records for groups. |
+| D-B2 | **Blocker.** Metaflow's long-lived runtime kept attempt 1's reduced attributes on an attempt-2 S1 fallback. | orchestrators.md §2.2: snapshot at `step_init`, restore before every `runtime_step_cli`. |
+| D-B3 | **Blocker.** Unclassified failures of reduced attempts escaped S5. | SPEC §2.3 S5: they count as rightsizer-caused until classified; surfaces without classification cannot enforce reductions; Modal needs a fresh importer (modal.md §5). |
+| D-M1 | Persisted edits (`suggest`, GitOps) outlived breakers and became the new prior. | SPEC §2.3 S5 "origin prior" with markers; SPEC §12.4: reductions only under an `enforce` ceiling and no breaker, revert PRs on breaker trips; Metaflow `webhook_resize` removed. |
+| D-M2 | MCP returned `recommended`, which ignores S3, into code. | SPEC §12.5: returns `applied` under enforce; unearned reductions marked. |
+| D-M3, P-M1 | `max_attempts` unknown on KubernetesExecutor; context did not cross processes. | `max_attempts: Option`, unknown → no ladder; `RIGHTSIZER_ATTEMPT` env mirror. |
+| D-M4 | Caller ladders die with the waiting process; other observers of the job. | SPEC §7.2: Caller defined as the wrapper's caller; ladder lease; abandoned ladders trip the per-workload breaker; OOM-only escalation. |
+| D-M5 | Double sizing (Metaflow + botocore; SkyPilot on Slurm). | plugins.md §2 "one layer decides"; `RIGHTSIZER_DECIDED`; `[slurm] presized_submitters`. |
+| D-M6 | Catalog usable memory counted overhead twice. | SPEC §5.8: `Shape.reserved` (platform) vs the runtime overhead model. |
+| D-M7 | Trust region and S3(b) were ill-defined on shapes and snapped asks. | SPEC §5.8 "effective memory": measured on the usable memory of the shape that runs; at most halving per decision. |
+| D-M8 | Modal int memory treated as unenforced, though eviction kills the unit. | modal.md §1: `memory_enforced = true`, no neighbour premium. |
+| D-M9 | Instance-type moves could hit SCP denies or exhausted quota. | aws.md §3.2: type moves need a known allow-list and known quota usage; else held. |
+| D-M10 | Importer records attributed by job names could poison history. | SPEC §8.2 and aws.md §8: `Verified` only with authenticated attribution (CloudTrail); otherwise `Unverified`. |
+| D-M11 | Audit replay underspecified. | SPEC §12.3: completed-before-start, recommend steady state, simulated breakers, priced ladders, interval. |
+| P-M2/M3 | SkyPilot imports the policy outside its try; more request names than listed. | launchers.md §1.1: stdlib-only top-level imports; validate/optimize not logged as launches. |
+| P-M4/M5 | `SubmitServiceJob` handler missing; `InstancePreferences` excludes `InstanceType`. | aws.md §2.1, §3.1, §3.3. |
+| P-M6/M7/m17/m18 | Modal stats exclude variants, p99.9 exists, GPU-bundled resources, tuple merging, terminations join. | modal.md §1, §2, §5. |
+| P-M8/M9/m14/m15 | Metaflow decospec paths, merge rules, annotation paths, defaults ambiguity. | orchestrators.md §2. |
+| P-M10 | Clients created before `install()` are not hooked. | aws.md §2.1. |
+| D-m12, P coarse sources | Resolution boundary; averages vs samples. | SPEC §2.3 (`resolution_s ≥ 10` coarse), §5.7 (averages are `AtLeast`; unverified sources treated as averages); CloudWatch `AtLeast` until M5. |
+| others | Pipeline size limits, warm-pool match set, spot rows and quotas, name truncation, g5 sizes, Azure MB and per-node memory, Vertex allocated memory, dstack exit codes and TTL, KFP and Dagster citations, `flyte reconcile` in the CLI, ladder GPU steps only within `allowed_shapes`, step only when attempt 1 was reduced, usage-floor savings formula, floor resolution headroom, `status_confidence`, milestone A owning the importers, survey ladder and tier columns, tenant format in launchers day one, dstack memo re-evaluating the mode. | Fixed in place. |
+
+## Round 6: regression pass
+
+A final reviewer checked every Round 5 resolution at its cited location and
+probed for contradictions the fixes introduced. Cross-references, tables,
+code fences and TOML were checked mechanically and were clean. Fixed:
+
+| # | finding (severity) | resolution |
+|---|---|---|
+| G1 | **Major.** Attempt records existed only for reduced attempts, so a job sized *up* that then failed would retry smaller. | SPEC §7.2: records before every changed attempt; a missing record means max(origin prior, fresh decision without reductions). |
+| G2 | **Major.** Modal integer memory was "enforced" while Kubernetes request-only memory was "not enforced", with conflicting rationales. | SPEC §2.3 S3: one test — whether the failure lands on the unit itself; Kubernetes no-limit memory listed explicitly. |
+| G3 | **Major.** Flyte and Metaflow deploy-time sizing did not carry the origin prior. | flyte.md §6.3 and orchestrators.md §2.3: the deploy decision record holds it and is what later layers read. |
+| G4 | **Major.** SkyPilot on VM backends never classifies failures. | launchers.md §1.5: reductions only where every candidate backend has an outcome path. |
+| G5 | **Major.** `presized_submitters` was missing from slurm.md; Metaflow `@kubernetes` pods carried no marker. | slurm.md §4.2; orchestrators.md §2.2. |
+| G6 | Airflow snippet still imported the unused hook; listener registration unstated. | orchestrators.md §3.1. |
+| G7 | Caller ladders other than the AWS helpers had no lease, and nothing closed leases. | SPEC §7.2: every Caller ladder writes leases; the classifying component closes them; `lease_ttl`. |
+| G8 | Sample kind undeclared for Vertex, Azure, Databricks, Container Insights; conflicting bounds. | SPEC §5.7 conflicting-bounds rule; managed-ml.md and aws.md declare each source. |
+| G9 | CLI and milestone drift (`sbatch --watch`, reconcile commands, importer ownership, Cloud Batch milestone, `.pth` hook), floor headroom restated wrongly, stale Modal test, EKS marker location, Metaflow escalation attribution, unsigned Metaflow prior, recommend-mode wording, survey ladder column. | Fixed in place. |

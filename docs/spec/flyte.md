@@ -295,7 +295,13 @@ rightsize flyte deploy --restore train.py env # redeploy from source with sizing
 2. Rewrite each task as `t.override(resources=merged)` and replace it in the
    environment's registry (§11).
 3. Log each deploy decision to `{prefix}/v1/decisions/`, with the deploy
-   version.
+   version and the **origin prior** (the source definition's resources). Run-time
+   sizing (§4) and the Kubernetes webhook (§12) read the origin prior from that
+   record by task name and deploy version, so attribution and `final_floor`
+   stay relative to what the author wrote (SPEC §2.3 S5). If the record cannot
+   be read, they treat the deployed value as the prior, which only forgoes
+   savings: deploy-time values are never below the origin prior without
+   `reconcile`.
 4. Call `flyte.deploy`.
 
 Rules:

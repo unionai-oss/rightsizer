@@ -1,6 +1,6 @@
 # rightsizer — core specification
 
-Status: **draft v2** (after review rounds 1–2; see [REVIEW-LOG.md](REVIEW-LOG.md))
+Status: **draft v3** (after review rounds 1–4; see [REVIEW-LOG.md](REVIEW-LOG.md))
 Prior art: [`model-factory-resource-tuner`](https://github.com/unionai-oss/model-factory/tree/main/model-factory-resource-tuner)
 (the "resource tuner"), rounds 1–23. Citations `tuner:path:line` point into it.
 
@@ -12,6 +12,11 @@ Prior art: [`model-factory-resource-tuner`](https://github.com/unionai-oss/model
 | [plugins.md](plugins.md) | platform plugin interface (in-process and out-of-process); platform survey |
 | [slurm.md](slurm.md) | Slurm plugin |
 | [ray.md](ray.md) | Ray plugin |
+| [aws.md](aws.md) | AWS: SageMaker AI and AWS Batch |
+| [modal.md](modal.md) | Modal |
+| [launchers.md](launchers.md) | SkyPilot and dstack |
+| [orchestrators.md](orchestrators.md) | Metaflow, Airflow; notes on Kubeflow Pipelines, Dagster, Prefect, Argo |
+| [managed-ml.md](managed-ml.md) | Vertex AI, Azure ML, Databricks, Cloud Batch/Run, Snowflake |
 | [REVIEW-LOG.md](REVIEW-LOG.md) | design and review rounds |
 
 Section references like "kubernetes.md §3.4" point into the sibling
@@ -30,9 +35,12 @@ safety contract (§2.3).
 
 It ships as Rust crates (data model, features, estimators, decision rule,
 history, platform adapters), Python packages (`rightsizer`, native; and
-`rightsizer-runtime`, pure Python) with Flyte v2 and Ray integrations, a
+`rightsizer-runtime`, pure Python) with integrations for Flyte v2, Ray,
+Metaflow, Airflow, SkyPilot, dstack, Modal and AWS (SageMaker AI, Batch), a
 **`rightsize` CLI** that also runs the Kubernetes admission webhook and a local
 daemon, and the **Estimator Protocol**, so the model can be hosted anywhere.
+Platforms without any hook point still get a read-only **audit** (§12.3) and
+resource edits proposed as code changes (§12.4).
 
 ### 1.1 What to expect, honestly
 
@@ -43,8 +51,16 @@ daemon, and the **Estimator Protocol**, so the model can be hosted anywhere.
   wrong guess (an escalation ladder) or history proves it safe (§2.3 S3). Where
   memory is enforced *and* a ladder exists — Flyte tasks whose memory has a limit,
   `rightsize apply --watch` and `rightsize slurm sbatch --watch` on clusters that
-  enforce memory — savings start on the first run. Elsewhere (Ray, request-only
-  memory) they start after a few measured runs.
+  enforce memory, Metaflow and Airflow tasks with enough retries on backends
+  that enforce memory, and jobs
+  launched through `rs.aws.sagemaker.run` — savings start on the first run.
+  Elsewhere (Ray, Modal, SkyPilot, request-only memory) they start after a few
+  measured runs.
+- **Managed services enforce on the client.** SageMaker, Vertex AI, Azure ML
+  and Modal have no hook that can rewrite a job on the server. There,
+  rightsizer enforces only in processes that load its hook or wrapper
+  (aws.md §2, modal.md §2), and everything else gets audit and
+  recommendations.
 - **Shadow mode first.** `recommend` changes nothing and records what would
   have happened; `rightsize shadow` reports savings, would-be failures and a
   per-workload readiness verdict (§12.2) before anyone enforces.
@@ -56,7 +72,11 @@ VPA, Goldilocks, KRR, Kubecost, StormForge, CAST AI and PerfectScale size
 history, and none of these tools choose GPU shapes. Rightsizer targets
 **batch-shaped AI work**: training, fine-tuning, batch inference, data
 preparation, evaluation. It predicts **before the first run** and covers
-**Flyte, Kubernetes, Slurm and Ray** with one model.
+cluster schedulers (Kubernetes, Slurm), AI runtimes (Ray), orchestrators
+(Flyte, Metaflow, Airflow), GPU launchers (SkyPilot, dstack) and managed
+services (SageMaker AI, AWS Batch, Modal; Vertex AI, Azure ML and Databricks
+in M7) with one model and one history. The platform coverage plan is in
+plugins.md §5.
 
 ## 2. Goals, non-goals, safety contract
 
@@ -93,6 +113,14 @@ preparation, evaluation. It predicts **before the first run** and covers
   reductions), and an expired decision budget. Errors are logged and counted,
   never raised into user code. The one exception is `strict = true`, meant for
   CI, which fails on configuration errors.
+
+  **Fail-closed hosts.** Several hook points fail the user's submission when
+  the hook raises or times out: SkyPilot admin policies, dstack apply
+  policies, Airflow's `pod_mutation_hook`, botocore event handlers
+  (launchers.md §1.1, orchestrators.md §3.2, aws.md §2.1). Rightsizer code at
+  such a point catches every error itself and enforces its own deadline,
+  shorter than the host's. It never relies on the host to fail open, and it
+  never rejects a submission.
 - **S2 No new failure modes.** Rightsizer never:
   - adds a limit that did not exist;
   - lowers an existing limit except under S3;
@@ -109,11 +137,20 @@ preparation, evaluation. It predicts **before the first run** and covers
     `scale` (§7.4) × headroom fits under the proposed request. Headroom is 1.05,
     raised to 1.25 when the peak was sampled coarser than 1 s (`resolution_s > 1`)
     or comes from another code digest of the same key, and to 1.5 when both.
+    Peaks with `resolution_s ≥ 10` (dstack every 10 s; CloudWatch, Cloud
+    Monitoring, Azure Monitor and system tables every 60 s) are **coarse**:
+    headroom 1.5, or 1.75 with another digest, and S3(b) needs
+    `2 × min_history` of them.
 
   Where memory is **not enforced** by the platform (Ray's logical resources;
-  Slurm without `ConstrainRAMSpace`), an under-ask does not fail the unit itself.
-  It harms co-located work, so only (b) applies, and the cost model adds a
-  neighbour-risk premium (§7.2). Otherwise the axis is held at the prior, and
+  Slurm without `ConstrainRAMSpace`; a Kubernetes container with a memory
+  request and no limit), an under-ask does not deterministically fail the unit
+  itself. It can harm co-located work (the kernel OOM killer or Ray's memory
+  monitor may pick a neighbour), so only (b) applies, and the cost model adds a
+  neighbour-risk premium (§7.2). The test is **where the failure lands**: a
+  platform whose memory manager evicts exactly the over-request unit (Modal
+  with an integer `memory`, modal.md §1) counts as enforced, because the
+  failure is the unit's own. Otherwise the axis is held at the prior, and
   the decision reports the reduction as a recommendation.
 - **S4 Schedulability.** An increase is enforced only if a node shape and the
   quota (kubernetes.md §5, slurm.md §7) can admit it. Otherwise it is clamped,
@@ -126,6 +163,19 @@ preparation, evaluation. It predicts **before the first run** and covers
     at or above the prior also fails, or when the run's input exceeded every
     input size in its history. Evictions due to node memory pressure of a unit
     whose memory was reduced count as rightsizer-caused.
+  - **Unclassified failures.** A failed attempt whose enforced request was
+    below the prior on any incompressible axis, and whose failure is not
+    classified within `classification_window` (default 1 h), counts as
+    rightsizer-caused for breakers until an importer classifies it otherwise.
+    A surface that cannot get failures classified at all (no importer, no
+    status signal) may not enforce reductions; it runs them in `recommend`.
+  - **The prior is the author's.** "Below the prior" always means below the
+    **origin prior**: what the author wrote before any rightsizer layer
+    changed it. Every value rightsizer persists — webhook patches (the signed
+    `rightsizer.io/prior` annotation), deploy-time sizing, edits merged from
+    `rightsize suggest` (a `rightsizer: prior=… decision=…` marker next to the
+    edited value, §12.4) — carries the origin prior, and attribution, ladders'
+    `final_floor` and the re-attribution rule use it.
   - **Breakers.** Breakers demote from `enforce` to `recommend`. Their state
     lives in the history store (§8.1) and processes cache it for 60 s.
 
@@ -426,13 +476,14 @@ pub struct RunRecord {
     pub inputs: Vec<InputMeta>, pub code_digest: Option<String>,
     pub requested: Option<ResourceSpec>,          // None for local runs
     pub status: RunStatus,                        // Succeeded | OomKilled | GpuOom | Evicted | Timeout | Preempted | Failed | Cached | Unknown
+    pub status_confidence: Confidence,            // Observed (the platform said so) | Inferred (from metrics, e.g. memory at 95% before a failure)
     pub memory_peak: Option<Measurement>,
     pub cpu_mean: Option<Measurement>, pub cpu_peak_window: Option<Measurement>,
     pub cpu_throttled_frac: Option<f32>,
     pub gpu_memory_peak: Option<Measurement>,     // busiest device
     pub gpu_util_mean: Option<f32>,
     pub t_peak_frac: Option<f32>, pub duration_s: Option<f64>,
-    pub source: OutcomeSource,                    // SelfReport | Cgroup | Prometheus | Sacct | FlyteRemote | RayState | Watcher
+    pub source: OutcomeSource,                    // SelfReport | Cgroup | Prometheus | Sacct | FlyteRemote | RayState | Watcher | Importer { platform }
     pub trust: Trust,                             // Verified | Authenticated | Unverified (§8.2)
 }
 pub struct Measurement { pub value: f64, pub censor: Censor, pub resolution_s: Option<f32> }
@@ -446,13 +497,78 @@ Censoring rules, applied by every importer:
   deflates the working set near a limit.
 - CPU at a limit with throttling above 5% records `AtLeast`.
 - Sampled peaks are `Exact` with `resolution_s` set to the sampling interval;
-  S3(b) and the floor widen headroom for coarse resolutions (§2.3).
+  S3(b) and the floor use the resolution headroom (§2.3, §7.4).
+- Importers declare whether a source's samples are **instantaneous** or
+  **period averages**. An average is not a peak and is recorded as `AtLeast`.
+  A source whose kind is not yet verified is treated as averages.
+- `Inferred` statuses are used for learning and count for the unclassified
+  rule (S5), never as proof of an OOM.
+- When a source's bounds conflict — an unverified sample kind (so `AtLeast`)
+  from a metric that may include other processes (so `AtMost`) — the record
+  carries no peak; it still carries status and duration.
+- A **percentile** statistic (Modal's per-container p99) is not a peak and is
+  recorded as `AtLeast`.
+- **Utilization percentages** (CloudWatch `MemoryUtilization`, Cloud
+  Monitoring, Databricks `mem_used_percent`) are converted to bytes with the
+  shape catalog's memory for the instance that ran (§5.8). When the instance
+  type is unknown, the record has no peak.
 - On shared GPUs (time-slicing, MPS), device memory includes other tenants and
   is recorded as `AtMost`.
 - `Cached` runs carry no measurements and are excluded from learning.
 
 `history-peak`, `rules-sized` and every trainer treat these as censored. An
 `AtLeast` value shifts mass upward and is never used as a point.
+
+### 5.8 Request models
+
+Platforms differ in what a request *is*. The adapter's `PlatformState`
+carries one of four request models, and the decision rule's candidate set is
+built from it:
+
+```rust
+pub enum RequestModel {
+    Free,                                   // any grid cell within floor and ceiling: K8s, Slurm, Ray, Flyte, Batch on EC2, Modal CPU/memory
+    Catalog(Vec<Shape>),                    // discrete machine types: SageMaker, Vertex AI custom jobs, Azure ML, Databricks
+    Combos(Vec<(MilliCpu, Vec<Bytes>)>),    // legal CPU/memory pairs only: Fargate
+    Snap(Box<dyn SnapFn>),                  // the platform turns a lower bound into a shape itself: SkyPilot, dstack, KFP on Vertex
+}
+pub struct Shape {
+    pub name: String,                       // "ml.g5.2xlarge", "n1-highmem-8", "Standard_NC24ads_A100_v4"
+    pub cpu: MilliCpu,
+    pub memory: Bytes,                      // installed
+    pub reserved: Bytes,                    // taken by the platform's agents and OS before the job starts (per catalog); usable = memory − reserved
+    pub gpu: Option<GpuShape>,              // accelerator × count, device memory
+    pub price: BTreeMap<String, f64>,       // per hour, by usage type ("training", "processing", "spot", …)
+    pub family: String,
+}
+pub trait SnapFn: Send + Sync { fn snap(&self, ask: &Requests) -> Option<Shape>; }   // None: infeasible
+```
+
+- **Catalog.** Candidates are shapes, not cells. A shape's memory cell is its
+  usable memory (installed − `reserved`); its CPU cell is its vCPU count; its
+  cost is its price. The memory failure probability is
+  `P(demand + runtime overhead > usable)`: `reserved` is the platform's share
+  and the runtime overhead model (§5.2) is the workload runtime's, so nothing
+  is counted twice. The decision renders the shape's name. Holds (§7.4)
+  restrict the catalog: same GPU count, same family unless families are
+  configured, and so on per adapter.
+- **Effective memory.** For Catalog and Snap units, the trust region, the
+  floor, the anchor and S3(b)'s "fits under the proposed request" are all
+  measured on the **effective usable memory** of the shape that will run, not
+  on the ask: a `32+` ask that lands on a 64 GB instance has an effective
+  64 GB. `max_step_down = 2` cells means the effective memory may fall to no
+  less than half the anchor's, whatever the number of shapes in between.
+- **Combos.** Candidates are cells snapped up to the smallest legal pair.
+- **Snap.** Candidates are cells. Each is mapped through `snap` to the shape
+  the platform would choose; candidates that snap to the same shape collapse
+  to the smallest ask. Failure probability uses the snapped shape's usable
+  memory when that platform's memory is instance-bounded, otherwise the ask.
+  When the snap function is not known exactly (KFP on Vertex, managed-ml.md
+  §1.2), the unit is recommend-only.
+- Catalogs are data: they ship as versioned JSON (`catalog/*.json`), are
+  refreshed from the provider's price and instance APIs
+  (`rightsize <platform> catalog refresh`), and are part of `PlatformState`,
+  never of the context digest.
 
 ## 6. Estimators
 
@@ -582,15 +698,86 @@ profile, constraints (§7.4) and the prior.
 ```rust
 pub struct PlatformRetry {
     pub same_size: u32,                           // retries the platform performs at the same size (K8s backoffLimit, Flyte retries, Ray max_retries)
-    pub ladder: Option<Ladder>,                   // resubmission by rightsizer
+    pub ladder: Option<Ladder>,                   // resubmission at a larger size
 }
-pub struct Ladder { pub memory_factor: f32 /*2.0*/, pub max_steps: u32 /*2*/, pub final_floor: Requests }
+pub struct Ladder {
+    pub memory_factor: f32 /*2.0*/, pub max_steps: u32 /*2*/, pub final_floor: Requests,
+    pub driver: LadderDriver,
+}
+pub enum LadderDriver {
+    Caller,          // a rightsizer wrapper owns the wait and returns the final attempt: Flyte parent (`on_oom`), `apply --watch`, `slurm sbatch --watch`, `rs.aws.sagemaker.run`, `rightsize aws batch submit --wait`
+    Orchestrator,    // the orchestrator retries the unit through a rightsizer hook that sees the attempt number (escalate-on-retry, below): Metaflow, Airflow
+}
 ```
 
-Each ladder step multiplies memory by `memory_factor` and moves GPU memory to
-the next shape with more GPU memory (`tuner:bench_gpu/grid.py:92`). The last
-step is raised to at least `final_floor` = max(prior, largest observed success).
-If `final_floor` exceeds the ceiling, S3(a) does not hold.
+**Which ladders count.** A ladder satisfies S3(a) only when the failed attempt
+is never the consumer's final answer:
+
+- `Caller`: the consumer is the wrapper's caller, and the wrapper returns only
+  the last attempt. Other observers of the job (a `kubectl wait`, an
+  EventBridge rule) are not consumers rightsizer protects; integrations that
+  have such consumers do not claim a `Caller` ladder. A Caller ladder
+  escalates only on OOM-class failures; an unclassified failure is returned to
+  the caller and handled by S5's unclassified rule. Before each reduced
+  attempt the wrapper writes a **ladder lease** (below); if the wrapper dies
+  with the lease open and the attempt failed, the failure is unrecovered and
+  trips the per-workload breaker. Every Caller ladder writes leases — the
+  Flyte parent (flyte.md §9), `apply --watch`, `slurm sbatch --watch` and the
+  AWS helpers. The component that classifies the failure (the watcher, `sacct`
+  or a cloud importer) closes the lease: a failed attempt whose lease is still
+  open after `lease_ttl` (default 15 min past the failure) is unrecovered.
+- `Orchestrator`: see escalate-on-retry.
+
+A detached process that resubmits failed jobs on its own is **not** a ladder:
+whoever launched the original job has already seen it fail.
+
+**Attempt records and leases.** Before submitting a reduced attempt, the
+integration writes `{prefix}/v1/attempts/{tenant}/{key-hash}/{invocation-hash}.json`
+(conditional PUT, synchronous, inside the decision budget) holding the
+origin prior and attempt 1's applied request. If that write fails, the
+attempt is not reduced. The record is the ladder lease and is what later
+attempts read; it is never looked up by listing decisions.
+
+**Escalate-on-retry and `AttemptContext`.** Orchestrator integrations publish
+the current attempt to the processes that submit work:
+
+```rust
+pub struct AttemptContext {
+    pub invocation_id: String,                   // stable across attempts of one task instance
+    pub attempt: u32,                            // 1-based
+    pub max_attempts: Option<u32>,               // None: unknown → no ladder
+}
+```
+
+Attempt records are written before **every** attempt rightsizer changes, up
+or down, and one per member for groups (each Airflow map index, each Metaflow
+foreach split), holding the group's decision.
+
+In Python it is the `rs.attempt_context` context variable, mirrored into the
+`RIGHTSIZER_ATTEMPT` environment variable (JSON) so subprocesses that submit
+(Metaflow's `batch step`, Airflow's task runner) see it (orchestrators.md §1).
+On attempt k ≥ 2:
+
+- the attempt record is read; if it is missing or unreadable, the attempt runs
+  at the larger of the origin prior and a fresh decision with reductions
+  disabled (never at a fresh, possibly reduced, decision, and never below an
+  increase attempt 1 may have had);
+- if attempt 1 was below the origin prior, the request is step
+  `min(k − 1, max_steps)` of attempt 1's decision, or a fresh decision if
+  that is larger;
+- otherwise the fresh decision, never below attempt 1's request.
+
+A retry after a reduced attempt always moves up, whatever the failure was, so
+no outcome lookup is on the critical path. The ladder counts only when
+`max_attempts` is known and `max_attempts − 1 ≥ max_steps`. Attempts beyond
+`max_attempts` (a cleared and rerun task) stay at the last step.
+
+Each ladder step multiplies memory by `memory_factor`. On the GPU axis a step
+moves to the next shape with more GPU memory (`tuner:bench_gpu/grid.py:92`)
+only within `allowed_shapes` when GPU type changes are opted in; otherwise GPU
+is held and a GPU OOM is not escalated. The last step is raised to at least
+`final_floor` = max(origin prior, largest observed success). If `final_floor`
+exceeds the ceiling, S3(a) does not hold.
 
 **Independence.** Axis demands are treated as independent given the context.
 Estimators that model correlation can express it only through `kind = Action`.
@@ -599,7 +786,15 @@ Estimators that model correlation can express it only through `kind = Action`.
 
 - *Per attempt.* Price × resource-hours, under the `PlatformState` price model:
   - `packed`: the dominant share of the node shape;
-  - `linear`: per-resource rates.
+  - `linear`: per-resource rates;
+  - `instance`: the shape's price × instance count (Catalog and Snap
+    platforms, §5.8);
+  - `usage-floor`: billed on `max(request, use)` per resource-second (Modal).
+    The per-attempt cost is `E[max(request, demand)] × rate`. Asking below
+    demand saves nothing, so an under-ask only adds failure risk and the
+    penalties push the argmin to the demand's upper quantile. `shadow` and
+    `audit` savings on such platforms are
+    `E[max(prior, D)] − E[max(decision, D)]`, not `prior − decision`.
 
   On a GPU shape, host CPU and memory up to the per-GPU share are free; beyond
   that share, they strand GPUs and pay for them.
@@ -672,7 +867,7 @@ In order of authority:
    The total over the pod, job or group is checked, not just each unit.
 4. **Floor.** Platform minimums, plus the **size-scaled floor**: the largest
    measured peak among the last K (5) successful same-digest runs, × `scale`,
-   × 1.05.
+   × that record's S3(b) headroom (§2.3: by resolution and digest).
 5. **Trust region** (memory and GPU memory only). At most `max_step_down`
    (default 2) cells below the **anchor**. The anchor is the smallest
    `requested` among the last K (5) same-digest `Succeeded` records with trust
@@ -755,6 +950,7 @@ Off by default. With `exploration = ε` (≤ 0.05), incompressible axes go one c
 ```
 {prefix}/v1/runs/{tenant}/{key-hash}/{ulid}.json        immutable shards (one per record)
 {prefix}/v1/decisions/{tenant}/{date}/{ulid}.json
+{prefix}/v1/attempts/{tenant}/{key-hash}/{invocation-hash}.json   attempt records and ladder leases (§7.2); expire after 7 d
 {prefix}/v1/latest/{tenant}/{key-hash}.json             pointer: last K records inline + watermark ULID
 {prefix}/v1/breakers/{scope}.json
 {prefix}/v1/control/mode.json
@@ -796,9 +992,14 @@ or per-host location demotes enforce to recommend, with a warning.
 
 | level | meaning | used for |
 |---|---|---|
-| `Verified` | written by a trusted component: the watcher, an importer reading platform accounting (`sacct`, Prometheus, `flyte.remote`) | everything |
+| `Verified` | written by a trusted component: the watcher, an importer reading platform accounting (`sacct`, Prometheus, `flyte.remote`), **when the record's tenant comes from the platform's authenticated identity** (namespace, `submit_uid`, CloudTrail `userIdentity`, Modal workspace) | everything |
 | `Authenticated` | written with credentials whose write access is limited to that tenant's prefix (per-tenant IAM on the object-store prefix, or a per-tenant postgres role) | everything |
 | `Unverified` | anything else: self-reports with shared credentials | stored and shown; excluded from floors, trust-region anchors and S3(b), unless the operator sets `history.allow_unverified_for_reductions = true` |
+
+An importer that can attribute a record to a tenant only through
+caller-chosen data (job names, tags, an account-wide default) writes it as
+`Unverified`: any principal in the account could otherwise plant low peaks
+under another team's key (aws.md §8).
 
 Cross-tenant poisoning needs write access to another tenant's prefix, which
 per-tenant credentials prevent. Within a tenant, a workload's history is as
@@ -816,6 +1017,8 @@ Each platform document gives its aggregation formulas:
 - flyte.md §8: child-side cgroup measurement; parent-side status;
   `flyte.remote` backfill.
 - ray.md §6.
+- aws.md §5, modal.md §5, launchers.md §1.5 and §2.3, orchestrators.md §2.6
+  and §3.5, managed-ml.md.
 
 All records are deduplicated on `(key, invocation_id, attempt, source)`.
 
@@ -876,11 +1079,15 @@ rightsizer-history     HistoryStore; object-store, sqlite; postgres behind a fea
 rightsizer-plugin      adapter traits, plugin protocol types and client (no server)
 rightsizer-k8s         K8s adapter, webhook, watcher, Prometheus importer (kube-rs)
 rightsizer-slurm       Slurm adapter, sbatch wrapper, tokens, sacct importer
+rightsizer-cloud       shape catalogs and price importers; AWS, GCP, Azure, Modal, Databricks history importers (features: aws, gcp, azure, modal, databricks)
 rightsizer-cli         `rightsize`: CLI, daemon (plugin protocol server), all adapters
 rightsizer-py          PyO3 module: core + features + estimators + history(object-store, sqlite) — no kube-rs, no postgres
 ```
 
-The Ray adapter is Python (ray.md). KubeRay is part of `rightsizer-k8s`.
+The Ray, Modal, SkyPilot, dstack, Metaflow and Airflow adapters are Python
+(they run inside those platforms' Python processes) and call `_core` for
+decisions. The AWS adapter's decision logic is Rust (`rightsizer-cloud`), with
+the botocore hook in Python. KubeRay is part of `rightsizer-k8s`.
 
 ### 10.2 Python distributions
 
@@ -889,6 +1096,14 @@ The Ray adapter is Python (ray.md). KubeRay is part of `rightsizer-k8s`.
 | `rightsizer-runtime` | pure Python: policy model, measurement (cgroup, NVML via `pynvml` if present), `RunRecord` writer (through `flyte.storage` or `fsspec`), Flyte and Ray child-side code | `py3-none-any` |
 | `rightsizer` | depends on `rightsizer-runtime`; native module `rightsizer._core` (decisions, features, estimators, store reads); `rightsizer.flyte`, `rightsizer.ray`, `rightsizer.serve`, `rightsizer.export` | abi3 for CPython ≥ 3.10: manylinux2014 x86_64 and aarch64, macOS arm64 and x86_64. Later: musllinux, Windows, free-threaded `cp313t` |
 | `rightsizer-cli` | the `rightsize` binary as a wheel (maturin `bindings = "bin"`) | per platform |
+| `metaflow-rightsizer` | the `metaflow_extensions.rightsizer` namespace package (Metaflow requires extensions to be their own distribution); depends on `rightsizer` | `py3-none-any` |
+
+Integration modules ship inside `rightsizer` (`rightsizer.aws`, `.modal`,
+`.skypilot`, `.dstack`, `.airflow`, `.gcp`, `.azureml`), with extras that pull
+in only the client libraries they need (`rightsizer[aws]` → `boto3`,
+`rightsizer[modal]` → `modal`, …). `rightsizer-runtime` carries the
+`rightsizer_aws.pth` start-up hook, which does nothing unless
+`RIGHTSIZER_AWS_INSTALL=1` (aws.md §2.1).
 
 - Any process that **makes decisions** needs `rightsizer`, with a wheel for its
   platform. In Flyte that is every task that calls a rightsizable task. Leaf
@@ -951,16 +1166,24 @@ rightsize recommend  [-p PLATFORM] FILE|-                decisions for a submiss
 rightsize apply      FILE|- [-o FILE] [--diff] [--watch] rewrite (mode=enforce under §2.3); --watch resubmits on OOM (Ladder)
 rightsize explain    FILE|- | --decision ID              distributions, cost table, constraints, holds, advisories
 rightsize shadow     [--tenant T|-n NS|--key K] [--since 14d] [--format html]   savings / would-fail / readiness (§12.2)
-rightsize history    import k8s|slurm|flyte|ray [...] | show KEY | export --parquet | compact
+rightsize history    import k8s|slurm|flyte|ray|aws|modal|dstack|vertex|azureml|databricks [...] | show KEY | export --parquet | compact
+rightsize audit      PLATFORM [--since 30d] [--format text|json|html]    read-only waste and risk report from platform history (§12.3)
+rightsize suggest    PATH... [--write | --pr]             resource edits to code and config from history (§12.4)
+rightsize mcp                                             MCP server for coding agents (§12.5)
 rightsize outcome    KEY --status S [--memory-peak Q]    manual outcome record
 rightsize breaker    status | trip [--fleet|KEY] | reset [KEY]
 rightsize control    mode-ceiling [off|observe|recommend|enforce]
 rightsize serve      [--socket PATH | --listen ADDR]     daemon (plugins.md §3)
 rightsize webhook    serve | manifests | rotate-key       kubernetes.md
 rightsize k8s        restore -f FILE|-                    reverse webhook mutations from the signed prior annotation
-rightsize slurm      sbatch ARGS... | install [--disable] | keygen | rotate-key
+rightsize slurm      sbatch [--watch] ARGS... | install [--disable] | keygen | rotate-key
 rightsize ray        submit -- ENTRYPOINT
-rightsize flyte      run ... | deploy [--restore] ...
+rightsize aws        run -- CMD | batch submit [--wait] ARGS... | catalog refresh | reconcile
+rightsize metaflow   reconcile
+rightsize databricks reconcile | catalog refresh          (M7)
+rightsize vertex     reconcile | catalog refresh          (M7)
+rightsize <platform> catalog refresh                      rebuild a shape catalog from provider APIs (§5.8)
+rightsize flyte      run ... | deploy [--restore] ... | reconcile
 rightsize plugin     list | check NAME
 rightsize config     show | validate
 ```
@@ -1001,6 +1224,81 @@ etl.clean                  412  16Gi        3Gi                  41.2k GiB·h ($
 train.finetune              38  64Gi        48Gi                 2.1k GiB·h ($310)    1 / 38 (?)  ladder-only
 embed.batch               9,870 8Gi         4Gi                  88.0k GiB·h ($4.0k)  0 / 9,870   ready
 ```
+
+### 12.3 `rightsize audit`
+
+The first thing a new user runs, on any platform, with read-only credentials
+and nothing installed on the platform:
+
+```
+$ rightsize audit aws --since 30d --format html
+```
+
+- It runs the platform's importer (`history import`) into a temporary local
+  store, then replays decisions **counterfactually**: each past run is decided
+  as of its start time, using only runs that **completed** before it started,
+  by the in-process estimators (no data leaves the machine unless a remote
+  estimator is configured, §11).
+- The replay is a **recommend-mode steady state**, not a simulation of
+  enforcement: history was produced at the prior, so the trust-region anchor
+  stays at the prior and convergence below it is not credited. Breakers are
+  simulated (a would-fail run stops later would-saves for that key until the
+  recovery rule would have reset it), ladder retries are priced, and savings
+  are reported as an interval. On the same history snapshot and
+  configuration, audit and `shadow` give the same decisions.
+- It reports what `shadow` reports (§12.2): would-save in dollars at the
+  platform's prices, would-fail, holds, advisories (GPU type and count,
+  walltime, prior quality) and readiness per key, plus the **integration tier**
+  each key could reach on that platform (plugins.md §1.1).
+- Platforms: everything with an importer (`history import` list in §12.1);
+  for platforms without per-run memory metrics, the report covers status,
+  duration and GPU advisories only and says so.
+
+### 12.4 `rightsize suggest`
+
+Resource edits proposed as code changes, for platforms where resources live
+in code or config and for teams that want human review before anything
+changes:
+
+- **Finds literal resource values** with real parsers and edits them as
+  minimal text edits (plugins.md `Patch::TextEdits`):
+  - Python decorators and calls: Flyte `Resources`/`TaskEnvironment`, Modal
+    `@app.function`, Ray `@ray.remote`, Metaflow `@resources`/`@kubernetes`/`@batch`;
+  - YAML: Kubernetes manifests and Helm values, SkyPilot and dstack tasks,
+    Databricks bundles, Azure ML jobs, compiled KFP IR;
+  - JSON: SageMaker Pipelines definitions, Step Functions, CloudFormation.
+  Non-literal values (variables, parameters, templates) are never edited; they
+  get a comment in the report instead.
+- **Matches each site to a workload key** through the platform's key rules
+  (for example `flow/step`, `{app}.{function}`, a SageMaker `base_job_name`).
+- **Proposes** increases where history shows OOMs or predictions exceed the
+  prior, and reductions only where S3(b) holds, with `scale` from the p90 of
+  recent input sizes (§7.4, input-independent decisions). A merged edit
+  outlives breakers and the mode ceiling, so:
+  - reductions are proposed only while `mode_ceiling` is `enforce` and no
+    breaker covers the key;
+  - each edited value carries a marker comment (or, in JSON, a sibling
+    annotation where the format allows one) with the origin prior and the
+    decision id, so attribution stays relative to what the author wrote
+    (§2.3 S5) and later runs never treat the edit as the author's prior;
+  - when a breaker opens for a key with a merged reduction, the next scheduled
+    run opens a **revert** pull request restoring the origin prior.
+- `--pr` opens a pull request with the explanation table; the
+  `rightsizer-action` GitHub Action runs it on a schedule.
+
+### 12.5 MCP server
+
+`rightsize mcp` serves the Model Context Protocol over stdio so coding agents
+can size workloads while they write them. Tools: `estimate` (code, input URIs
+or sizes, platform → resources and explanation), `explain` (a decision id or
+key), `audit` (platform, window → summary). It is read-only: it never writes
+history and never enforces, and it uses the local configuration and store
+credentials.
+
+Agents write the answer into code, where it persists, so `estimate` returns
+what **enforce** would apply (the `applied` spec with S3 holds), not
+`recommended`. Reductions that S3 does not yet allow are returned separately,
+marked "not earned: do not hard-code".
 
 ## 13. Operations
 
@@ -1062,6 +1360,9 @@ A `PrometheusRule` and a Grafana dashboard ship in `deploy/`. They alert on:
   increases-only, so the kill switch always holds.
 - **Slurm:** `rightsize slurm install --disable` removes the table and
   short-circuits both Lua scripts.
+- **Client-side hooks** (AWS, Modal, SkyPilot, dstack, Airflow, Metaflow) read
+  `mode_ceiling` like every other client. Edits merged from `rightsize suggest`
+  are ordinary code changes and are reverted with the version control system.
 
 ## 14. Security
 
@@ -1092,10 +1393,14 @@ tuner's scorer replays rightsizer's decisions.
 | | scope | exit criterion |
 |---|---|---|
 | **M0** core | types, units, grids, normalization, cost model, constraints, `rules-sized` / `history-peak` / `prior`, trees/1 evaluator and exporters, object-store and sqlite stores (compaction, pointers), breakers, mode ceiling, CLI `recommend` / `explain` / `shadow` on JSON contexts | rightsizer's decision rule, fed the tuner's oracle demands, reproduces the tuner's scorer costs on the k8s-2 rows within 1%; `rules-sized` reproduces the tuner's `rules-sized` regret within 1 point; < 5 ms per decision |
+| **A** adoption (after M0, in parallel with M1) | the importer and catalog half of `rightsizer-cloud` (AWS and Modal catalogs, prices, importers); `rightsize audit` for Kubernetes (Prometheus), Slurm (`sacct`), AWS (SageMaker, Batch, CloudWatch) and Modal; HTML report; `rightsize suggest` for Kubernetes YAML and Flyte/Ray literals (other key rules arrive with their milestones); `rightsize mcp` | a 30-day audit of a real AWS account finishes in < 10 min with read-only credentials; counterfactual decisions equal `shadow`'s on the same history |
 | **M1** Flyte | `rightsizer-runtime`, `rightsizer` wheels; Flyte task, action, run and environment levels; child-side measurement; `flyte.remote` backfill; escalation; deploy-time sizing and `reconcile`; the request-only-memory integration test (§16, open question 5) | demo workflows in `enforce` with 0 rightsizer-caused failures over 1,000 invocations; 10k-way `flyte.map` overhead < 2 ms per call once memoized |
 | **M2** K8s | CLI, webhook (Pods, Jobs, JobSets, PyTorchJob), watcher, Prometheus importer, postgres store, Helm chart, alerts, `k8s restore` | 2 weeks shadow on a real cluster with join ratio ≥ 0.95; webhook p99 < 100 ms |
 | **M3** plugins | plugin protocol and daemon; Slurm (wrapper, `cli_filter`, `job_submit` token verification); Ray (functions, actors, Ray Data, Jobs); KubeRay, TrainJob, Volcano; node agent; Arrow/HF readers | Slurm test cluster with HMAC verification and rotation; Ray 10k-task fan-out < 5 ms per task |
 | **M4** models | Estimator Protocol reference server; tuner models served; pool and gate with novelty/1; GPU type changes (opt-in); Slurm decision table | the gate beats `rules-sized` on the tuner's unseen split under rightsizer's decoder |
+| **M5** managed clouds I | AWS botocore hook, SageMaker (training, processing, transform, Pipelines deploy-time) and Batch (EC2, Fargate, EKS) adapters, caller ladders; `rightsizer_aws.pth` start-up hook, `rightsize aws reconcile`; Modal proxy and `measure` | SDK v2, SDK v3 and boto3 fixtures sized identically; 0 rightsizer-caused failures over 500 enforced SageMaker and Batch jobs; a 10k-input Modal `.map` stays within the variant budget |
+| **M6** launchers and orchestrators | `AttemptContext` and escalate-on-retry; SkyPilot policy; dstack plugin and importer; `metaflow-rightsizer` and `rightsize metaflow reconcile`; Airflow hooks and listener | fault injection (raise, hang, missing `_core`) leaves every SkyPilot, dstack and Airflow submission unchanged; an orchestrator retry after a reduced attempt escalates |
+| **M7** managed clouds II | Vertex AI custom jobs and KFP-on-Vertex (snap function derived from observed machine types), Azure ML (including Kubernetes instance types), Databricks single-node and GPU jobs; native KFP, Dagster and Prefect integrations | each service: audit on a real account, then 2 weeks of recommend with join ratio ≥ 0.9 |
 
 ## 16. Open questions
 
@@ -1110,3 +1415,15 @@ tuner's scorer replays rightsizer's decisions.
    limit = request) must be confirmed by an M1 integration test. Until then
    Flyte uses `memory_enforced = (prior memory has a limit)`: tasks declaring
    `memory=(req, lim)` get ladders (S3a); scalar-memory tasks get S3(b) only.
+6. **Modal ladder.** A caller ladder needs a per-input OOM status on the
+   client; today only the CLI-side `FunctionCallFetch` exposes it
+   (modal.md §6).
+7. **Vertex AI Pipelines machine matching** is undocumented; M7 derives it
+   from observed machine types (managed-ml.md §1.2).
+8. **Instance family moves** change CPU architecture, network and storage
+   (for example x86 to Graviton). v1 moves only within configured families;
+   whether a model can learn per-family speed factors is open.
+9. **Upstream asks** that would add ladders where there are none: resize on
+   recovery (SkyPilot managed jobs), a distinct OOM exception (Modal), retry
+   on algorithm errors with a different instance type (SageMaker), and a
+   memory-aware `retryStrategy` (AWS Batch).
