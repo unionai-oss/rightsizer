@@ -17,15 +17,15 @@ async def finetune(base_model: str, data: flyte.io.DataFrame) -> flyte.io.Dir: .
 ```
 
 ```bash
-rightsize history import flyte --project ml --domain development --since 30d   # bootstrap history
-rightsize shadow --tenant flyte://acme/ml/development --since 7d                # what enforcing would do
+rsz history import flyte --project ml --domain development --since 30d   # bootstrap history
+rsz shadow --tenant flyte://acme/ml/development --since 7d                # what enforcing would do
 ```
 
 ```python
 rs.flyte.with_runcontext(rightsize="enforce").run(main, cfg)   # enforce for this run; drop the argument to stop
 ```
 
-`recommend` changes nothing. Run `rightsize shadow`, then turn on enforce
+`recommend` changes nothing. Run `rsz shadow`, then turn on enforce
 per run, or per environment with `rightsize="enforce"`.
 
 ## 1. How Flyte v2 constrains the design
@@ -54,7 +54,7 @@ per run, or per environment with `rightsize="enforce"`.
 | **task** | `@rs.flyte.rightsize(...)` | makes one task rightsizable everywhere it is called, with a **definition policy** |
 | **environment** | `rs.flyte.RightsizedEnvironment(..., rightsize=...)` | makes every `@env.task` rightsizable with a shared definition policy; injects image and store configuration |
 | **action** | `rs.flyte.sized(task, ...)`; `with rs.flyte.policy(...)` | an **invocation policy** for one call (or one `flyte.map`) / for every call in a block |
-| **run** | `rs.flyte.with_runcontext(rightsize=...)`; `rs.flyte.run_context(...)`; `rightsize flyte run` | the invocation policy for the whole run; sizes the **root** action |
+| **run** | `rs.flyte.with_runcontext(rightsize=...)`; `rs.flyte.run_context(...)`; `rsz flyte run` | the invocation policy for the whole run; sizes the **root** action |
 
 Definition scope (task, environment) says **what may change**. Invocation
 scope (action, run) says **how aggressively, now**. Strings are shorthand:
@@ -129,7 +129,7 @@ async def finetune(base_model: str, data: flyte.io.DataFrame) -> flyte.io.Dir: .
 
 ### 4.1 `RightsizedTask`
 
-`rightsize` must be the **outermost** decorator; it raises `TypeError` on
+`rsz` must be the **outermost** decorator; it raises `TypeError` on
 anything that is not a `TaskTemplate`. It returns a `RightsizedTask`: a
 `@dataclass` subclass of the task's own template class. The subclass is created
 once per class and cached, so plugin task classes keep working and `_rebuild_as`
@@ -257,7 +257,7 @@ flyte.with_runcontext(custom_context=rs.flyte.run_context(mode="enforce")).run(m
 ```
 
 ```bash
-rightsize flyte run --mode enforce -- train.py main --cfg prod.yaml
+rsz flyte run --mode enforce -- train.py main --cfg prod.yaml
 # ≡ flyte run --custom-context rightsizer='{"v":1,"s":[{"mode":"enforce"}]}' train.py main --cfg prod.yaml
 ```
 
@@ -271,7 +271,7 @@ rightsize flyte run --mode enforce -- train.py main --cfg prod.yaml
 - The root has no parent to catch its failure, so root decisions use
   `PlatformRetry{same_size: retries, ladder: None}`: root reductions need
   S3(b) evidence.
-- `rightsize flyte run` passes only the policy. It does not size the root,
+- `rsz flyte run` passes only the policy. It does not size the root,
   because that would mean re-implementing the module loading and argument
   parsing of `flyte run`.
 
@@ -283,9 +283,9 @@ both of the above. They get **deploy-time sizing** (§6.3).
 ### 6.3 Deploy-time sizing
 
 ```bash
-rightsize flyte deploy train.py env           # or rs.flyte.deploy(env)
-rightsize flyte reconcile --schedule 5m       # singleton; required for deploy-time reductions
-rightsize flyte deploy --restore train.py env # redeploy from source with sizing disabled
+rsz flyte deploy train.py env           # or rs.flyte.deploy(env)
+rsz flyte reconcile --schedule 5m       # singleton; required for deploy-time reductions
+rsz flyte deploy --restore train.py env # redeploy from source with sizing disabled
 ```
 
 1. For each task in the environment, compute an **input-independent**
@@ -311,13 +311,13 @@ Rules:
   deploy does not serialize it.)
 - **Reductions need `reconcile`.** A deployed spec keeps running after a
   breaker trips or `mode_ceiling` drops. Deploy-time reductions are therefore
-  applied only where `rightsize flyte reconcile` is scheduled. It is a singleton
+  applied only where `rsz flyte reconcile` is scheduled. It is a singleton
   (lease as in SPEC §8.1) that redeploys affected tasks at the prior within
   10 minutes of either event. Without it, deploy-time sizing is
   **increases-only**.
 - **Reusable environments are recommend-only in v1.** `override(resources=…)`
   raises on reusable tasks, and parents submit the module attribute's resources,
-  so a deploy-time size would not reach them. Instead, `rightsize shadow`
+  so a deploy-time size would not reach them. Instead, `rsz shadow`
   reports a suggested `resources=` for the environment.
 - Tasks without enough evidence deploy unchanged.
 
@@ -391,7 +391,7 @@ duration, attempt, status):
 
 ### 8.3 Backfill
 
-`rightsize history import flyte` walks `flyte.remote.Run.listall`,
+`rsz history import flyte` walks `flyte.remote.Run.listall`,
 `Action.listall` and `ActionDetails`. It reads:
 
 - requested resources from the task template proto (`container.resources`,

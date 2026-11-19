@@ -14,7 +14,7 @@ Every service here shares four properties with SageMaker:
    Azure Policy can only allow or deny. Databricks cluster policies can fix or
    default values per policy, not per job. So enforcement happens in the
    **client** (an SDK wrapper), in a **compiled spec** before it is submitted
-   (`rightsize apply`), or in **code review** (`rightsize suggest`).
+   (`rsz apply`), or in **code review** (`rsz suggest`).
 2. **Discrete machine types** (`RequestModel::Catalog`), except where noted.
 3. **No retry that changes size.** Ladders exist only as caller-owned waits or
    orchestrator retries (SPEC §7.2), as on AWS (aws.md §6). None of these
@@ -24,7 +24,7 @@ Every service here shares four properties with SageMaker:
    the coarse-resolution rule (SPEC §2.3): headroom 1.5 and `2 × min_history`
    runs. Self-report (`python -m rightsizer.run -- CMD`) is the fast path.
 
-Every service gets tier A (`rightsize audit <service>`) first.
+Every service gets tier A (`rsz audit <service>`) first.
 
 ## 1. Google Vertex AI
 
@@ -69,7 +69,7 @@ Every service gets tier A (`rightsize audit <service>`) first.
 - That matching algorithm is not documented. Until M7 derives it from observed
   `machine_type`s in pipeline job details, KFP-on-Vertex is **recommend only**.
 - Enforce point (M7): rewrite the compiled pipeline IR YAML
-  (`deploymentSpec.executors.*.container.resources`) with `rightsize apply`
+  (`deploymentSpec.executors.*.container.resources`) with `rsz apply`
   before `PipelineJob.submit()`; deploy-time rules (increases only without
   `reconcile`).
 
@@ -107,7 +107,7 @@ metric is documented: tier A and R only.
     none is given; `queue_settings.job_tier` is Standard or Spot.
 - **Enforce point:** `rs.azureml.sized(ml_client)` proxies
   `ml_client.jobs.create_or_update(job)` and edits `job.resources` (and each
-  pipeline step's `resources`); `rightsize apply` rewrites job YAML
+  pipeline step's `resources`); `rsz apply` rewrites job YAML
   (`commandJob.schema.json`). An azure-core per-call pipeline policy that
   would cover every client is a later option (verify M7).
 - **Outcomes:** Azure Monitor workspace metrics at PT1M with a `RunId`
@@ -142,7 +142,7 @@ metric is documented: tier A and R only.
   `job_clusters[].job_cluster_key`); serverless jobs have no resource knobs;
   serverless GPU compute ("AI Runtime") selects an accelerator
   (`hardware_accelerator`, e.g. `GPU_8xH100`; enum values verify M7).
-- **Enforce point:** `rightsize apply` / `rightsize suggest` on bundle YAML
+- **Enforce point:** `rsz apply` / `rsz suggest` on bundle YAML
   (`databricks.yml`: `resources.jobs.*.job_clusters`,
   `tasks[].new_cluster`) and on Jobs API JSON. Both are deploy-time: increases
   only, unless a `reconcile` job is scheduled (as flyte.md §6.3), and `suggest`

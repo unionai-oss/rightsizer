@@ -66,7 +66,7 @@ class Train(FlowSpec):
     def train(self): ...
 ```
 
-Org-wide with no code change: add `rightsize` to `METAFLOW_DEFAULT_DECOSPECS`
+Org-wide with no code change: add `rsz` to `METAFLOW_DEFAULT_DECOSPECS`
 (`metaflow_config.py:350`) in the Metaflow config the platform team
 distributes. Setting that variable **replaces** the decospecs that installed
 extensions toggle on (`metaflow_config.py:765-767`), so the value must keep
@@ -119,7 +119,7 @@ not decorated twice (`decorators.py:771-775`).
 | how the flow runs | decision point | granularity | ladder |
 |---|---|---|---|
 | `python flow.py run` (local runtime), with `--with kubernetes`, `--with batch`, or decorators | `runtime_step_cli`, per task attempt | per task (each `foreach` split is a task) | escalate-on-retry from `retry_count` (§1); S3(a) when `@retry(times ≥ max_steps)` |
-| `argo-workflows create`, `step-functions create`, `airflow create` | `step_init` during the deploy command; resources are baked into the template (`argo_workflows.py:2502`) | per deploy | none; deploy-time rules: increases only unless `rightsize metaflow reconcile` is scheduled (as flyte.md §6.3) |
+| `argo-workflows create`, `step-functions create`, `airflow create` | `step_init` during the deploy command; resources are baked into the template (`argo_workflows.py:2502`) | per deploy | none; deploy-time rules: increases only unless `rsz metaflow reconcile` is scheduled (as flyte.md §6.3) |
 | Argo-deployed flows on Kubernetes, at run time | the Kubernetes webhook, keyed from Metaflow's pod annotations (`metaflow/flow_name`, `metaflow/step_name`, `metaflow/attempt`: `kubernetes.py:673-680` for jobs, `:384-390` for JobSets, `argo_workflows.py:2929-3009` for Argo, where `attempt` is `"{{retries}}"`) | per pod | webhook rules (kubernetes.md) |
 
 `@rightsize` running at deploy time stamps the template with the
@@ -256,7 +256,7 @@ are sized.
 
 | orchestrator | v1 coverage | native integration (later) |
 |---|---|---|
-| **Kubeflow Pipelines v2** | Kubernetes webhook (pods via Argo) | `set_memory_limit`, `set_cpu_request`, `set_accelerator_type` and friends (not `set_gpu_limit`) accept a `PipelineChannel` (`kfp/dsl/pipeline_task.py:448-730`), so a `rightsize` component can compute resources at run time and feed downstream tasks. On Vertex AI Pipelines, see [managed-ml.md](managed-ml.md) §1.2. M7. |
+| **Kubeflow Pipelines v2** | Kubernetes webhook (pods via Argo) | `set_memory_limit`, `set_cpu_request`, `set_accelerator_type` and friends (not `set_gpu_limit`) accept a `PipelineChannel` (`kfp/dsl/pipeline_task.py:448-730`), so a `rsz` component can compute resources at run time and feed downstream tasks. On Vertex AI Pipelines, see [managed-ml.md](managed-ml.md) §1.2. M7. |
 | **Dagster** | Kubernetes webhook; step pods carry `dagster/job` and `dagster/op` labels, the latter holding the step key (`dagster_k8s/executor.py:338-342`) | a `K8sStepHandler` subclass overriding `_get_container_context` (`executor.py:254-277`, private API) for per-step enforcement with asset and partition keys. M7. |
 | **Prefect** | Kubernetes webhook; resources are per flow run, not per task | `run_deployment(..., job_variables=)` wrapper (`workers/base.py:300-311` merges deployment then flow-run variables). M7. |
 | **Argo Workflows** | Kubernetes webhook | template-level keys from workflow labels; nothing beyond the webhook planned. |

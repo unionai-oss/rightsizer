@@ -8,21 +8,21 @@ Status: **draft v2**. Core concepts: [SPEC.md](SPEC.md). Plugin contract:
 ```bash
 helm install rightsizer rightsizer/rightsizer --set history.postgres.url=$PG_URL   # webhook, watcher, alerts
 kubectl label ns ml rightsizer.io/enabled=true          # default mode: recommend (no resource changes)
-rightsize history import k8s --namespace ml --since 30d # backfill from Prometheus
-kubectl rightsize shadow -n ml --since 14d              # savings / would-fail / readiness
+rsz history import k8s --namespace ml --since 30d # backfill from Prometheus
+kubectl rsz shadow -n ml --since 14d              # savings / would-fail / readiness
 kubectl label ns ml rightsizer.io/mode=enforce --overwrite
-rightsize control mode-ceiling recommend                # global kill switch, if ever needed
+rsz control mode-ceiling recommend                # global kill switch, if ever needed
 ```
 
 ## 1. Surfaces
 
 | surface | users | modes | retry semantics |
 |---|---|---|---|
-| `rightsize recommend` / `apply` / `explain` / `shadow` (also `kubectl rightsize …`) | developers, CI, GitOps | recommend; enforce (rewrites files) | `same_size = backoffLimit`; `apply --watch` adds a ladder |
-| **Mutating admission webhook** (`rightsize webhook serve`) | platform teams | observe, recommend, enforce | `same_size = backoffLimit`; no ladder |
+| `rsz recommend` / `apply` / `explain` / `shadow` (also `kubectl rsz …`) | developers, CI, GitOps | recommend; enforce (rewrites files) | `same_size = backoffLimit`; `apply --watch` adds a ladder |
+| **Mutating admission webhook** (`rsz webhook serve`) | platform teams | observe, recommend, enforce | `same_size = backoffLimit`; no ladder |
 | **Watcher** (same deployment, leader-elected) | — | — | — |
 | **Node agent** (optional DaemonSet, M3) | — | — | — |
-| `rightsize history import k8s` | backfill | — | — |
+| `rsz history import k8s` | backfill | — | — |
 
 ## 2. Units, groups, keys
 
@@ -104,7 +104,7 @@ webhooks:
   - On reinvocation (for example after a mesh sidecar injection), only units not
     yet sized are recomputed.
   - An unsigned or invalid `rightsizer.io/prior` is ignored and overwritten.
-  - `rightsize k8s restore` uses the signed prior to revert.
+  - `rsz k8s restore` uses the signed prior to revert.
 - **Dry-run.** Decisions are computed but not recorded.
 - **Deployment** (Helm chart):
   - 2+ replicas, a PodDisruptionBudget, cert-manager certificates with caBundle
@@ -186,7 +186,7 @@ Job-level mutation makes the live object differ from Git. Two options:
 
 - add `ignoreDifferences` on `/spec/template/spec/containers/*/resources` (and
   the CRD equivalents; the chart docs ship snippets);
-- run `rightsize apply` in CI and keep the webhook in `recommend` for those
+- run `rsz apply` in CI and keep the webhook in `recommend` for those
   namespaces.
 
 Self-healing an unsuspended `batch/v1` Job's template fails, because the
@@ -239,7 +239,7 @@ Inputs are declared with the annotation
 - **Quota:** ResourceQuota per namespace (30 s cache) and the reservation ledger
   (§3.4). Kueue ClusterQueues and ResourceFlavors.
 - **Retry:** `same_size = backoffLimit`. A ladder exists only with
-  `rightsize apply --watch`, which resubmits a renamed Job one step up on
+  `rsz apply --watch`, which resubmits a renamed Job one step up on
   `OOMKilled`.
 - **CPU window:** the configured source's resolution. The node agent gives 1 s;
   Prometheus gives its scrape interval (≥ 15 s recommended).
@@ -304,5 +304,5 @@ The webhook and watcher ServiceAccount is granted:
 - **ServiceAccount tokens:** created only through RoleBindings in namespaces that
   opt in to `input_credentials = "pod-service-account"`;
 - **no write access to user objects:** mutation happens through admission
-  responses. The exception is `rightsize k8s restore`, which runs with the
+  responses. The exception is `rsz k8s restore`, which runs with the
   invoking user's credentials.

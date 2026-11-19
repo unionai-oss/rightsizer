@@ -14,9 +14,9 @@ def embed(shard_uri: str) -> str: ...
 ```
 
 ```bash
-rightsize ray submit -- python job.py                  # propagates store + policy via runtime_env
-rightsize shadow --tenant ray://team-a/cluster-1 --since 7d
-RIGHTSIZER__POLICY__MODE=enforce rightsize ray submit -- python job.py
+rsz ray submit -- python job.py                  # propagates store + policy via runtime_env
+rsz shadow --tenant ray://team-a/cluster-1 --since 7d
+RIGHTSIZER__POLICY__MODE=enforce rsz ray submit -- python job.py
 ```
 
 ## 1. What Ray resources mean
@@ -121,7 +121,7 @@ supported: `ray_remote_args_fn` takes no arguments and is deprecated
 
 ## 5. Ray Jobs and KubeRay
 
-- **`rightsize ray submit [--address …] -- python train.py`** sets `RIGHTSIZER__*`
+- **`rsz ray submit [--address …] -- python train.py`** sets `RIGHTSIZER__*`
   in `runtime_env.env_vars`, so the job's `rs.ray` functions find the store and
   the policy. It also sizes the driver (`entrypoint_num_cpus`, `_num_gpus`,
   `_memory`). Drivers are usually light, so the environment propagation is the

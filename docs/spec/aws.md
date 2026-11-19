@@ -14,8 +14,8 @@ plugin ([slurm.md](slurm.md)).
 ## 0. Day one
 
 ```bash
-rightsize audit aws --since 30d                  # tier A: read job history + CloudWatch, print waste and advisories; changes nothing
-rightsize aws run -- python launch_training.py   # tier R: same program, every CreateTrainingJob/SubmitJob gets a recommendation on stderr
+rsz audit aws --since 30d                  # tier A: read job history + CloudWatch, print waste and advisories; changes nothing
+rsz aws run -- python launch_training.py   # tier R: same program, every CreateTrainingJob/SubmitJob gets a recommendation on stderr
 ```
 
 ```python
@@ -54,15 +54,15 @@ rs.aws.install()                                  # tier R/E: botocore hook for 
 
 | surface | tier (plugins.md §1.1) | coverage |
 |---|---|---|
-| `rightsize audit aws` | A | any job, however it was submitted |
-| `rs.aws.install()` / `rightsize aws run -- CMD` | R, E | any boto3 client in that Python process: SageMaker SDK v2 `Estimator`/`Processor`/`Transformer`, v3 `ModelTrainer`, raw boto3, Pipelines `CreatePipeline`/`UpdatePipeline`, Batch `SubmitJob`, and orchestrators that call boto3 (Airflow AWS provider, Metaflow `@batch`) |
-| `rs.aws.sagemaker.run(...)`, `rightsize aws batch submit --wait` | R, E, L (caller-owned ladder) | jobs submitted through these helpers |
-| `rightsize suggest` on CDK/CloudFormation/Terraform/Pipelines JSON | R (as a pull request) | jobs defined as code |
+| `rsz audit aws` | A | any job, however it was submitted |
+| `rs.aws.install()` / `rsz aws run -- CMD` | R, E | any boto3 client in that Python process: SageMaker SDK v2 `Estimator`/`Processor`/`Transformer`, v3 `ModelTrainer`, raw boto3, Pipelines `CreatePipeline`/`UpdatePipeline`, Batch `SubmitJob`, and orchestrators that call boto3 (Airflow AWS provider, Metaflow `@batch`) |
+| `rs.aws.sagemaker.run(...)`, `rsz aws batch submit --wait` | R, E, L (caller-owned ladder) | jobs submitted through these helpers |
+| `rsz suggest` on CDK/CloudFormation/Terraform/Pipelines JSON | R (as a pull request) | jobs defined as code |
 
 Not covered for enforcement: the AWS console, the AWS CLI, other-language SDKs,
 Step Functions service integrations (`sagemaker:createTrainingJob.sync`,
 `batch:submitJob.sync`) — the state machine calls the API itself. These get
-tier A, and `rightsize suggest` where the definition is in a repository.
+tier A, and `rsz suggest` where the definition is in a repository.
 
 ### 2.1 The botocore hook
 
@@ -99,7 +99,7 @@ Registration:
   caches clients (`sagemaker-core/src/sagemaker/core/utils/utils.py:420-498`),
   and a client created earlier is never hooked. `install()` warns when that
   cache is already populated. aiobotocore (async) clients are not covered.
-- `rightsize aws run -- CMD` sets `RIGHTSIZER_AWS_INSTALL=1`. The
+- `rsz aws run -- CMD` sets `RIGHTSIZER_AWS_INSTALL=1`. The
   `rightsizer-runtime` wheel ships a `.pth` file whose one line imports
   `rightsizer.aws` and calls `install()` inside a `try`/`except` when that
   variable is set (the pattern `coverage` uses with `COVERAGE_PROCESS_START`);
@@ -165,7 +165,7 @@ spot training, warm pool).
   `DescribeInstanceTypes` for the matching EC2 type (`ml.g5.2xlarge` →
   `g5.2xlarge`); that mapping is checked per family by a CI job
   (verify M5) and the result is shipped as `catalog/aws-sagemaker.json`,
-  refreshed weekly. `rightsize aws catalog refresh` rebuilds it locally.
+  refreshed weekly. `rsz aws catalog refresh` rebuilds it locally.
 - **Usable memory.** The container gets the instance minus the SageMaker agent
   and OS: the shape's `reserved` (SPEC §5.8), starting at 5% of instance
   memory and calibrated per family from successful runs. The runtime overhead
@@ -246,7 +246,7 @@ adapter sizes each Training, Processing and Transform step's arguments, as
 Flyte deploy-time sizing does (flyte.md §6.3):
 
 - input-independent: `scale` uses the p90 of recent input bytes (SPEC §7.4);
-- **increases only**, unless `rightsize aws reconcile` is scheduled (the same
+- **increases only**, unless `rsz aws reconcile` is scheduled (the same
   rule as flyte.md §6.3, so deploy-time reductions cannot outlive breakers and
   the mode ceiling);
 - `PipelineDefinitionS3Location` is out of scope in v1: recommend only. The
@@ -308,7 +308,7 @@ sends `OutOfMemoryError*` to `EXIT`, OOM retries are 0.
 
 ## 5. Outcomes
 
-### 5.1 Importers (`rightsize history import aws`, also used by `audit`)
+### 5.1 Importers (`rsz history import aws`, also used by `audit`)
 
 | source | gives | resolution | censoring |
 |---|---|---|---|
@@ -359,7 +359,7 @@ AWS:
 | path | driver | S3(a) available |
 |---|---|---|
 | `rs.aws.sagemaker.run(trainer_or_request, wait=True)` | **caller**: rightsizer owns the wait; on an OOM-class failure it submits `<name>-rs<k>` at the next step and returns the final job. Any other failure, including an unclassified one, is returned to the caller unchanged | yes |
-| `rightsize aws batch submit --wait` | caller | yes |
+| `rsz aws batch submit --wait` | caller | yes |
 | `rs.aws.install()` under Airflow (the listener publishes the attempt context: orchestrators.md §3.2) | **orchestrator**: escalate-on-retry in the hook | yes, when `max_attempts` is known and the task's retries ≥ `max_steps` |
 | Metaflow `@batch` | **orchestrator**: escalate-on-retry in `@rightsize` itself; the hook only adds the marker (orchestrators.md §2.2) | yes, with `@retry(times ≥ max_steps)` |
 | `rs.aws.install()` alone (SDK `wait=True` or fire-and-forget) | none | no: reductions need S3(b) |

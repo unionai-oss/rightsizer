@@ -23,7 +23,7 @@ plugins: ["rightsizer"]
 ```
 
 ```bash
-rightsize shadow --tenant sky://ml-workspace/alice --since 14d
+rsz shadow --tenant sky://ml-workspace/alice --since 14d
 ```
 
 ## 1. SkyPilot
@@ -60,7 +60,7 @@ block every launch, which S1 forbids. Therefore:
   Its whole body runs inside the S1 guard: any error, or the decision budget
   (`[skypilot] decide_budget_ms = 1000`) expiring, returns the request
   unchanged. It talks to the decision engine in-process (`rightsizer` wheel)
-  or to a local daemon (`rightsize serve`) with that deadline.
+  or to a local daemon (`rsz serve`) with that deadline.
 - **Import is outside the guard.** SkyPilot imports the policy module in
   `_get_policy_impl` (`admin_policy_utils.py:71-79`) before the exception
   wrapper runs, so an `ImportError` there blocks every launch. The module
