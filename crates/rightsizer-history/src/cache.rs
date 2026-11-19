@@ -19,6 +19,19 @@
 //!   [`CachedStore::new`] uses [`TokioClock`] (wall time anchored to tokio's
 //!   clock, so `tokio::time::pause`/`advance` move it too).
 //!
+//! - **Single flight (history):** concurrent misses on one key share one read,
+//!   and the read runs as its own task: a caller that gives up (an expired
+//!   decision budget) does not cancel it, so the cache still fills and the
+//!   next decision is a hit. An invalidation while a read is in flight keeps
+//!   its (possibly stale) result out of the cache.
+//! - **Refresh after invalidation:** [`CachedStore::invalidate_key`] (the
+//!   engine calls it after every outcome, to see records other processes
+//!   wrote) marks the entry stale rather than dropping it. The next read
+//!   starts a refresh and waits up to [`REFRESH_WAIT`] for it; if the store is
+//!   slower, it answers from the stale entry (still within its TTL) and the
+//!   refresh fills the cache in the background. A fan-out whose outcomes keep
+//!   invalidating a key therefore never waits on a full history read.
+//!
 //! [`CachedStore`] also implements [`HistoryStore`] (reads go through the
 //! cache; an unavailable read is `StoreError::Unreachable`), so it can be
 //! used wherever a store is.
@@ -33,6 +46,13 @@ use rightsizer_core::breaker::{BreakerObjects, BreakerScope, Control, Reset, Tri
 use rightsizer_core::clock::{Clock, elapsed};
 use rightsizer_core::{AttemptRecord, Decision, RunRecord, RunStatus, WorkloadKey};
 use ulid::Ulid;
+
+/// How long a read of an invalidated key waits for its refresh before
+/// answering from the stale entry.
+pub const REFRESH_WAIT: Duration = Duration::from_millis(25);
+
+/// The generation slot bumped by [`CachedStore::invalidate`] (no key looks like this).
+const ALL_KEYS: &str = "\u{0}all";
 
 /// Wall time that follows tokio's clock: `Utc::now()` at construction plus
 /// the tokio time elapsed since (so a paused runtime's `advance` moves it).
@@ -204,6 +224,9 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
             f(&mut e.value);
         }
     }
+    fn contains(&self, k: &K) -> bool {
+        self.map.contains_key(k)
+    }
     fn remove(&mut self, k: &K) {
         self.map.remove(k);
     }
@@ -213,11 +236,20 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
 }
 
 /// A caching wrapper around any store.
+type RunsCache = Arc<Mutex<Lru<String, (Vec<RunRecord>, usize)>>>;
+type HistoryFlight = futures::future::Shared<futures::future::BoxFuture<'static, Result<Arc<Vec<RunRecord>>, String>>>;
+
 pub struct CachedStore {
     inner: Arc<dyn HistoryStore>,
     opts: CacheOptions,
     clock: Arc<dyn Clock>,
-    runs: Mutex<Lru<String, (Vec<RunRecord>, usize)>>,
+    runs: RunsCache,
+    /// In-flight history reads by key, with the key's invalidation generation.
+    inflight: Arc<Mutex<HashMap<String, (u64, HistoryFlight)>>>,
+    /// Bumped by every invalidation of a key (and of everything: the [`ALL_KEYS`] slot).
+    generations: Arc<Mutex<HashMap<String, u64>>>,
+    /// Keys invalidated since their entry was cached (served stale while refreshing).
+    stale: Arc<Mutex<std::collections::HashSet<String>>>,
     breakers: Mutex<HashMap<BreakerScope, (BreakerObjects, Stamp)>>,
     control: Mutex<Option<(Option<Control>, Stamp)>>,
 }
@@ -231,7 +263,10 @@ impl CachedStore {
     /// Wrap `inner`; TTLs run on `clock`.
     pub fn with_clock(inner: Arc<dyn HistoryStore>, opts: CacheOptions, clock: Arc<dyn Clock>) -> Self {
         CachedStore {
-            runs: Mutex::new(Lru::new(opts.capacity)),
+            runs: Arc::new(Mutex::new(Lru::new(opts.capacity))),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            generations: Arc::new(Mutex::new(HashMap::new())),
+            stale: Arc::new(Mutex::new(std::collections::HashSet::new())),
             inner,
             opts,
             clock,
@@ -250,11 +285,93 @@ impl CachedStore {
         self.runs.lock().map(|g| g.len()).unwrap_or(0)
     }
 
-    /// Drop one key's cached history.
+    /// Mark one key's cached history stale: the next read refreshes it (an
+    /// in-flight read started before this no longer fills the cache).
     pub fn invalidate_key(&self, key: &WorkloadKey) {
-        if let Ok(mut g) = self.runs.lock() {
-            g.remove(&key.to_string());
+        let k = key.to_string();
+        self.bump_generation(&k);
+        let present = self.runs.lock().map(|g| g.contains(&k)).unwrap_or(false);
+        if present && let Ok(mut st) = self.stale.lock() {
+            st.insert(k);
         }
+    }
+
+    /// Drop one key's cached history entirely.
+    pub fn forget_key(&self, key: &WorkloadKey) {
+        let k = key.to_string();
+        self.bump_generation(&k);
+        if let Ok(mut st) = self.stale.lock() {
+            st.remove(&k);
+        }
+        if let Ok(mut g) = self.runs.lock() {
+            g.remove(&k);
+        }
+    }
+
+    fn bump_generation(&self, k: &str) {
+        if let Ok(mut g) = self.generations.lock() {
+            *g.entry(k.to_string()).or_insert(0) += 1;
+        }
+        if let Ok(mut g) = self.inflight.lock() {
+            g.remove(k);
+        }
+    }
+
+    fn generation(gens: &Mutex<HashMap<String, u64>>, k: &str) -> u64 {
+        gens.lock().map(|g| g.get(k).copied().unwrap_or(0).wrapping_add(g.get(ALL_KEYS).copied().unwrap_or(0))).unwrap_or(0)
+    }
+
+    /// The shared read of `key` (joining one in flight, or starting it as its own task).
+    fn history_flight(&self, key: &WorkloadKey, k: &str, depth: usize) -> HistoryFlight {
+        use futures::FutureExt as _;
+
+        let Ok(mut g) = self.inflight.lock() else {
+            let inner = self.inner.clone();
+            let key = key.clone();
+            return async move { inner.runs(&key, depth).await.map(Arc::new).map_err(|e| e.to_string()) }.boxed().shared();
+        };
+        let generation = Self::generation(&self.generations, k);
+        if let Some((gen0, f)) = g.get(k)
+            && *gen0 == generation
+        {
+            return f.clone();
+        }
+        let (inner, runs, clock, inflight, gens, stale) = (
+            self.inner.clone(),
+            self.runs.clone(),
+            self.clock.clone(),
+            self.inflight.clone(),
+            self.generations.clone(),
+            self.stale.clone(),
+        );
+        let (key2, k2) = (key.clone(), k.to_string());
+        let read = async move {
+            let r = inner.runs(&key2, depth).await;
+            if let Ok(v) = &r
+                && Self::generation(&gens, &k2) == generation
+                && let Ok(mut c) = runs.lock()
+            {
+                c.put(k2.clone(), (v.clone(), depth), clock.now());
+                if let Ok(mut st) = stale.lock() {
+                    st.remove(&k2);
+                }
+            }
+            if let Ok(mut m) = inflight.lock()
+                && m.get(&k2).is_some_and(|(g0, _)| *g0 == generation)
+            {
+                m.remove(&k2);
+            }
+            r.map(Arc::new).map_err(|e| e.to_string())
+        };
+        let flight: HistoryFlight = match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                let task = h.spawn(read);
+                async move { task.await.unwrap_or_else(|e| Err(format!("history read task: {e}"))) }.boxed().shared()
+            }
+            Err(_) => read.boxed().shared(),
+        };
+        g.insert(k.to_string(), (generation, flight.clone()));
+        flight
     }
 
     /// The clock TTLs run on.
@@ -280,6 +397,13 @@ impl CachedStore {
 
     /// Drop everything cached.
     pub fn invalidate(&self) {
+        self.bump_generation(ALL_KEYS);
+        if let Ok(mut g) = self.inflight.lock() {
+            g.clear();
+        }
+        if let Ok(mut st) = self.stale.lock() {
+            st.clear();
+        }
         if let Ok(mut g) = self.runs.lock() {
             *g = Lru::new(self.opts.capacity);
         }
@@ -306,16 +430,21 @@ impl CachedStore {
             && elapsed(now, *at) < self.opts.history_ttl
             && (v.len() >= limit || v.len() < *fetched)
         {
+            let stale = self.stale.lock().map(|st| st.contains(&k)).unwrap_or(false);
+            if !stale {
+                return HistoryRead::Cached { records: self.scoped(v, limit), age: elapsed(now, *at) };
+            }
+            // Invalidated: refresh, but answer from the stale entry if the store is slow.
+            let depth = self.opts.depth.max(limit);
+            let flight = self.history_flight(key, &k, depth);
+            if let Ok(Ok(fresh)) = tokio::time::timeout(REFRESH_WAIT, flight).await {
+                return HistoryRead::Fresh(self.scoped(&fresh, limit));
+            }
             return HistoryRead::Cached { records: self.scoped(v, limit), age: elapsed(now, *at) };
         }
         let depth = self.opts.depth.max(limit);
-        match self.inner.runs(key, depth).await {
-            Ok(v) => {
-                if let Ok(mut g) = self.runs.lock() {
-                    g.put(k, (v.clone(), depth), self.clock.now());
-                }
-                HistoryRead::Fresh(self.scoped(&v, limit))
-            }
+        match self.history_flight(key, &k, depth).await {
+            Ok(v) => HistoryRead::Fresh(self.scoped(&v, limit)),
             Err(e) => {
                 tracing::warn!(error = %e, key = %key, "history read failed");
                 match cached {

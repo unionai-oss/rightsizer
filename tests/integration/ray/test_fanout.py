@@ -32,7 +32,6 @@ def _submit(f, n):
 
 def test_fanout_overhead(ray_session, store):
     ray = ray_session
-    import rightsizer as rs
     import rightsizer.ray as rr
     from rightsizer.ray import _remote
 
@@ -90,8 +89,8 @@ def test_fanout_overhead(ray_session, store):
         r["added_per_call_p50_ms"] = round(r["per_call_p50_ms"] - p["per_call_p50_ms"], 4)
         r["added_wall_per_task_ms"] = round((r["wall_s"] - p["wall_s"]) / N * 1e3, 4)
     m = e.metrics()
-    memo_hits = sum(float(l.rsplit(" ", 1)[1]) for l in m.splitlines()
-                    if l.startswith("rightsizer_decisions_total") and 'source="memo"' in l)
+    memo_hits = sum(float(ln.rsplit(" ", 1)[1]) for ln in m.splitlines()
+                    if ln.startswith("rightsizer_decisions_total") and 'source="memo"' in ln)
     time.sleep(1.5)  # last worker writes
     recs = run_records(store, "it.fanout")
     measured = [r for r in recs if r["key"].endswith("/it.fanout")]

@@ -66,7 +66,9 @@ def test_enforce_reduces_memory_after_trusted_history(ray_session, store):
     record("history_scoped", res)
     assert all(m == 2 * GiB for m in res["first_calls_memory"][:3])  # cold: held at the prior
     assert len(res["records"]) >= 4 and all(r["trust"] == "authenticated" for r in res["records"])
-    assert all(150 < r["peak_mib"] < 400 and r["censor"] == "exact" for r in res["records"])
+    # the first task on a worker is Exact; later ones on the reused worker are upper bounds (AtMost)
+    assert all(150 < r["peak_mib"] < 400 and r["censor"] in ("exact", "at_most") for r in res["records"])
+    assert res["records"][0]["censor"] == "exact"
     assert res["after_memory_assigned"] < 2 * GiB  # enforce reduced memory
     assert res["after_memory_state_api"] == res["after_memory_assigned"]
     assert rr.settings().trust == "authenticated"

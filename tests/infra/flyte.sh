@@ -23,6 +23,14 @@ API_PORT="${RSZ_IT_FLYTE_K8S_API_PORT:-26443}"   # host -> container 6443 (k8s A
 # endpoint http://localhost:30002 for signed URLs), so they map 1:1.
 CONSOLE_PORT=30080
 STORAGE_PORT=30002
+# The devbox's in-cluster registry listens on container port 30000, which `flyte
+# start devbox` publishes 1:1; host port 30000 belongs to the k3d `devbox` cluster
+# here. It is published on REGISTRY_PORT instead, the SDK config names
+# `localhost:REGISTRY_PORT` as the push registry (so the local image builder never
+# guesses `localhost:30000`), and a k3s registries.yaml mirror makes the node pull
+# the same names from its own registry.
+REGISTRY_PORT="${RSZ_IT_FLYTE_REGISTRY_PORT:-30500}"
+REGISTRIES_YAML="${STATE_DIR}/flyte-registries.yaml"
 KUBE_DIR="${STATE_DIR}/flyte-kube"
 CONFIG_DIR="${STATE_DIR}/flyte-devbox-config"
 export KUBECONFIG="${STATE_DIR}/${NAME}.kubeconfig"
@@ -41,12 +49,18 @@ cmd_up() {
     log "removing stale container ${NAME}"
     docker rm -f "$NAME" >/dev/null
   fi
-  require_ports_free "$API_PORT" "$CONSOLE_PORT" "$STORAGE_PORT"
+  require_ports_free "$API_PORT" "$CONSOLE_PORT" "$STORAGE_PORT" "$REGISTRY_PORT"
   docker image inspect "$IMAGE" >/dev/null 2>&1 || warn "$IMAGE not present; docker will pull it (~1.9 GB). $(disk_free)"
   docker volume inspect "$VOLUME" >/dev/null 2>&1 || docker volume create "$VOLUME" >/dev/null
   mkdir -p "$KUBE_DIR" "$CONFIG_DIR"
   rm -f "$KUBE_DIR/kubeconfig"
-  log "starting ${NAME} (${IMAGE}); ports: 127.0.0.1:${CONSOLE_PORT} (API/UI), 127.0.0.1:${STORAGE_PORT} (object store), 127.0.0.1:${API_PORT}->6443"
+  cat >"$REGISTRIES_YAML" <<EOF
+mirrors:
+  "localhost:${REGISTRY_PORT}":
+    endpoint:
+      - "http://localhost:30000"
+EOF
+  log "starting ${NAME} (${IMAGE}); ports: 127.0.0.1:${CONSOLE_PORT} (API/UI), 127.0.0.1:${STORAGE_PORT} (object store), 127.0.0.1:${REGISTRY_PORT}->30000 (image registry), 127.0.0.1:${API_PORT}->6443"
   docker run --detach --privileged \
     --name "$NAME" \
     --add-host host.docker.internal:host-gateway \
@@ -55,9 +69,11 @@ cmd_up() {
     --volume "${KUBE_DIR}:/.kube" \
     --volume "${CONFIG_DIR}:/var/lib/flyte/config" \
     --volume "${VOLUME}:/var/lib/flyte/storage" \
+    --volume "${REGISTRIES_YAML}:/etc/rancher/k3s/registries.yaml:ro" \
     --publish "127.0.0.1:${API_PORT}:6443" \
     --publish "127.0.0.1:${CONSOLE_PORT}:30080" \
     --publish "127.0.0.1:${STORAGE_PORT}:30002" \
+    --publish "127.0.0.1:${REGISTRY_PORT}:30000" \
     "$IMAGE" >/dev/null
   wait_until 120 "devbox kubeconfig" test -s "$KUBE_DIR/kubeconfig"
   sed -E "s#server: https://[^:]+:6443#server: https://127.0.0.1:${API_PORT}#" "$KUBE_DIR/kubeconfig" >"$KUBECONFIG"
@@ -65,13 +81,13 @@ cmd_up() {
   log "waiting for Flyte at http://localhost:${CONSOLE_PORT}/healthz (first start takes a few minutes)"
   wait_until 900 "Flyte devbox healthy" healthy
   write_config
-  ok "devbox up: FLYTECTL_CONFIG=${FLYTE_CONFIG}  KUBECONFIG=${KUBECONFIG}  UI http://localhost:${CONSOLE_PORT}/v2"
+  ok "devbox up: FLYTECTL_CONFIG=${FLYTE_CONFIG}  KUBECONFIG=${KUBECONFIG}  UI http://localhost:${CONSOLE_PORT}/v2  registry localhost:${REGISTRY_PORT}"
 }
 
 write_config() {
   [[ -n "$FLYTE_BIN" ]] || die "no flyte CLI (run tests/infra/python-env.sh up)"
   "$FLYTE_BIN" create config --endpoint "localhost:${CONSOLE_PORT}" --insecure \
-    --project flytesnacks --domain development --builder local \
+    --project flytesnacks --domain development --builder local --registry "localhost:${REGISTRY_PORT}" \
     --output "$FLYTE_CONFIG" --force >/dev/null
 }
 
@@ -85,7 +101,7 @@ cmd_down() {
 cmd_clean() {
   cmd_down
   docker volume rm "$VOLUME" >/dev/null 2>&1 && log "removed volume ${VOLUME}" || true
-  rm -rf "$KUBE_DIR" "$CONFIG_DIR" "$FLYTE_CONFIG"
+  rm -rf "$KUBE_DIR" "$CONFIG_DIR" "$FLYTE_CONFIG" "$REGISTRIES_YAML"
   ok "clean"
 }
 

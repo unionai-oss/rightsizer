@@ -22,7 +22,9 @@ import asyncio
 import dataclasses
 import logging
 import os
+import threading
 import time
+import weakref
 from dataclasses import field
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
@@ -44,7 +46,29 @@ OVERHEAD_MIB = ((0.5, 70.0), (0.9, 242.0))
 CPU_WINDOW_S = 60
 _RS_FIELD_NAMES = ("_rs_policy", "_rs_pins", "_rs_bypass", "_rs_invocation", "_rs_code", "_rs_measured")
 
+MAX_CONCURRENT_DECISIONS = 64
 _CLASS_CACHE: Dict[type, type] = {}
+_LIMITERS: "weakref.WeakKeyDictionary[Any, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+_SYNC_LIMITER = threading.BoundedSemaphore(MAX_CONCURRENT_DECISIONS)
+
+
+def _note(d: Decision, plan: Any, t0: float) -> None:
+    _eng.latencies_ms.append(1000 * (time.perf_counter() - t0))
+    if d.source.kind == "prior" and d.source.reason == "budget":
+        _eng.counters["prior_budget"] += 1
+    if plan.clamped:
+        _eng.counters["clamped_no_platform_state"] += 1
+    if _mode(d.mode) is Mode.ENFORCE and d.applied != d.prior.spec:
+        _eng.counters["enforced_changes"] += 1
+
+
+def _limiter() -> asyncio.Semaphore:
+    """One limiter per event loop (flyte.md §7: at most 64 decisions at once per parent process)."""
+    loop = asyncio.get_running_loop()
+    sem = _LIMITERS.get(loop)
+    if sem is None:
+        sem = _LIMITERS[loop] = asyncio.Semaphore(MAX_CONCURRENT_DECISIONS)
+    return sem
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -347,7 +371,15 @@ class RightsizedMixin:
             _eng.counters["fallbacks"] += 1
             return _fallback(plan.ctx, e, {"mode": plan.mode})
         try:
-            return await asyncio.wait_for(eng.adecide(plan.ctx, attempt=at, **plan.policy), timeout=(DECISION_BUDGET_MS + 750) / 1000)
+            # The limiter admits MAX_CONCURRENT_DECISIONS at once; each call's budget
+            # starts when it is admitted, so a 10k-way fan-out queues instead of
+            # expiring (identical calls are cheap memo hits once admitted).
+            async with _limiter():
+                t0 = time.perf_counter()
+                d = await asyncio.wait_for(eng.adecide(plan.ctx, attempt=at, **plan.policy),
+                                           timeout=(DECISION_BUDGET_MS + 750) / 1000)
+                _note(d, plan, t0)
+                return d
         except asyncio.TimeoutError:
             _eng.counters["budget_expired"] += 1
             return Decision.prior_for(plan.ctx, "budget", "python-side deadline", plan.mode)
@@ -361,7 +393,11 @@ class RightsizedMixin:
         _eng.counters["decisions"] += 1
         try:
             eng = _eng.get_engine()
-            return eng.decide(plan.ctx, attempt=at, **plan.policy)
+            with _SYNC_LIMITER:
+                t0 = time.perf_counter()
+                d = eng.decide(plan.ctx, attempt=at, **plan.policy)
+                _note(d, plan, t0)
+                return d
         except Exception as e:  # S1
             _eng.counters["fallbacks"] += 1
             return _fallback(plan.ctx, e, {"mode": plan.mode})
@@ -484,6 +520,8 @@ class RightsizedMixin:
             org, project, domain = _tenant(getattr(c, "action", None)) if c else (None, None, None)
             key = task_key(self, org, project, domain, platform="flyte-local" if local else PLATFORM)
             inputs, digest = _child_context_facts(self, args, kwargs)
+            if not local:
+                _prewarm(self, (org, project, domain))
         except Exception as e:  # S1
             log.warning("rightsizer: measurement unavailable: %s", e)
             return await base_execute(*args, **kwargs)
@@ -492,6 +530,53 @@ class RightsizedMixin:
             reusable=getattr(self, "reusable", None) is not None, local=local, observe_local=cfg_observe_local,
             inputs=inputs, code_digest=digest,
         )
+
+
+_PREWARMED: set = set()
+
+
+def _prewarm(task: Any, tenant: Tuple[Any, Any, Any]) -> None:
+    """A parent pod's first decisions per key would read that key's history cold, all
+    at once, inside their budgets. When this task's environment declares
+    ``depends_on`` (so it likely calls other environments' tasks), build the engine
+    and warm the history of every rightsizable task it can reach, in a background
+    thread, while the task body starts. Dry-run decisions: nothing is recorded."""
+    try:
+        env = task.parent_env() if task.parent_env is not None else None
+    except Exception:
+        env = None
+    if env is None or not getattr(env, "depends_on", None) or os.environ.get("RIGHTSIZER_FLYTE_PREWARM", "1") == "0":
+        return
+    from .._native import available
+
+    if not available():
+        return
+    targets = []
+    for e in [env, *env.depends_on]:
+        for t in list(getattr(e, "tasks", {}).values()):
+            if isinstance(t, RightsizedMixin) and getattr(t, "reusable", None) is None and t.name not in _PREWARMED:
+                _PREWARMED.add(t.name)
+                targets.append(t)
+    if not targets:
+        return
+
+    def run() -> None:
+        try:
+            eng = _eng.get_engine()
+            from rightsizer_runtime.policy import PolicyStack as _PS
+
+            for t in targets:
+                try:
+                    plan = t._rs_plan(_PS(), _PS(), (), {}, tenant=tenant, inputs=())
+                    if plan is not None:
+                        pol = dict(plan.policy, budget_ms=5000, dry_run=True)
+                        eng.decide(plan.ctx, **pol)
+                except Exception as e:
+                    log.debug("rightsizer: prewarm %s: %s", t.name, e)
+        except Exception as e:
+            log.debug("rightsizer: prewarm: %s", e)
+
+    threading.Thread(target=run, name="rightsizer-prewarm", daemon=True).start()
 
 
 def _child_context_facts(task: Any, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Tuple[Tuple[Any, ...], Optional[str]]:

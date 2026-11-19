@@ -143,6 +143,7 @@ impl EngineBuilder {
                 clock: self.clock,
                 metrics,
                 window: Mutex::new(Vec::new()),
+                recent: Mutex::new(RecentDecisions::default()),
             }),
         })
     }
@@ -168,6 +169,32 @@ struct Inner {
     metrics: Metrics,
     /// Recent attributed attempts (fleet and estimator breakers).
     window: Mutex<Vec<AttemptOutcome>>,
+    /// Decisions this engine recorded recently, by id: `outcome` joins to them
+    /// without `HistoryStore::decision` (which lists the decision log).
+    recent: Mutex<RecentDecisions>,
+}
+
+/// A bounded id → decision map (oldest evicted first).
+#[derive(Default)]
+struct RecentDecisions {
+    by_id: HashMap<ulid::Ulid, Decision>,
+    order: std::collections::VecDeque<ulid::Ulid>,
+}
+
+/// Recorded decisions kept for outcome joins.
+const RECENT_DECISIONS: usize = 20_000;
+
+impl RecentDecisions {
+    fn insert(&mut self, d: &Decision) {
+        if self.by_id.insert(d.id, d.clone()).is_none() {
+            self.order.push_back(d.id);
+            while self.order.len() > RECENT_DECISIONS {
+                if let Some(old) = self.order.pop_front() {
+                    self.by_id.remove(&old);
+                }
+            }
+        }
+    }
 }
 
 /// The engine: owns the store view, the estimator chain, the memo and budgets.
@@ -443,6 +470,9 @@ impl Engine {
         d.mode = req.policy.mode.unwrap_or(self.inner.config.policy.mode).min(Mode::Recommend);
         if record && reason != PriorReason::Mode {
             // Never wait here: the budget is already spent.
+            if let Ok(mut r) = self.inner.recent.lock() {
+                r.insert(&d);
+            }
             self.inner.view.defer(Pending::Decision(Box::new(d.clone())));
         }
         d
@@ -749,6 +779,9 @@ impl Engine {
         let left = deadline.saturating_duration_since(Instant::now());
         let view = &self.inner.view;
         let p = Pending::Decision(Box::new(d.clone()));
+        if let Ok(mut r) = self.inner.recent.lock() {
+            r.insert(d);
+        }
         if tokio::time::timeout(left.mul_f32(0.8), view.put(p.clone())).await.is_err() {
             view.defer(p);
         }
@@ -983,7 +1016,10 @@ impl Engine {
         let platform = rec.key.platform.clone();
 
         let decision = match rec.decision_id {
-            Some(id) => self.store().decision(id).await.ok().flatten(),
+            Some(id) => match self.inner.recent.lock().ok().and_then(|r| r.by_id.get(&id).cloned()) {
+                Some(d) => Some(d),
+                None => self.store().decision(id).await.ok().flatten(),
+            },
             None => None,
         };
         if decision.is_some() {

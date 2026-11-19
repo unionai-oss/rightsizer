@@ -20,7 +20,7 @@ from __future__ import annotations
 import contextvars
 import inspect
 import logging
-from typing import Any, Callable, Dict, FrozenSet, Optional, Sequence
+from typing import Any, Callable, Dict, FrozenSet, Optional
 
 import ray
 from ray import Language

@@ -25,11 +25,19 @@ struct Flaky {
     down: AtomicBool,
     reject: AtomicBool,
     reads: AtomicUsize,
+    /// Latency of `runs`, ms.
+    delay_ms: AtomicUsize,
 }
 
 impl Flaky {
     fn new() -> Arc<Self> {
-        Arc::new(Flaky { inner: MemoryStore::new(), down: AtomicBool::new(false), reject: AtomicBool::new(false), reads: AtomicUsize::new(0) })
+        Arc::new(Flaky {
+            inner: MemoryStore::new(),
+            down: AtomicBool::new(false),
+            reject: AtomicBool::new(false),
+            reads: AtomicUsize::new(0),
+            delay_ms: AtomicUsize::new(0),
+        })
     }
     fn set_down(&self, d: bool) {
         self.down.store(d, Ordering::SeqCst);
@@ -57,6 +65,10 @@ impl HistoryStore for Flaky {
     }
     async fn runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
+        let d = self.delay_ms.load(Ordering::SeqCst);
+        if d > 0 {
+            tokio::time::sleep(Duration::from_millis(d as u64)).await;
+        }
         self.check()?;
         self.inner.runs(key, limit).await
     }
@@ -108,6 +120,58 @@ impl HistoryStore for Flaky {
         self.check()?;
         self.inner.compact(o).await
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_reads_are_single_flight_and_survive_a_cancelled_caller() {
+    let inner = Flaky::new();
+    let k = k1();
+    inner.put_run(&rec(&k, "a", 1, t(0))).await.unwrap();
+    inner.delay_ms.store(50, Ordering::SeqCst);
+    let c = Arc::new(CachedStore::new(inner.clone(), CacheOptions::default()));
+    // Concurrent misses share one read.
+    let hs: Vec<_> = (0..16)
+        .map(|_| {
+            let (c, k) = (c.clone(), k.clone());
+            tokio::spawn(async move { c.history(&k, 10).await })
+        })
+        .collect();
+    for h in hs {
+        assert!(h.await.unwrap().records().is_some_and(|r| r.len() == 1));
+    }
+    assert_eq!(inner.reads.load(Ordering::SeqCst), 1);
+    // A caller that gives up (an expired decision budget) does not cancel the read: the cache fills.
+    c.invalidate_key(&k);
+    assert!(tokio::time::timeout(Duration::from_millis(5), c.history(&k, 10)).await.is_err());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(matches!(c.history(&k, 10).await, HistoryRead::Cached { .. }));
+    assert_eq!(inner.reads.load(Ordering::SeqCst), 2);
+    // After an invalidation (an outcome), a slow store does not hold the read up:
+    // it is answered from the stale entry while the refresh runs in the background.
+    inner.put_run(&rec(&k, "b", 1, t(10))).await.unwrap();
+    c.invalidate_key(&k);
+    let t0 = std::time::Instant::now();
+    assert!(matches!(c.history(&k, 10).await, HistoryRead::Cached { records, .. } if records.len() == 1));
+    assert!(t0.elapsed() < Duration::from_millis(45), "{:?}", t0.elapsed());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(matches!(c.history(&k, 10).await, HistoryRead::Cached { records, .. } if records.len() == 2));
+    assert_eq!(inner.reads.load(Ordering::SeqCst), 3);
+    // A fast store answers the refresh in time.
+    inner.delay_ms.store(0, Ordering::SeqCst);
+    inner.put_run(&rec(&k, "c", 1, t(20))).await.unwrap();
+    c.invalidate_key(&k);
+    assert!(matches!(c.history(&k, 10).await, HistoryRead::Fresh(v) if v.len() == 3));
+    // An invalidation while a read is in flight keeps its result out of the cache.
+    inner.delay_ms.store(50, Ordering::SeqCst);
+    c.forget_key(&k);
+    let slow = {
+        let (c, k) = (c.clone(), k.clone());
+        tokio::spawn(async move { c.history(&k, 10).await })
+    };
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    c.forget_key(&k);
+    slow.await.unwrap();
+    assert_eq!(c.cached_keys(), 0);
 }
 
 #[tokio::test(start_paused = true)]

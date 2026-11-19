@@ -141,7 +141,7 @@ def test_cli():
     assert out.returncode == 0 and "--memory-basis" in out.stdout
     # Platform hooks: delegate to rightsizer.<platform>.cli, or print the extra.
     rc = cli.main(["flyte", "--help"])
-    assert rc == 2  # placeholder round: no rightsizer.flyte.cli yet
+    assert rc == 0  # rightsizer.flyte.cli exists now (M1)
 
 
 @pytest.mark.parametrize("name", ["flyte", "ray"])

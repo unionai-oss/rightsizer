@@ -55,7 +55,6 @@ def test_without_evidence_memory_is_held_s3b_only(engine_factory, captured):
     f = rr.remote(num_cpus=1, memory=4 * GiB, key="embed")(_embed)
     f.remote("x")
     assert captured[0]["options"]["memory"] == 4 * GiB
-    d = f._rs_last_decision if hasattr(f, "_rs_last_decision") else None  # noqa: F841
     # With the opt-in the same history allows the reduction.
     e2 = engine_factory(allow_unverified=True, shapes=[{"cpu": 16000, "memory": 64 * GiB, "price_per_hour": 0.8}])
     seed(e2, KEY, [300 * MiB] * 4, trust="unverified")

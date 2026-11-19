@@ -26,7 +26,8 @@ every environment; images and build caches are kept).
 |---|---|---|---|
 | k3s | k3d cluster `rsz-it` (`k3d-rsz-it-server-0`, `k3d-rsz-it-agent-0`), network `k3d-rsz-it` | 16443 (k8s API), 19090 (Prometheus NodePort 30909) | `RSZ_IT_K3S_API_PORT`, `RSZ_IT_PROM_PORT` |
 | k3s webhook-check | throwaway host HTTPS server | first free port from 18443 | `RSZ_IT_WEBHOOK_PORT` |
-| flyte | container + volume `rsz-it-flyte` | 30080 (Flyte API/UI), 30002 (object store), 26443 (k8s API) | `RSZ_IT_FLYTE_K8S_API_PORT` (30080/30002 are baked into the devbox) |
+| flyte | container + volume `rsz-it-flyte` | 30080 (Flyte API/UI), 30002 (object store), 30500 (devbox image registry, container port 30000), 26443 (k8s API) | `RSZ_IT_FLYTE_K8S_API_PORT`, `RSZ_IT_FLYTE_REGISTRY_PORT` (30080/30002 are baked into the devbox) |
+| build-wheels | volume `rsz-it-cargo-target-wheel` (+ the shared registry/git/rustup volumes) | none | `RSZ_IT_WHEEL_TARGET_VOLUME`, `RSZ_IT_MATURIN_IMAGE` |
 | slurm | compose project `rsz-it-slurm`: `rsz-it-slurm-{mysql,slurmdbd,slurmctld,c1,c2}` | none (use `slurm.sh exec`) | |
 | ray | processes under `/tmp/rsz-it-ray` | GCS first free from 26379, dashboard/State API from 28265, client from 20001, agent from 28365, metrics from 28080, workers 21000-21999 | `RSZ_IT_RAY_*_PORT` |
 | build-linux | volumes `rsz-it-cargo-{registry,git,target}`, `rsz-it-rustup`; image `rsz-it/rsz:dev` | none | `RSZ_IT_TARGET_VOLUME`, `RSZ_IT_RSZ_IMAGE` |
@@ -106,12 +107,36 @@ exists here), publishes host ports 6443, 30000-30003, 30080, 30081 (30000 and
 - 30080 and 30002 must map 1:1 (the devbox hands out
   `http://localhost:30002` signed URLs), so this devbox and a regular
   `flyte start devbox` cannot run at the same time.
+- **Image registry.** The devbox's in-cluster registry (container port 30000)
+  is published on `127.0.0.1:30500` (`RSZ_IT_FLYTE_REGISTRY_PORT`), the SDK
+  config sets `image.registry: localhost:30500`, and a k3s
+  `registries.yaml` mirror (`.state/flyte-registries.yaml`, mounted at
+  `/etc/rancher/k3s/registries.yaml`) makes the node pull `localhost:30500/…`
+  from its own registry. Without a configured registry, SDK 2.13's local
+  builder *guesses* `localhost:30000` for a localhost endpoint and pushes
+  there — which on this machine is the k3d `devbox` cluster's registry.
 - `smoke` (`smoke/flyte_smoke.py`) runs tasks with different
   `flyte.Resources(memory=...)` shapes, records the pod requests/limits, runs
   an over-limit task to see the OOM path, and lists runs/actions with
   `flyte.remote`. Results in `.state/flyte-smoke-results.json`.
 - First start pulls knative/kourier/traefik images inside the devbox and the
   task image `ghcr.io/flyteorg/flyte:py3.12-v2.13.x` on first run.
+
+## build-wheels.sh — Linux wheels for task images
+
+```
+tests/infra/build-wheels.sh [all|native|runtime|status|clean]   # -> .state/wheels/*.whl
+```
+
+- `native`: `rightsizer` (abi3, manylinux2014 aarch64) built by maturin inside
+  `ghcr.io/pyo3/maturin`, with the toolchain from `rust-toolchain.toml` in the
+  shared `rsz-it-rustup` volume and its own target volume
+  `rsz-it-cargo-target-wheel`. The Python sources are copied without host
+  build products first, so a macOS `_core*.so` from `maturin develop` never
+  lands in the wheel. Incremental rebuilds take ~40 s.
+- `runtime`: `rightsizer-runtime` (pure Python) with `uv build`.
+- Task images use them through `RightsizedEnvironment(auto_image=<dir>)` or
+  `RIGHTSIZER_FLYTE_WHEELS=<dir>` (the SDK's `PythonWheels` layer).
 
 ## slurm.sh — Slurm in Docker
 

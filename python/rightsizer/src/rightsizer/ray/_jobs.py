@@ -94,7 +94,8 @@ def driver_name(entrypoint: Sequence[str]) -> str:
 
 
 def size_driver(entrypoint: Sequence[str], *, key: Optional[str] = None, num_cpus: Optional[float] = None,
-                num_gpus: Optional[float] = None, memory: Optional[int] = None, mode: Optional[str] = None) -> Tuple[Dict[str, Any], Any]:
+                num_gpus: Optional[float] = None, memory: Optional[int] = None,
+                mode: Optional[str] = None) -> Tuple[Dict[str, Any], Any]:
     """``(submit_job entrypoint_* kwargs, decision)``. Never raises."""
     from ._sizing import SizingPolicy, decide_options
 

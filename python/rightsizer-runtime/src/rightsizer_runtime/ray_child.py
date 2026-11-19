@@ -5,7 +5,8 @@ The driver (``rightsizer.ray``) wraps the user's function with
 in a worker; the wrapper runs the body inside a
 :class:`~.measure.MeasurementScope` with process attribution (workers are
 reused: sampled RSS every 0.5 s minus the RSS at task start, ``Exact`` with
-``resolution_s = 0.5``; NVML per-PID device memory if ``pynvml`` and a GPU
+``resolution_s = 0.5``, re-based for reused workers, see
+:func:`reused_worker_peak`; NVML per-PID device memory if ``pynvml`` and a GPU
 are present; process CPU time) and writes one :class:`~.wire.RunRecord`
 directly to the store.
 
@@ -21,7 +22,11 @@ pool).
 The meta payload (a small dict, wire version 1)::
 
     {"v": 1, "k": key, "d": decision_id | None, "m": mode, "r": requested ResourceSpec | None,
-     "s": store URI | None, "tr": trust, "c": cluster | None, "i": [InputMeta, ...], "cd": code digest | None}
+     "s": store URI | None, "tr": trust, "c": cluster | None, "i": [InputRef, ...], "cd": code digest | None}
+
+(``i`` holds the decision's input references; the worker turns them into
+``InputMeta`` with the metadata readers when ``rightsizer._core`` is
+importable, see :func:`resolve_inputs`.)
 
 Without a store in the payload the worker uses ``RIGHTSIZER__HISTORY__URI``
 (``rsz ray submit`` sets it in ``runtime_env.env_vars``). Only object-store
@@ -201,6 +206,110 @@ def child_status(exc: Optional[BaseException]):
 INPUT_READ_BUDGET_MS = 250
 
 
+class _MachFootprint:
+    """macOS ``task_vm_info.phys_footprint`` (bytes).
+
+    Reused Ray workers make ``resident_size`` useless as a per-task delta on
+    macOS: the allocator keeps freed pages resident (``MADV_FREE``), so they
+    land in the next task's baseline and its own allocations read as ~0.
+    ``phys_footprint`` (what Activity Monitor shows) excludes them.
+    """
+
+    TASK_VM_INFO = 22
+
+    def __init__(self) -> None:
+        import ctypes
+
+        class _Info(ctypes.Structure):
+            _pack_ = 4
+            _fields_ = [("virtual_size", ctypes.c_uint64), ("region_count", ctypes.c_int32),
+                        ("page_size", ctypes.c_int32), ("resident_size", ctypes.c_uint64),
+                        ("resident_size_peak", ctypes.c_uint64)]
+            _fields_ += [(n, ctypes.c_uint64) for n in (
+                "device", "device_peak", "internal", "internal_peak", "external", "external_peak", "reusable",
+                "reusable_peak", "purgeable_volatile_pmap", "purgeable_volatile_resident",
+                "purgeable_volatile_virtual", "compressed", "compressed_peak", "compressed_lifetime",
+                "phys_footprint", "min_address", "max_address")]
+
+        self._ct = ctypes
+        self._Info = _Info
+        libc = ctypes.CDLL(None)
+        self._task = ctypes.c_uint32.in_dll(libc, "mach_task_self_").value
+        self._task_info = libc.task_info
+        self._task_info.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        self._task_info.restype = ctypes.c_int
+
+    def __call__(self) -> Optional[int]:
+        info = self._Info()
+        count = self._ct.c_uint32(self._ct.sizeof(info) // 4)
+        kr = self._task_info(self._task, self.TASK_VM_INFO, self._ct.byref(info), self._ct.byref(count))
+        return int(info.phys_footprint) if kr == 0 and info.phys_footprint else None
+
+
+_probe_cache: Dict[str, Any] = {}
+_baseline: Dict[str, Optional[int]] = {"min": None}
+# A task that starts within this much of the worker's lowest baseline has a clean baseline.
+CLEAN_BASELINE_SLACK_BYTES = 16 << 20
+
+
+def reused_worker_peak(scope: Any, r: Any) -> Any:
+    """Re-base a task's memory peak for reused workers (ray.md §6).
+
+    The scope subtracts the RSS at task start. On a reused worker that
+    baseline can include memory a previous task freed but the allocator kept
+    (glibc's dynamic mmap threshold, pymalloc arenas, macOS malloc's caches):
+    a task that reuses it would read as ~0. So the peak is taken against the
+    **lowest** start RSS this worker process has seen, and it is ``Exact``
+    only when this task started within :data:`CLEAN_BASELINE_SLACK_BYTES` of
+    that; otherwise it is ``AtMost`` (an upper bound: it may include
+    recycled memory), which S3(b) still accepts and which never under-states
+    the task's need. Never raises.
+    """
+    try:
+        from dataclasses import replace
+
+        from .wire import Censor, Measurement
+
+        base = getattr(scope, "_rss_base", None)
+        top = getattr(scope, "_rss_max", None)
+        if r is None or r.memory_peak is None or base is None or top is None:
+            return r
+        lo = _baseline["min"]
+        lo = base if lo is None else min(lo, base)
+        _baseline["min"] = lo
+        clean = base - lo <= CLEAN_BASELINE_SLACK_BYTES
+        value = float(max(0, top - lo))
+        mp = r.memory_peak
+        censor = mp.censor
+        if not clean and censor is Censor.EXACT:
+            censor = Censor.AT_MOST
+        return replace(r, memory_peak=Measurement(max(value, mp.value), censor, mp.resolution_s))
+    except Exception as e:
+        log.debug("rightsizer: peak re-basing skipped: %s", e)
+        return r
+
+
+def process_memory_probe() -> Any:
+    """The per-process memory probe for Ray tasks: ``phys_footprint`` on macOS,
+    else the runtime's default RSS probe (Linux ``/proc/self/statm``)."""
+    if "p" in _probe_cache:
+        return _probe_cache["p"]
+    from .measure import _AUTO
+
+    probe: Any = _AUTO
+    import sys
+
+    if sys.platform == "darwin":
+        try:
+            p = _MachFootprint()
+            if p() is not None:
+                probe = p
+        except Exception as e:  # pragma: no cover - platform dependent
+            log.debug("rightsizer: phys_footprint probe unavailable: %s", e)
+    _probe_cache["p"] = probe
+    return probe
+
+
 def resolve_inputs(refs: Any) -> Tuple[Any, ...]:
     """``InputMeta``s for the driver's input refs (``{"name", "uri"?, "bytes"?, "format"?, "scalar"?}``).
 
@@ -226,7 +335,8 @@ def resolve_inputs(refs: Any) -> Tuple[Any, ...]:
     for r in refs:
         try:
             if r.get("scalar") is not None:
-                out.append(InputMeta.from_dict({"name": r["name"], "format": "scalar", "scalar": r["scalar"]}, allow_unknown=True))
+                m = {"name": r["name"], "format": "scalar", "scalar": r["scalar"]}
+                out.append(InputMeta.from_dict(m, allow_unknown=True))
             elif r.get("bytes") is not None:
                 out.append(InputMeta.from_dict({"name": r["name"], "format": r.get("format") or "blob", "bytes": r["bytes"]},
                                                allow_unknown=True))
@@ -254,7 +364,8 @@ class _Run:
             from .measure import RAY_INTERVAL_S, MeasurementScope
 
             nv = _nvml_state["ok"]
-            self.scope = MeasurementScope(RAY_INTERVAL_S, attribution="process", cgroup=None, nvml=nv is not False)
+            self.scope = MeasurementScope(RAY_INTERVAL_S, attribution="process", cgroup=None, nvml=nv is not False,
+                                          rss_probe=process_memory_probe())
             self.scope.start()
             if nv is None:
                 _nvml_state["ok"] = getattr(self.scope, "_nv", None) is not None
@@ -283,6 +394,7 @@ class _Run:
 
             status = child_status(exc)
             r = scope.stop(status)
+            r = reused_worker_peak(scope, r)
             if isinstance(exc, MemoryError) and r is not None and r.memory_peak is not None:
                 r = replace(r, memory_peak=r.memory_peak.with_censor(Censor.AT_LEAST))
             m = self.meta
@@ -334,7 +446,8 @@ def run_task(fn: Callable[..., Any], static_key: Optional[str], meta: Any, args:
         run.end(exc)
 
 
-def run_task_gen(fn: Callable[..., Any], static_key: Optional[str], meta: Any, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+def run_task_gen(fn: Callable[..., Any], static_key: Optional[str], meta: Any, args: Tuple[Any, ...],
+                 kwargs: Dict[str, Any]) -> Any:
     """Generator variant of :func:`run_task` (measures until the generator is exhausted)."""
     run = _Run(static_key, meta)
     run.start()

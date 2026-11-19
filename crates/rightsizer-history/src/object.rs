@@ -57,6 +57,13 @@ use crate::{
     layout, merge_runs, ulid_time,
 };
 
+/// Records the write-time duplicate check looks at (`check_duplicates_on_write`).
+pub const DUPLICATE_CHECK_DEPTH: usize = 8;
+
+/// Concurrent GETs of one history read (it is on a decision's critical path,
+/// at most `limit + limit/4` objects).
+pub const HISTORY_READ_CONCURRENCY: usize = 64;
+
 /// Tuning of an [`ObjectHistoryStore`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectStoreOptions {
@@ -344,6 +351,10 @@ impl ObjectHistoryStore {
     }
 
     async fn get_many<T: serde::de::DeserializeOwned + Send>(&self, paths: Vec<String>) -> Result<Vec<(String, T)>, StoreError> {
+        self.get_many_with(paths, self.opts.concurrency).await
+    }
+
+    async fn get_many_with<T: serde::de::DeserializeOwned + Send>(&self, paths: Vec<String>, concurrency: usize) -> Result<Vec<(String, T)>, StoreError> {
         let results: Vec<Result<Option<(String, T)>, StoreError>> = futures::stream::iter(paths)
             .map(|p| async move {
                 match self.get(&p).await? {
@@ -362,7 +373,7 @@ impl ObjectHistoryStore {
                     },
                 }
             })
-            .buffered(self.opts.concurrency.max(1))
+            .buffered(concurrency.max(1))
             .collect()
             .await;
         let mut out = Vec::with_capacity(results.len());
@@ -408,6 +419,28 @@ impl ObjectHistoryStore {
             .collect();
         v.sort();
         Ok(v)
+    }
+
+    /// (Also the write-time duplicate check, over [`DUPLICATE_CHECK_DEPTH`] records.)
+    /// The newest `limit` records of `key`: the pointer's records plus only the
+    /// newest `limit + limit/4` shards above its watermark (shard ULIDs follow
+    /// write time; the slack covers records written out of start order), so an
+    /// uncompacted key costs at most that many GETs per read instead of one per
+    /// shard. Compaction and export read every shard
+    /// ([`Self::all_runs`]).
+    async fn newest_runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError> {
+        let ptr = self.read_pointer(key).await?;
+        let (mut records, watermark) = match &ptr {
+            Some((p, _)) => (self.pointer_records(p, &self.rel(&latest_rel(key))), p.watermark),
+            None => (Vec::new(), None),
+        };
+        let shards = self.shard_list(key, watermark).await?;
+        let window = limit.saturating_add(limit / 4);
+        let skip = shards.len().saturating_sub(window);
+        let paths: Vec<String> = shards.into_iter().skip(skip).map(|(_, p)| p).collect();
+        let got: Vec<(String, RunRecord)> = self.get_many_with(paths, HISTORY_READ_CONCURRENCY.max(self.opts.concurrency)).await?;
+        records.extend(got.into_iter().map(|(_, r)| r).filter(|r| &r.key == key));
+        Ok(merge_runs(records, limit))
     }
 
     /// Every record of `key` (pointer ∪ newer shards), deduplicated, newest first.
@@ -783,7 +816,10 @@ impl HistoryStore for ObjectHistoryStore {
     async fn put_run(&self, rec: &RunRecord) -> Result<PutOutcome, StoreError> {
         if self.opts.check_duplicates_on_write {
             let dk = dedup_key(rec);
-            if self.all_runs(&rec.key).await?.iter().any(|r| dedup_key(r) == dk) {
+            // The newest records only (the pointer's plus the newest shards, see
+            // `newest_runs`): a duplicate is a retried write, close in time to the
+            // first. Older duplicates are still removed on read and in compaction.
+            if self.newest_runs(&rec.key, DUPLICATE_CHECK_DEPTH).await?.iter().any(|r| dedup_key(r) == dk) {
                 return Ok(PutOutcome::Duplicate);
             }
         }
@@ -808,9 +844,7 @@ impl HistoryStore for ObjectHistoryStore {
     }
 
     async fn runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError> {
-        let mut v = self.all_runs(key).await?;
-        v.truncate(limit);
-        Ok(v)
+        self.newest_runs(key, limit).await
     }
 
     async fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<Decision>, StoreError> {

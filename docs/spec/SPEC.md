@@ -1419,10 +1419,16 @@ tuner's scorer replays rightsizer's decisions.
 3. Exploration in production: is the learning value worth the waste?
 4. Per-site calibration of `rules-sized` constants from local history, and how to
    version it.
-5. How the Flyte v2 backend treats a request-only memory spec (whether it sets
-   limit = request) must be confirmed by an M1 integration test. Until then
-   Flyte uses `memory_enforced = (prior memory has a limit)`: tasks declaring
-   `memory=(req, lim)` get ladders (S3a); scalar-memory tasks get S3(b) only.
+5. ~~How the Flyte v2 backend treats a request-only memory spec~~ **Settled
+   (M1, Flyte v2 devbox, SDK 2.13.6):** the SDK serializes a scalar
+   `memory=` as a request only, and the backend sets limit = request on the
+   pod, so scalar memory **is** enforced (an over-use is OOM-killed, the
+   unit's own failure). Flyte therefore uses `memory_enforced = true` for
+   scalar and `(req, lim)` memory alike, and both get ladders (S3a). The
+   switch `[flyte] scalar_memory_enforced` (default `true`) is for
+   deployments whose platform defaults leave the limit unset (recheck Union
+   deployments); with `false`, scalar-memory tasks get S3(b) reductions only
+   (flyte.md §4.2).
 6. **Modal ladder.** A caller ladder needs a per-input OOM status on the
    client; today only the CLI-side `FunctionCallFetch` exposes it
    (modal.md §6).

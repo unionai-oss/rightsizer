@@ -1667,3 +1667,201 @@ fixtures: `RIGHTSIZER_WRITE_FIXTURES=1 cargo test -p rightsizer-py --test wire_f
   (local paths included) but not for sqlite (`SqliteStore::info()` hard-codes
   `durable_shared: false`), so `sqlite://` always demotes enforce.
 - `RunRecord.staged_bytes` is in `rightsizer_runtime.wire` (integration round).
+
+## rightsizer.ray (M3)
+
+Code: `python/rightsizer/src/rightsizer/ray/` (`_remote`, `_actor`, `data`, `_sizing`, `_settings`, `_observe`,
+`_jobs`, `cli`), child side `python/rightsizer-runtime/src/rightsizer_runtime/ray_child.py`, `rsz ray`
+delegation `crates/rightsizer-cli/src/ray.rs`. Unit tests: `.venv/bin/python -m pytest python/rightsizer/tests/ray`
+(no cluster: Ray's base `_remote` is replaced by a recorder). Integration: `tests/infra/ray.sh up` then
+`RSZ_IT_RAY=1 [RSZ_IT_RAY_LINUX=1] .venv/bin/python -m pytest tests/integration/ray`; evidence JSON in
+`tests/infra/.state/ray-it/`.
+
+### Mechanism (Ray 2.60.0 as installed)
+- `RightsizedRemoteFunction(RemoteFunction)` overrides `_remote` (decide → merge → base `_remote`) **and** `options`
+  (Ray merges `.options(**kw)` into the defaults before `_remote`, so `_remote` alone cannot tell pins apart; the
+  override wraps Ray's `FuncWrapper` and passes the call's pins through a contextvar). Our `_remote` runs before
+  the base's `@wrap_auto_init`, so it calls `auto_init_ray()` itself (autoscaler shapes need a connection).
+- Written: `num_cpus`, `memory` (only when an enforced decision changed them; pinned axes never);
+  `accelerator_type` only for an allowed GPU type change. Never: `num_gpus`, `resources`, `max_retries`, others.
+- In-task measurement: the shipped function is `make_task_function(fn)`, whose `__signature__` is the user's plus a
+  keyword-only `_rightsizer` (Ray's own tracing pattern, `_ray_trace_ctx`), so Ray still validates user args at
+  submit. The driver passes the decision per call in that keyword (key, decision id, mode, applied spec, store URI,
+  trust, input refs, code digest), not through a per-task `runtime_env` (which would get its own worker pool). The
+  wrapper references only builtins + closure (pickled by value) and imports the runtime lazily: a worker without
+  `rightsizer-runtime` runs the body unmeasured. Generators stay generators; async generators are not wrapped.
+- **Reused-worker peaks (deviation from "Exact, minus the start RSS").** On macOS the second task on a worker read
+  ~0 MiB: the allocator keeps freed memory resident (also `phys_footprint`, now the macOS probe), so it sits in the
+  baseline. Peaks are re-based on the lowest start RSS the worker has seen; `Exact` when the task started within
+  16 MiB of it, else `AtMost` (an upper bound: may include recycled memory; S3(b) accepts it, never under-states).
+  On Linux glibc (container test) 200/200/50/200 MiB on one reused pid all read `Exact` and right.
+- Status, driver side: `ObjectRef._on_ready` (2.60: no fetch, no deserialization) → daemon thread → object size from
+  `get_local_object_locations` (> 100 KiB = plasma = success, untouched) → else the owner's inlined entry via
+  `core_worker.get_objects(timeout 0)`; only Ray **error** metadata is deserialized, user values never.
+  `OUT_OF_MEMORY` → `OomKilled` (observed); `WORKER_DIED` → `Failed`, upgraded only on specific evidence (State
+  API `OUT_OF_MEMORY`, "running low on memory", `OOMKilled`, kernel `oom-kill:` lines; Ray's generic WORKER_DIED
+  text names "the OOM killer" as a *possible* cause and is not evidence); user exceptions are recorded by the
+  worker (`GpuOom` for `torch.cuda.OutOfMemoryError`). Driver records: source `ray_state`, invocation = task id.
+- Platform state: autoscaler node types (bootstrap config or `get_cluster_status` node types) when an autoscaler
+  with node types exists; `ray start` runs the monitor with the read-only provider whose "types" are `node_<id>`,
+  ignored. Else `[ray] shapes`. Else ceiling = definition ceiling or the prior with
+  `Constraints.ceiling_reason = "no_platform_state"` → `rightsizer_clamped_total{reason="no_platform_state"}`.
+
+### Rust changes (additive)
+- `rightsizer-core`: `Constraints.ceiling_reason: Option<String>` (clamp reason instead of `"user"`), used in the two
+  `Advisory::Clamped` sites of `decide.rs` (`clamp_reason`); test `s4_clamp_reason_names_missing_platform_state`;
+  schemas regenerated.
+- `rightsizer-engine::config::RayConfig`: `shapes: Vec<NodeShape>`, `labelled_accelerators`,
+  `tenant_scoped_credentials` (test `ray_section_keys`).
+- `rightsizer-cli`: `ray.rs` (+2 lines in `main.rs`): `rsz ray …` execs `PYTHON -m rightsizer.ray.cli` (PYTHON =
+  `[ray] python` | `$RIGHTSIZER_PYTHON` | `python3`, probed with `find_spec` without importing Ray), forwarding
+  `--config`/`--store`; otherwise the install hint, exit 2.
+
+### Ray internals vs ray.md (refs at another commit)
+- `remote_function.py`: `self.remote = _remote_proxy` at 174-183 (as spec); `FuncWrapper` 335-355, returned at 357
+  (spec 339-357). `_remote` is wrapped by `@wrap_auto_init @_tracing_task_invocation`.
+- `actor.py`: subclassing blocked in `ActorClass.__init__`, lines 1562-1597 (spec 1591-1625).
+- `experimental/locations.py`: `get_object_locations(refs, timeout_ms=-1)` waits **forever** by default; a 50 ms
+  timeout is passed. `get_local_object_locations` (no RPC) exists and is tried first. `node_ids` was `[]` at the
+  owner even for a 5 MB plasma object; `object_size` is reliable once the task finished, `None` before.
+- `data/dataset.py`: `map_batches(num_cpus=, num_gpus=, memory=, …)` as spec; `ray_remote_args_fn` deprecation at
+  215-224, "will be removed in Ray 2.64" (spec 219-226). File reads are datasource-v2: `ListFiles` →
+  `ReadFiles`; paths in `ListFiles.source_paths`; `Dataset.input_files()` was `[]` before execution.
+- `task_oom_retries`: only in `_raylet.so` (`RAY_task_oom_retries`); the default cannot be read from the wheel.
+  The Linux test sets it to 0 (with `max_retries=0`) so the monitor kill surfaces as `OutOfMemoryError` at once.
+- `num_gpus > 0` sets `max_calls = 1` (GPU workers are not reused). Apple silicon advertises `GPU: 1` and
+  `accelerator_type:M5-Max` on the local head.
+
+### Measured (M-series laptop, local head, 4 CPUs; `tests/infra/.state/ray-it/fanout.json`)
+10,000 tasks, memoized decisions: plain `ray.remote` 0.029 ms per `.remote()`; `rs.ray.remote` 0.63 ms (added
+0.60 mean / 0.56 p50); sizing only 0.58 ms. Decision path (decide + merge) p50 0.48 ms, p99 0.80 ms, max 10 ms.
+Wall clock for 10k no-op tasks: 1.06 s plain vs 6.3 s rightsized (the driver's submit loop is the bottleneck).
+
+### Open / for other agents
+- Worker-written records bypass the driver engine's per-key history cache and memo: new evidence is seen after
+  `history.cache_ttl` / `decision.memo_ttl` (10 min). `_core` has no invalidation call; the integration tests use 1 s.
+- Core: when the size-scaled floor exceeds a no-platform-state ceiling the core emits `infeasible_floor`, not
+  `clamped` (not counted under `no_platform_state`), and its `recommended` memory fell *below* that floor
+  (256Mi with floor 8064Mi, ceiling 1Gi, an ad-hoc check); worth a look in `decide.rs`.
+- KubeRay tenant: `RAY_CLUSTER_NAMESPACE` / `POD_NAMESPACE` / the service-account namespace file plus
+  `RAY_CLUSTER_NAME`; the env names are assumptions to align with the K8s webhook.
+
+## rightsizer.flyte (M1)
+
+Code: `python/rightsizer/src/rightsizer/flyte/` (`_policy`, `_resources`,
+`_task`, `_env`, `_run`, `_deploy`, `_backfill`, `_classify`, `_engine`,
+`_store`, `cli`), child side `python/rightsizer-runtime/src/rightsizer_runtime/flyte_child.py`,
+CLI delegation `crates/rightsizer-cli/src/flyte.rs`. Unit tests:
+`.venv/bin/python -m pytest python/rightsizer/tests/flyte` (fake remote task
+context + fake controller through the SDK's private `_ControllerState`, real
+engine on a local store). Bench: `python/rightsizer/tests/flyte/bench_decision_path.py`.
+Integration: `RSZ_IT_FLYTE=1 tests/integration/flyte/run.sh` (devbox; results in
+`tests/infra/.state/flyte-it-results.json`). SDK facts as checked against
+2.13.6: flyte.md §1.1.
+
+### Decisions
+
+- **`RightsizedTask`** is `RightsizedMixin` + the task's template class, made a
+  `kw_only` dataclass once per class (`rightsized_class`). Fields: `_rs_policy`,
+  `_rs_pins`, `_rs_bypass`, plus `_rs_invocation` (stack entries from
+  `sized()`), `_rs_code` (`rs.Code`, captured at decoration) and
+  `_rs_measured`. Pickling goes through `__reduce_ex__` → `_rebuild_rightsized(base)`,
+  so a dynamic class never has to be importable. Construction from an existing
+  task uses `cls(**init fields)`, falling back to the SDK's `_rebuild_as`.
+- **`aio` is a plain `def`** returning a coroutine, so the stack is captured
+  when the call is made. The captured *inherited* stack is re-entered with
+  `flyte.custom_context` around the submission (the SDK reads the context when
+  the coroutine runs, flyte.md §1.1). `sized()` entries apply to that call only
+  and are not propagated to its descendants; `policy()` blocks are.
+- **Mirroring**: `policy()` pushes on the runtime contextvar stack and writes
+  the whole stack into `custom_context["rightsizer"]`; a contextvar counts the
+  local entries already mirrored, so the captured stack is
+  `inherited + local[mirrored:]` with no duplicates.
+- **Escalation** uses the engine's `attempt_decide` (attempt records, leases,
+  `applied₁ × 2^k`, `final_floor`): one `AttemptContext` per call, mirrored to
+  the child as `RIGHTSIZER_ATTEMPT`. Only OOM after a *reduced* attempt
+  escalates (an OOM at or above the prior would repeat); GPU OOM only with
+  `allow_gpu_type_change`. `on_oom="auto"` = escalate iff `retries == 0`.
+- **Outcomes**: the parent writes a `self_report` record (status, duration,
+  requested = the submitted spec) through `engine.aoutcome`; the child writes a
+  `cgroup` record with peaks through `flyte.storage.put_stream` (the pod's own
+  credentials). Both carry the same `(invocation_id, attempt)`; their sources
+  differ, so both are kept. `Cached` is inferred only for cache-enabled tasks
+  (one listing of the key's newest shards).
+- **S4 without shapes**: `[flyte] shapes` empty → the ceiling is the
+  definition's, else the prior (increases held). With shapes they go to
+  `PlatformState`.
+- **Limiter**: 64 decisions at once per event loop (and per process for the
+  sync path). The budget starts when a call is admitted, so a 10k-way gather
+  queues instead of expiring.
+- **Images**: `auto_image=True` appends `rightsizer==<version>` (PyPI);
+  `auto_image=<dir>` / `RIGHTSIZER_FLYTE_WHEELS` uses the SDK's private
+  `PythonWheels` layer (`flyte._image`, the same layer `with_local_v2` uses).
+  The task image's child lookup is by environment name, so pods may build a
+  different `Image` object without harm.
+- **Deploy-time sizing** writes deploy records to
+  `{prefix}/v1/flyte/deploys/{tenant}/{task}/{version}.json` (origin prior,
+  deployed spec, decision id) next to the engine's decision log; sized deploys
+  get version `rsz-<digest>`. The reconcile lease is
+  `{prefix}/v1/flyte/reconcile/lease.json` (obstore conditional create /
+  ETag update; local files: `O_EXCL`).
+- **Backfill** writes `flyte_remote` / `verified` records through
+  `engine.outcome` (joins, attribution, lease closing), `invocation_id =
+  {run}/{action}`.
+- **Missing `_core`**: the engine build error is remembered per process; every
+  call then runs at the prior with a fresh decision id (`Decision.prior_for`),
+  the marker still goes to the child, and the child still measures (runtime only).
+
+### Changes to shared crates (all additive in API)
+
+- `rightsizer-engine::config::FlyteConfig`: `scalar_memory_enforced` (default
+  `true`), `observe_local`, `shapes: Vec<NodeShape>` (`flyte_section_keys`).
+- `rightsizer-history::CachedStore::history`: **single flight** per key, run
+  as its own task (a caller whose budget expires no longer cancels the read, so
+  the cache fills), and **stale-while-revalidate after invalidation**
+  (`invalidate_key` marks the entry stale; the next read waits up to
+  `REFRESH_WAIT` = 25 ms for the refresh, else answers from the stale entry).
+  New `forget_key` drops an entry. Test:
+  `history_reads_are_single_flight_and_survive_a_cancelled_caller`.
+- `rightsizer-history::ObjectHistoryStore::runs(key, limit)` reads the pointer
+  plus only the newest `limit + limit/4` shards (was: every shard above the
+  watermark), and the write-time duplicate check looks at the newest
+  `DUPLICATE_CHECK_DEPTH` (8) records (was: every shard). Older duplicates are
+  still removed on read and in compaction. Conformance (incl. S3 on the
+  devbox's rustfs) passes.
+- `rightsizer-engine::Engine`: recorded decisions are kept in a bounded
+  in-process map (20k), and `outcome` joins to them before falling back to
+  `HistoryStore::decision` (which lists the decision log).
+
+Why: on the devbox, a 45-wide gather against an uncompacted key (~200 shards)
+made every decision read every shard, every outcome re-read every shard (the
+duplicate check) and invalidate the cache, and every expired budget cancel the
+read that would have warmed it: 55 of 90 decisions fell back to the prior.
+
+### Measured
+
+- Decision path once memoized (plan + engine memo hit + sized copy; real
+  engine, `memory://` store, readable Parquet input; `bench_decision_path.py`,
+  M-series laptop): sequential p50 0.42 ms / p99 0.82 ms; a 10,000-way
+  `gather` 1.53 s wall = 0.15 ms per call, 0 budget expiries, 12,000 memo hits /
+  1 estimator call. With the parent-side outcome on the same path (`--full`):
+  p50 1.95 ms (each outcome invalidates the key's memo, so most decisions then
+  recompute).
+- Devbox (run `rsz-it/run1`, before the history changes above reached the task
+  image): smoke and 4 demo rounds of 90 enforced invocations each (ETL over
+  Parquet, memory hogs, a tight task), all `SUCCEEDED`, 0 task errors; 54 / 63 /
+  45 / 14 enforced changes per round (reductions 1Gi → 512Mi behind the ladder,
+  ETL increases 1Gi → 1.5Gi from `rules-sized` cold start); 26 / 27 / 45 / 76
+  of 90 decisions per round fell back to the prior on the 250 ms budget (cold
+  history reads in each new driver pod, growing with uncompacted shards: the
+  motivation for the history changes and the parent pre-warm).
+
+### Not finished
+
+The devbox run stopped after round 3 of scenario (a): the host disk filled up
+(Docker Desktop's VM disk; 263 MiB left) and Docker started returning I/O
+errors, so the devbox, its object store and the remaining scenarios (b–i,
+deploy round trip, backfill against the devbox) could not run, and the devbox
+container could not be removed. The latest Rust tuning (history read window
+`limit + limit/4`, 64 concurrent GETs) and the parent pre-warm are in the
+source and unit-tested but were never in a task image.

@@ -87,7 +87,8 @@ def classify(exc: Optional[BaseException], *, state_error_type: Optional[str] = 
     except Exception:  # pragma: no cover
         rx = None  # type: ignore[assignment]
     name = type(exc).__name__
-    if rx is not None and isinstance(exc, rx.OutOfMemoryError) or name == "OutOfMemoryError" and "ray" in (type(exc).__module__ or ""):
+    ray_oom = rx is not None and isinstance(exc, rx.OutOfMemoryError)
+    if ray_oom or (name == "OutOfMemoryError" and "ray" in (type(exc).__module__ or "")):
         return Classified("oom_killed", "observed", "ray_memory_monitor", False)
     if state_error_type == "OUT_OF_MEMORY":
         return Classified("oom_killed", "observed", "state_api_out_of_memory", False)

@@ -24,13 +24,17 @@ from typing import Any, List, Optional
 from ._backfill import parse_since
 
 
-def _init(config: Optional[str]) -> None:
+def _init(config: Optional[str], root_dir: Optional[str] = None) -> None:
+    """``flyte.init_from_config``; ``root_dir`` bounds the code bundle (the workflow file's directory)."""
+    import pathlib
+
     import flyte
 
+    kw = {"root_dir": pathlib.Path(root_dir)} if root_dir else {}
     if config:
-        flyte.init_from_config(config)
+        flyte.init_from_config(config, **kw)
     else:
-        flyte.init_from_config()
+        flyte.init_from_config(**kw)
 
 
 def _load_envs(file: str, names: List[str]) -> List[Any]:
@@ -75,7 +79,7 @@ def cmd_run(a: argparse.Namespace, rest: List[str]) -> int:
 def cmd_deploy(a: argparse.Namespace) -> int:
     from ._deploy import deploy, plan_deploy
 
-    _init(a.config)
+    _init(a.config, a.root_dir or os.path.dirname(os.path.abspath(a.file)))
     envs = _load_envs(a.file, a.env)
     if a.plan:
         out = [{"task": n, "decision": d.id, "mode": str(getattr(d.mode, "value", d.mode)), "prior": repr(t.resources),
@@ -90,7 +94,7 @@ def cmd_deploy(a: argparse.Namespace) -> int:
 def cmd_reconcile(a: argparse.Namespace) -> int:
     from ._deploy import reconcile
 
-    _init(a.config)
+    _init(a.config, a.root_dir or os.path.dirname(os.path.abspath(a.file)))
     envs = _load_envs(a.file, a.env)
     every = parse_since(a.schedule).total_seconds()
     reconcile(envs, every_s=every, rounds=a.rounds, dry_run=a.dry_run)
@@ -134,6 +138,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     d.add_argument("--dry-run", action="store_true")
     d.add_argument("--plan", action="store_true", help="print the per-task plan and exit")
     d.add_argument("--config")
+    d.add_argument("--root-dir", help="code bundle root (default: the file's directory)")
 
     c = sub.add_parser("reconcile", help="singleton: redeploy at the prior after breaker trips or a mode-ceiling drop")
     c.add_argument("file")
@@ -142,6 +147,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     c.add_argument("--rounds", type=int)
     c.add_argument("--dry-run", action="store_true")
     c.add_argument("--config")
+    c.add_argument("--root-dir")
 
     i = sub.add_parser("import", help="backfill statuses from flyte.remote")
     i.add_argument("--project")
@@ -151,7 +157,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     i.add_argument("--dry-run", action="store_true")
     i.add_argument("--config")
 
-    a = p.parse_args(argv)
+    try:
+        a = p.parse_args(argv)
+    except SystemExit as e:  # --help / usage errors: return the code (rightsizer.cli calls main())
+        return int(e.code or 0)
     if a.cmd is None:
         p.print_help()
         return 2

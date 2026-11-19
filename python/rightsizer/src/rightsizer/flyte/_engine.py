@@ -14,6 +14,7 @@ decision. Nothing lives on tasks: they stay plain, picklable data.
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import threading
@@ -24,8 +25,12 @@ log = logging.getLogger("rightsizer.flyte")
 _lock = threading.Lock()
 _state: Dict[str, Any] = {"pid": None, "engine": None, "error": None, "store": None}
 
-# Counters for the S4 "no platform state" clamp and budget expiries seen in Python.
-counters: Dict[str, int] = {"clamped_no_platform_state": 0, "budget_expired": 0, "fallbacks": 0, "decisions": 0}
+# Per-process counters (decisions made here, S1 fallbacks, Python-side deadline expiries, decisions
+# under the S4 "no platform state" clamp, decisions whose engine source was a prior with reason budget)
+# and the latest decision latencies (ms), for tests and logs.
+counters: Dict[str, int] = {"clamped_no_platform_state": 0, "budget_expired": 0, "fallbacks": 0, "decisions": 0,
+                            "prior_budget": 0, "enforced_changes": 0}
+latencies_ms: "collections.deque[float]" = collections.deque(maxlen=100_000)
 
 
 def export_flyte_storage_env(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -126,6 +131,7 @@ def reset_for_tests(engine: Any = None, error: Optional[BaseException] = None) -
             _state.update(pid=os.getpid(), engine=engine, error=error)
     for k in counters:
         counters[k] = 0
+    latencies_ms.clear()
 
 
-__all__ = ["counters", "export_flyte_storage_env", "flyte_config", "get_engine", "reset_for_tests", "resolve_store"]
+__all__ = ["counters", "latencies_ms", "export_flyte_storage_env", "flyte_config", "get_engine", "reset_for_tests", "resolve_store"]

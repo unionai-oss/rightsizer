@@ -164,3 +164,31 @@ def test_rs_remote_on_a_class_returns_the_actor_proxy():
 
 def test_identity_outside_ray():
     assert ray_child.task_identity() == (None, 1)
+
+
+def test_reused_worker_peaks_are_rebased_on_the_lowest_baseline(monkeypatch):
+    """Memory a previous task freed but the allocator kept must not make the
+    next task read ~0 (seen on macOS): its peak is taken against the worker's
+    lowest baseline and becomes an upper bound (AtMost)."""
+    from types import SimpleNamespace
+
+    from rightsizer_runtime.measure import MeasurementResult
+    from rightsizer_runtime.wire import Censor, Measurement, utcnow
+
+    monkeypatch.setitem(ray_child._baseline, "min", None)
+    MiB = 1 << 20
+
+    def res(v):
+        return MeasurementResult(started_at=utcnow(), duration_s=1.0, attribution="process",
+                                 memory_peak=Measurement(float(v), Censor.EXACT, 0.5))
+
+    # fresh worker: baseline 100 MiB, peak 300 MiB → 200 MiB exact
+    r = ray_child.reused_worker_peak(SimpleNamespace(_rss_base=100 * MiB, _rss_max=300 * MiB), res(200 * MiB))
+    assert (r.memory_peak.value, r.memory_peak.censor) == (200 * MiB, Censor.EXACT)
+    # reused worker kept the 200 MiB: baseline 300, peak 302 → the scope says 2 MiB; re-based: 202 MiB AtMost
+    r = ray_child.reused_worker_peak(SimpleNamespace(_rss_base=300 * MiB, _rss_max=302 * MiB), res(2 * MiB))
+    assert (r.memory_peak.value, r.memory_peak.censor) == (202 * MiB, Censor.AT_MOST)
+    # back near the lowest baseline (within 16 MiB): exact again
+    r = ray_child.reused_worker_peak(SimpleNamespace(_rss_base=110 * MiB, _rss_max=160 * MiB), res(50 * MiB))
+    assert (r.memory_peak.value, r.memory_peak.censor) == (60 * MiB, Censor.EXACT)
+    assert ray_child.reused_worker_peak(SimpleNamespace(), None) is None
