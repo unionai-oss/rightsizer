@@ -67,6 +67,7 @@ fn success(peak_gib: f64, req_gib: f64) -> RunRecord {
         gpu_util_mean: None,
         t_peak_frac: Some(0.5),
         duration_s: Some(600.0),
+        staged_bytes: None,
         source: OutcomeSource::Watcher,
         trust: Trust::Verified,
     }
@@ -355,6 +356,27 @@ fn s4_increase_clamped_to_ceiling() {
     assert_eq!(mem(&d.applied), Some(Bytes::gib(16)));
     assert!(mem(&d.recommended).unwrap() <= Bytes::gib(16));
     assert!(d.advisories.iter().any(|a| matches!(a, Advisory::Clamped { axis: Axis::Memory, .. })), "{:?}", d.advisories);
+}
+
+#[test]
+fn s4_clamp_reason_names_missing_platform_state() {
+    // An adapter without node shapes (Ray without autoscaler node types or
+    // `[ray] shapes`) holds increases with a ceiling at the prior and says why.
+    let mut fx = Fx::new();
+    fx.constraints.ceiling = Requests { memory: Some(Bytes::gib(4)), ..Default::default() };
+    fx.constraints.ceiling_reason = Some("no_platform_state".into());
+    let c = ctx(Some(4.0), Some(1.0));
+    let d = fx.decide(&c, Some(&est(32.0, 1.0)));
+    assert_eq!(mem(&d.applied), Some(Bytes::gib(4)));
+    assert!(
+        d.advisories.iter().any(|a| matches!(a, Advisory::Clamped { axis: Axis::Memory, reason } if reason == "no_platform_state")),
+        "{:?}",
+        d.advisories
+    );
+    // Without a reason the user ceiling is reported as "user".
+    fx.constraints.ceiling_reason = None;
+    let d = fx.decide(&c, Some(&est(32.0, 1.0)));
+    assert!(d.advisories.iter().any(|a| matches!(a, Advisory::Clamped { reason, .. } if reason == "user")), "{:?}", d.advisories);
 }
 
 #[test]

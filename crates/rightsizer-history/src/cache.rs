@@ -13,6 +13,12 @@
 //!   `history.share` merges clusters. Records of other clusters are dropped
 //!   from reads; records without a cluster are kept.
 //!
+//! - **Clock:** every TTL runs on an injectable
+//!   [`rightsizer_core::clock::Clock`] ([`CachedStore::with_clock`]); the
+//!   engine passes its own, so tests that move its clock move these TTLs.
+//!   [`CachedStore::new`] uses [`TokioClock`] (wall time anchored to tokio's
+//!   clock, so `tokio::time::pause`/`advance` move it too).
+//!
 //! [`CachedStore`] also implements [`HistoryStore`] (reads go through the
 //! cache; an unavailable read is `StoreError::Unreachable`), so it can be
 //! used wherever a store is.
@@ -24,9 +30,38 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rightsizer_core::breaker::{BreakerObjects, BreakerScope, Control, Reset, Trip};
+use rightsizer_core::clock::{Clock, elapsed};
 use rightsizer_core::{AttemptRecord, Decision, RunRecord, RunStatus, WorkloadKey};
-use tokio::time::Instant;
 use ulid::Ulid;
+
+/// Wall time that follows tokio's clock: `Utc::now()` at construction plus
+/// the tokio time elapsed since (so a paused runtime's `advance` moves it).
+#[derive(Debug)]
+pub struct TokioClock {
+    base: DateTime<Utc>,
+    start: tokio::time::Instant,
+}
+
+impl TokioClock {
+    /// Anchored now.
+    pub fn new() -> Self {
+        TokioClock { base: Utc::now(), start: tokio::time::Instant::now() }
+    }
+}
+
+impl Default for TokioClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clock for TokioClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.base + chrono::Duration::from_std(self.start.elapsed()).unwrap_or_default()
+    }
+}
+
+type Stamp = DateTime<Utc>;
 
 use crate::{
     CompactOptions, CompactReport, DecisionFilter, HistoryStore, PutOutcome, Role, StoreError, StoreInfo, StoreStats, merge_runs,
@@ -132,7 +167,7 @@ pub enum ControlRead {
 
 struct Entry<T> {
     value: T,
-    at: Instant,
+    at: Stamp,
     used: u64,
 }
 
@@ -146,7 +181,7 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
     fn new(capacity: usize) -> Self {
         Lru { map: HashMap::new(), tick: 0, capacity: capacity.max(1) }
     }
-    fn get(&mut self, k: &K) -> Option<(V, Instant)> {
+    fn get(&mut self, k: &K) -> Option<(V, Stamp)> {
         self.tick += 1;
         let t = self.tick;
         self.map.get_mut(k).map(|e| {
@@ -154,7 +189,7 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
             (e.value.clone(), e.at)
         })
     }
-    fn put(&mut self, k: K, v: V, at: Instant) {
+    fn put(&mut self, k: K, v: V, at: Stamp) {
         self.tick += 1;
         if !self.map.contains_key(&k) && self.map.len() >= self.capacity {
             // Evict the least recently used (O(n) at capacity; capacity is small).
@@ -181,18 +216,25 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
 pub struct CachedStore {
     inner: Arc<dyn HistoryStore>,
     opts: CacheOptions,
+    clock: Arc<dyn Clock>,
     runs: Mutex<Lru<String, (Vec<RunRecord>, usize)>>,
-    breakers: Mutex<HashMap<BreakerScope, (BreakerObjects, Instant)>>,
-    control: Mutex<Option<(Option<Control>, Instant)>>,
+    breakers: Mutex<HashMap<BreakerScope, (BreakerObjects, Stamp)>>,
+    control: Mutex<Option<(Option<Control>, Stamp)>>,
 }
 
 impl CachedStore {
-    /// Wrap `inner`.
+    /// Wrap `inner`; TTLs run on [`TokioClock`].
     pub fn new(inner: Arc<dyn HistoryStore>, opts: CacheOptions) -> Self {
+        Self::with_clock(inner, opts, Arc::new(TokioClock::new()))
+    }
+
+    /// Wrap `inner`; TTLs run on `clock`.
+    pub fn with_clock(inner: Arc<dyn HistoryStore>, opts: CacheOptions, clock: Arc<dyn Clock>) -> Self {
         CachedStore {
             runs: Mutex::new(Lru::new(opts.capacity)),
             inner,
             opts,
+            clock,
             breakers: Mutex::new(HashMap::new()),
             control: Mutex::new(None),
         }
@@ -212,6 +254,27 @@ impl CachedStore {
     pub fn invalidate_key(&self, key: &WorkloadKey) {
         if let Ok(mut g) = self.runs.lock() {
             g.remove(&key.to_string());
+        }
+    }
+
+    /// The clock TTLs run on.
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
+    /// The cache settings.
+    pub fn options(&self) -> &CacheOptions {
+        &self.opts
+    }
+
+    /// Drop cached breakers and the control object (after a trip, reset or
+    /// control write elsewhere in this process); history stays cached.
+    pub fn invalidate_control(&self) {
+        if let Ok(mut g) = self.breakers.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.control.lock() {
+            *g = None;
         }
     }
 
@@ -236,28 +299,28 @@ impl CachedStore {
     pub async fn history(&self, key: &WorkloadKey, limit: usize) -> HistoryRead {
         let k = key.to_string();
         let cached = self.runs.lock().ok().and_then(|mut g| g.get(&k));
-        let now = Instant::now();
+        let now = self.clock.now();
         // A cached entry answers `limit` if it holds that many records, or
         // if its fetch returned fewer than it asked for (nothing more exists).
         if let Some(((v, fetched), at)) = &cached
-            && now.duration_since(*at) < self.opts.history_ttl
+            && elapsed(now, *at) < self.opts.history_ttl
             && (v.len() >= limit || v.len() < *fetched)
         {
-            return HistoryRead::Cached { records: self.scoped(v, limit), age: now.duration_since(*at) };
+            return HistoryRead::Cached { records: self.scoped(v, limit), age: elapsed(now, *at) };
         }
         let depth = self.opts.depth.max(limit);
         match self.inner.runs(key, depth).await {
             Ok(v) => {
                 if let Ok(mut g) = self.runs.lock() {
-                    g.put(k, (v.clone(), depth), Instant::now());
+                    g.put(k, (v.clone(), depth), self.clock.now());
                 }
                 HistoryRead::Fresh(self.scoped(&v, limit))
             }
             Err(e) => {
                 tracing::warn!(error = %e, key = %key, "history read failed");
                 match cached {
-                    Some(((v, _), at)) if now.duration_since(at) < self.opts.history_ttl => {
-                        HistoryRead::Cached { records: self.scoped(&v, limit), age: now.duration_since(at) }
+                    Some(((v, _), at)) if elapsed(now, at) < self.opts.history_ttl => {
+                        HistoryRead::Cached { records: self.scoped(&v, limit), age: elapsed(now, at) }
                     }
                     _ => HistoryRead::Unavailable,
                 }
@@ -267,17 +330,17 @@ impl CachedStore {
 
     /// Breaker state, cached 60 s; `Unknown` (treat as open) when unreadable past that.
     pub async fn breaker(&self, scope: &BreakerScope) -> BreakerRead {
-        let now = Instant::now();
+        let now = self.clock.now();
         let cached = self.breakers.lock().ok().and_then(|g| g.get(scope).cloned());
         if let Some((o, at)) = &cached
-            && now.duration_since(*at) < self.opts.control_ttl
+            && elapsed(now, *at) < self.opts.control_ttl
         {
             return BreakerRead::Known(o.clone());
         }
         match self.inner.breaker_get(scope).await {
             Ok(o) => {
                 if let Ok(mut g) = self.breakers.lock() {
-                    g.insert(scope.clone(), (o.clone(), Instant::now()));
+                    g.insert(scope.clone(), (o.clone(), self.clock.now()));
                 }
                 BreakerRead::Known(o)
             }
@@ -290,17 +353,17 @@ impl CachedStore {
 
     /// Control object, cached 60 s; `Unknown` when unreadable past that.
     pub async fn control(&self) -> ControlRead {
-        let now = Instant::now();
+        let now = self.clock.now();
         let cached = self.control.lock().ok().and_then(|g| g.clone());
         if let Some((c, at)) = &cached
-            && now.duration_since(*at) < self.opts.control_ttl
+            && elapsed(now, *at) < self.opts.control_ttl
         {
             return ControlRead::Known(c.clone());
         }
         match self.inner.control_get().await {
             Ok(c) => {
                 if let Ok(mut g) = self.control.lock() {
-                    *g = Some((c.clone(), Instant::now()));
+                    *g = Some((c.clone(), self.clock.now()));
                 }
                 ControlRead::Known(c)
             }
@@ -426,7 +489,7 @@ mod tests {
     #[test]
     fn lru_evicts_least_recent() {
         let mut l: Lru<u32, u32> = Lru::new(2);
-        let t = Instant::now();
+        let t = Utc::now();
         l.put(1, 1, t);
         l.put(2, 2, t);
         assert!(l.get(&1).is_some());

@@ -407,7 +407,16 @@ pub async fn run(args: &[String], stdin_script: Option<String>, decider: &dyn De
         return out;
     }
 
-    let params = DecideParams { kind: "slurm".into(), native: native.clone(), mode: cfg.mode, env: cfg.env.clone(), deadline_ms: Some(cfg.deadline_ms) };
+    let params = DecideParams {
+        kind: "slurm".into(),
+        native: native.clone(),
+        mode: cfg.mode,
+        env: cfg.env.clone(),
+        deadline_ms: Some(cfg.deadline_ms),
+        attempt: None,
+        watch: cfg.watch,
+        dry_run: false,
+    };
     let result = match decider.decide(params).await {
         Ok(r) => r,
         Err(e) => {
@@ -472,7 +481,10 @@ pub async fn run(args: &[String], stdin_script: Option<String>, decider: &dyn De
 
     // Ladder state.
     let ids: Vec<Ulid> = result.decisions.iter().map(|d| d.id).collect();
-    let invocation = format!("rsz-sbatch:{}", Ulid::generate());
+    // The invocation is named after the first decision: the sacct importer
+    // links every job attributed to that decision (the ladder's attempts)
+    // into this invocation.
+    let invocation = ids.first().map(crate::sacct::ladder_invocation).unwrap_or_else(|| format!("rsz-sbatch:{}", Ulid::generate()));
     let units: Vec<(WorkloadKey, &Decision)> = result.decisions.iter().map(|d| (d.key.clone(), d)).collect();
     let mut applied: Vec<ResourceSpec> = result.decisions.iter().map(|d| d.applied.clone()).collect();
     let mut step = 0u32;
@@ -568,9 +580,8 @@ pub async fn run(args: &[String], stdin_script: Option<String>, decider: &dyn De
         };
         let tok = decider.sign(&current, &ids).await.ok().flatten().map(|t| split_tokens(&t)).unwrap_or_default();
         submit_native = with_exports(&current, &tok).unwrap_or_else(|_| current.clone());
-        for (key, _) in &units {
-            let _ = decider.close_lease(key, &invocation, RunStatus::OomKilled).await;
-        }
+        // The lease stays open across the ladder: the OOM was not the
+        // caller's final answer. It is closed with the final status.
         out.messages.push(format!(
             "rightsizer: job {id} ran out of memory; resubmitting at ladder step {step}/{} ({})",
             cfg.max_steps,

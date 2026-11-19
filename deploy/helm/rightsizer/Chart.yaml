@@ -1,0 +1,8 @@
+apiVersion: v2
+name: rightsizer
+description: rightsizer for Kubernetes — mutating admission webhook, leader-elected outcome watcher, optional node agent, alerts and dashboard (kubernetes.md).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords: [kubernetes, admission-webhook, resources, rightsizing]

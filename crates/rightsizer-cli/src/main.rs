@@ -10,7 +10,15 @@
 //! 1 anything else.
 
 mod adapters;
+mod daemon;
+mod flyte;
+#[cfg(feature = "k8s")]
+mod k8s;
 mod output;
+mod plugin_cmd;
+mod ray;
+#[cfg(feature = "slurm")]
+mod slurm_cmd;
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -23,7 +31,7 @@ use rightsizer_core::{
 };
 use rightsizer_engine::store::Role;
 use rightsizer_engine::{Config, ConfigEnv, DecideRequest, Engine, ReplayOptions};
-use rightsizer_history::{CompactOptions, DecisionFilter};
+use rightsizer_history::CompactOptions;
 
 #[derive(Parser, Debug)]
 #[command(name = "rsz", version, about = "Right-size AI workloads before they run")]
@@ -180,7 +188,7 @@ enum Command {
     },
     /// Plugins: list | check NAME.
     Plugin {
-        #[arg(trailing_var_arg = true)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Platform subcommands (`rsz k8s …`, `rsz slurm …`, `rsz flyte …`, …).
@@ -194,7 +202,8 @@ enum HistoryCmd {
     Import {
         /// Source: `jsonl`, or a platform (`k8s`, `slurm`, `flyte`, …).
         source: String,
-        /// Source arguments (for `jsonl`: the file, or `-`).
+        /// Source arguments (for `jsonl`: the file, or `-`; importers take flags, e.g. `--since 30d`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Show a key's history, newest first.
@@ -275,7 +284,16 @@ impl Fail {
 type Res = Result<(), Fail>;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // `rsz slurm decide-client` is on every sbatch's path (cli_filter.lua):
+    // no config, no runtime.
+    #[cfg(feature = "slurm")]
+    {
+        let a: Vec<String> = std::env::args().skip(1).collect();
+        if a.len() >= 2 && a[0] == "slurm" && a[1] == "decide-client" {
+            return ExitCode::from(slurm_cmd::decide_client_main(&a[2..]) as u8);
+        }
+    }
+    let cli = Cli::parse_from(hoist_global_flags(std::env::args().collect()));
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_env("RSZ_LOG")).with_writer(std::io::stderr).init();
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -291,6 +309,39 @@ fn main() -> ExitCode {
             ExitCode::from(f.code)
         }
     }
+}
+
+/// `history import <source> ARGS…` passes hyphenated ARGS (`--since 30d`)
+/// through to the importer, so clap would swallow global flags given after
+/// them (`… -o json`). Move `-o/--output`, `--config` and `--store` that
+/// follow `history import` in front of the subcommand.
+fn hoist_global_flags(args: Vec<String>) -> Vec<String> {
+    let Some(h) = args.iter().position(|a| a == "history") else { return args };
+    if args.get(h + 1).map(String::as_str) != Some("import") {
+        return args;
+    }
+    let (mut head, mut tail): (Vec<String>, Vec<String>) = (args[..h].to_vec(), Vec::new());
+    let rest = &args[h..];
+    let mut i = 0;
+    while i < rest.len() {
+        let a = &rest[i];
+        let takes_value = matches!(a.as_str(), "-o" | "--output" | "--config" | "--store");
+        let inline = ["--output=", "--config=", "--store="].iter().any(|p| a.starts_with(p)) || (a.starts_with("-o") && a.len() > 2 && !a.starts_with("--"));
+        if i >= 3 && takes_value && i + 1 < rest.len() {
+            head.push(a.clone());
+            head.push(rest[i + 1].clone());
+            i += 2;
+            continue;
+        }
+        if i >= 3 && inline {
+            head.push(a.clone());
+        } else {
+            tail.push(a.clone());
+        }
+        i += 1;
+    }
+    head.extend(tail);
+    head
 }
 
 fn load_config(cli: &Cli) -> Result<rightsizer_engine::Loaded, Fail> {
@@ -335,6 +386,16 @@ async fn run(cli: Cli) -> Res {
         Command::Breaker { action } => breaker(&cfg, action, out).await,
         Command::Control { action } => control(&cfg, action, out).await,
         Command::Config { .. } => unreachable!(),
+        #[cfg(feature = "k8s")]
+        Command::Platform(args) if k8s::handles(&args) => k8s::platform(&cfg, args, out).await,
+        #[cfg(feature = "slurm")]
+        Command::Platform(args) if slurm_cmd::handles(&args) => slurm_cmd::platform(&cfg, args, out).await,
+        Command::Platform(args) if ray::handles(&args) => ray::platform(&cfg, cli.config.as_deref(), cli.store.as_deref(), args),
+        Command::Platform(args) if flyte::handles(&args) => flyte::platform(&cfg, cli.config.as_deref(), cli.store.as_deref(), args),
+        Command::Serve { socket, listen } => daemon::serve(&cfg, socket, listen).await,
+        Command::Plugin { args } => plugin_cmd::run(&cfg, args, out).await,
+        #[cfg(feature = "k8s")]
+        Command::Apply { file, out: out_path, diff, watch } => k8s::apply(&cfg, &file, out_path, diff, watch, out).await,
         other => Err(Fail::other(format!("{} is not implemented yet", name(&other)))),
     }
 }
@@ -457,18 +518,7 @@ async fn shadow(cfg: &Config, tenant: Option<String>, key: Option<String>, since
         (Some(k), _) => vec![parse_key(k)?],
         (None, t) => {
             let tenant_of = |k: &WorkloadKey| format!("{}://{}", k.platform, k.tenant);
-            let mut ks: Vec<WorkloadKey> = match e.key_lister() {
-                Some(l) => l.keys(),
-                None => {
-                    // TODO(rightsizer-history): key listing; until then, keys with logged decisions.
-                    let ds = e.decisions(&DecisionFilter::default()).await.map_err(Fail::other)?;
-                    let mut m = std::collections::BTreeMap::new();
-                    for d in ds {
-                        m.entry(d.key.to_string()).or_insert(d.key);
-                    }
-                    m.into_values().collect()
-                }
-            };
+            let mut ks: Vec<WorkloadKey> = e.keys().await.map_err(Fail::other)?;
             if let Some(t) = t {
                 let t = t.trim_end_matches('/');
                 ks.retain(|k| tenant_of(k) == t || tenant_of(k).starts_with(&format!("{t}/")));
@@ -498,6 +548,11 @@ async fn shadow(cfg: &Config, tenant: Option<String>, key: Option<String>, since
 
 async fn history(cfg: &Config, action: HistoryCmd, out: Format) -> Res {
     match action {
+        #[cfg(feature = "k8s")]
+        HistoryCmd::Import { source, args } if source == "k8s" || source == "kubernetes" => k8s::import(cfg, args, out).await,
+        #[cfg(feature = "slurm")]
+        HistoryCmd::Import { source, args } if source == "slurm" => slurm_cmd::import(cfg, args, out).await,
+        HistoryCmd::Import { source, args } if source == "flyte" => flyte::import(cfg, args),
         HistoryCmd::Import { source, args } => {
             if source != "jsonl" {
                 // TODO(platform importers): `rsz history import k8s|slurm|…` dispatch to each adapter's OutcomeSource.
@@ -542,7 +597,7 @@ async fn history(cfg: &Config, action: HistoryCmd, out: Format) -> Res {
             if !jsonl {
                 return Err(Fail::parse("history export needs --parquet or --jsonl"));
             }
-            let keys = e.key_lister().map(|l| l.keys()).ok_or_else(|| Fail::other("this store cannot list keys yet (use a json:// store or --parquet)"))?;
+            let keys = e.keys().await.map_err(Fail::other)?;
             let mut buf = String::new();
             let mut n = 0;
             for k in keys {
@@ -563,9 +618,23 @@ async fn history(cfg: &Config, action: HistoryCmd, out: Format) -> Res {
             o.max_age = cfg.history.max_age;
             o.dry_run = dry_run;
             let r = e.store().compact(&o).await.map_err(Fail::other)?;
-            output::value(&serde_json::json!({"pointers": r.pointers, "snapshots": r.snapshots, "deleted": r.deleted, "dry_run": dry_run}), out, || {
-                format!("compaction: {} pointers, {} snapshots, {} deleted{}\n", r.pointers, r.snapshots, r.deleted, if dry_run { " (dry run)" } else { "" })
-            });
+            // The unclassified-failure sweep: ladder leases that expired open are unrecovered failures.
+            let sw = e.sweep(dry_run).await.map_err(Fail::other)?;
+            let tripped: Vec<String> = sw.tripped.iter().map(|s| s.to_string()).collect();
+            output::value(
+                &serde_json::json!({"pointers": r.pointers, "snapshots": r.snapshots, "deleted": r.deleted, "dry_run": dry_run,
+                    "sweep": {"keys": sw.keys, "expired_leases": sw.expired_leases, "not_caused": sw.not_caused, "tripped": tripped, "leases_closed": sw.leases_closed}}),
+                out,
+                || {
+                    let dr = if dry_run { " (dry run)" } else { "" };
+                    let mut t = format!("compaction: {} pointers, {} snapshots, {} deleted{dr}\n", r.pointers, r.snapshots, r.deleted);
+                    t.push_str(&format!("sweep: {} keys, {} leases expired open, {} breakers tripped{dr}\n", sw.keys, sw.expired_leases, sw.tripped.len()));
+                    for s in &tripped {
+                        t.push_str(&format!("  tripped: {s}\n"));
+                    }
+                    t
+                },
+            );
             Ok(())
         }
     }
@@ -611,6 +680,7 @@ async fn outcome(cfg: &Config, key: &str, status: &str, memory_peak: Option<Stri
         gpu_util_mean: None,
         t_peak_frac: None,
         duration_s,
+        staged_bytes: None,
         source: OutcomeSource::SelfReport,
         trust: Trust::Unverified,
     };

@@ -21,7 +21,7 @@ class ServeOptions:
     launch: bool = False
     kind: str = "demand"
     readout: str = "auto"                 # auto | pointer | generate
-    memory_basis: str = "need"            # need | demand
+    memory_basis: str = "demand"          # demand (need -> demand) | need (cells as labelled)
     device: str = "cpu"
     dtype: str | None = None
     merge: bool = False                   # --launch: serve a merged checkpoint instead of base + LoRA

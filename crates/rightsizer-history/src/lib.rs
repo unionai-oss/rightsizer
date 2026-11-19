@@ -37,7 +37,7 @@ mod sql;
 pub mod sqlite;
 
 pub use buffer::{BufferOptions, BufferStats, BufferedWriter, WriteOutcome};
-pub use cache::{BreakerRead, CacheOptions, CachedStore, ClusterScope, ControlRead, HistoryRead};
+pub use cache::{BreakerRead, CacheOptions, CachedStore, ClusterScope, ControlRead, HistoryRead, TokioClock};
 pub use factory::{StoreConfig, StoreUri, open, parse_uri};
 pub use memory::MemoryStore;
 pub use object::{ObjectHistoryStore, ObjectStoreOptions};

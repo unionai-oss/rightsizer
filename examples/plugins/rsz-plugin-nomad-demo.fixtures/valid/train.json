@@ -1,0 +1,6 @@
+{"native": {"kind": "object", "value": {"Job": {
+  "ID": "train", "Namespace": "ml",
+  "TaskGroups": [{"Name": "trainer", "Count": 1,
+    "Tasks": [{"Name": "main", "Driver": "docker", "Resources": {"CPU": 2000, "MemoryMB": 8192}},
+              {"Name": "logs", "Driver": "docker", "Resources": {"CPU": 100, "MemoryMB": 256}}]}]}}},
+ "env": {"cluster": "demo"}}

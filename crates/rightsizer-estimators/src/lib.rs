@@ -50,7 +50,7 @@ pub use build::{BuildError, BuiltChain, ChainSpec, MemberSpec, build_chain};
 pub use chain::{ChainAnswer, EstimatorChain, NoSkip, SkipPolicy};
 pub use gbt::Gbt;
 pub use history_peak::{HistoryPeak, HistoryPeakParams};
-pub use memo::{Memo, MemoKey, TtlCache, exact_key, normalized_estimate};
+pub use memo::{Memo, MemoAnswer, MemoKey, TtlCache, exact_key, normalized_estimate};
 pub use novelty::NoveltyModel;
 pub use prior::PriorEstimator;
 pub use rules_sized::{ColdStart, RulesSized, RulesSizedParams};

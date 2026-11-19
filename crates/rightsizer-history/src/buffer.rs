@@ -119,6 +119,72 @@ impl BufferedWriter {
         self.queue.lock().await.len()
     }
 
+    /// Entries awaiting retry, without waiting for the queue lock (the
+    /// counter is updated whenever the queue changes).
+    pub fn buffered(&self) -> usize {
+        self.buffered.load(Ordering::Relaxed) as usize
+    }
+
+    async fn enqueue(&self, p: Pending) -> WriteOutcome {
+        let mut q = self.queue.lock().await;
+        if q.len() >= self.opts.capacity {
+            let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n.is_multiple_of(1000) {
+                tracing::warn!(capacity = self.opts.capacity, dropped = n, "history write buffer full; dropping");
+            }
+            return WriteOutcome::Dropped;
+        }
+        q.push_back(p);
+        self.buffered.store(q.len() as u64, Ordering::Relaxed);
+        drop(q);
+        self.notify.notify_one();
+        WriteOutcome::Buffered
+    }
+
+    /// Queue a run record without trying it now (the caller's budget is
+    /// spent); it is written by the next [`flush`](Self::flush) or retry.
+    pub async fn defer_run(&self, rec: RunRecord) -> WriteOutcome {
+        self.enqueue(Pending::Run(Box::new(rec))).await
+    }
+
+    /// Queue a decision without trying it now.
+    pub async fn defer_decision(&self, d: Decision) -> WriteOutcome {
+        self.enqueue(Pending::Decision(Box::new(d))).await
+    }
+
+    /// [`defer_decision`](Self::defer_decision) from synchronous code: queued
+    /// now if the queue lock is free, else written by a short-lived task when
+    /// a tokio runtime is present (dropped and counted otherwise).
+    pub fn defer_decision_now(self: &Arc<Self>, d: Decision) -> WriteOutcome {
+        match self.queue.try_lock() {
+            Ok(mut q) => {
+                if q.len() >= self.opts.capacity {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    return WriteOutcome::Dropped;
+                }
+                q.push_back(Pending::Decision(Box::new(d)));
+                self.buffered.store(q.len() as u64, Ordering::Relaxed);
+                drop(q);
+                self.notify.notify_one();
+                WriteOutcome::Buffered
+            }
+            Err(_) => match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    let me = self.clone();
+                    h.spawn(async move {
+                        me.defer_decision(d).await;
+                    });
+                    WriteOutcome::Buffered
+                }
+                Err(_) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    WriteOutcome::Dropped
+                }
+            },
+        }
+    }
+
+
     async fn write(&self, p: &Pending) -> Result<PutOutcome, StoreError> {
         match p {
             Pending::Run(r) => self.store.put_run(r).await,
@@ -148,19 +214,7 @@ impl BufferedWriter {
                 }
             }
         }
-        let mut q = self.queue.lock().await;
-        if q.len() >= self.opts.capacity {
-            let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            if n == 1 || n.is_multiple_of(1000) {
-                tracing::warn!(capacity = self.opts.capacity, dropped = n, "history write buffer full; dropping");
-            }
-            return WriteOutcome::Dropped;
-        }
-        q.push_back(p);
-        self.buffered.store(q.len() as u64, Ordering::Relaxed);
-        drop(q);
-        self.notify.notify_one();
-        WriteOutcome::Buffered
+        self.enqueue(p).await
     }
 
     /// Write a run record, or buffer it.

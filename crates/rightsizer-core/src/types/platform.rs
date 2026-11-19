@@ -146,6 +146,12 @@ pub struct Constraints {
     /// Allowed GPU shapes when GPU type changes are opted in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_shapes: Option<Vec<GpuShape>>,
+    /// Why `ceiling` is set, reported as the clamp reason (advisory and
+    /// `rightsizer_clamped_total{reason}`) instead of `"user"` when the user
+    /// ceiling binds: e.g. `"no_platform_state"` when an adapter without
+    /// node shapes set it to the definition ceiling or the prior (S4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling_reason: Option<String>,
 }
 
 /// Live platform state, given to the decision rule only (plugins.md §2).

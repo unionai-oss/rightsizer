@@ -1,0 +1,127 @@
+{
+  "v": 1,
+  "id": "01M7S70Q94HFV1N45EQTMTPYBJ",
+  "key": "python://alice/etl",
+  "unit": "main",
+  "mode": "recommend",
+  "recommended": {
+    "requests": {
+      "cpu": 6000,
+      "memory": 25769803776
+    },
+    "limits": {}
+  },
+  "applied": {
+    "requests": {
+      "cpu": 6000,
+      "memory": 25769803776
+    },
+    "limits": {}
+  },
+  "prior": {
+    "spec": {
+      "requests": {
+        "cpu": 2000,
+        "memory": 8589934592
+      },
+      "limits": {}
+    },
+    "defaulted": []
+  },
+  "held": [],
+  "source": {
+    "kind": "estimator",
+    "id": "rules-sized",
+    "version": "1"
+  },
+  "estimate": {
+    "v": 1,
+    "kind": "demand",
+    "memory": {
+      "kind": "cells",
+      "grid": "rs-grid-v1",
+      "probs": [
+        2.5645182e-13,
+        7.2072404e-11,
+        2.6084788e-9,
+        2.4954582e-7,
+        0.0000040563646,
+        0.00013290423,
+        0.0009586105,
+        0.011064599,
+        0.034644224,
+        0.14651497,
+        0.19244926,
+        0.31289667,
+        0.16477983,
+        0.10828531,
+        0.021741074,
+        0.0060328953,
+        0.00044060015,
+        0.000053310956,
+        0.0000013641452,
+        7.343057e-8,
+        6.4115574e-10,
+        1.5520694e-11,
+        4.551914e-14,
+        4.4408918e-16,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "cpu_mean": {
+      "kind": "cells",
+      "grid": "rs-grid-v1",
+      "probs": [
+        0.0027806177,
+        0.0800479,
+        0.19969395,
+        0.21747766,
+        0.17230505,
+        0.11899204,
+        0.077182174,
+        0.04869216,
+        0.049396098,
+        0.01943021,
+        0.0078887325,
+        0.0033328529,
+        0.0021371467,
+        0.0004739729,
+        0.00011975062,
+        0.000033757085,
+        0.000013929733,
+        0.0000017255562,
+        3.2040415e-7,
+        1.4579343e-8,
+        1.01382555e-10,
+        2.0775601e-12,
+        4.884981e-15,
+        0.0,
+        0.0
+      ]
+    },
+    "provenance": {
+      "estimator": "rules-sized",
+      "version": "1",
+      "grid": "rs-grid-v1",
+      "features": "features-v1",
+      "latency_ms": 0
+    }
+  },
+  "propensity": 1.0,
+  "expected_cost": 0.39226235905814477,
+  "p_fail": 0.041299436,
+  "advisories": [],
+  "explanation": [
+    "estimate from rules-sized@1",
+    "memory demand p50 9.28Gi p95 22.12Gi; need = (demand + overhead 0 + staged 0) × 1.05",
+    "cpu mean p50 1.00 p95 2.32 cores",
+    "bounds: memory floor unset (platform unset, size-scaled unset), ceiling 2Ti (grid); cpu ceiling 128 (grid); trust region ≥ 4Gi (anchor 8Gi)",
+    "S3: ladder none; risk oom×16 delay×1 neighbour×4",
+    "recommended memory 24Gi cpu 6: expected $0.3923, p_fail 0.041",
+    "applied memory 24Gi cpu 6: expected $0.3923, p_fail 0.041 (prior memory 8Gi cpu 2: expected $1.7067, p_fail 0.647)",
+    "mode recommend: applied is what enforce would apply"
+  ],
+  "context_digest": "sha256:6eb1c4691e30ea8d32591d111b7f4a972f90d7163749c189081bcc414fa80f30"
+}

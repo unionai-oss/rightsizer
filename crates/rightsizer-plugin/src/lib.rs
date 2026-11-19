@@ -6,8 +6,16 @@
 //! [`PlatformState`]) and optionally an [`OutcomeSource`]; none of them touch
 //! estimators or the decision rule.
 //!
-//! Status: types, traits and protocol messages are complete; the stdio
-//! plugin client and the conformance suite (`rsz plugin check`) are next.
+//! Modules:
+//! - [`protocol`]: message types; [`rpc`]: NDJSON framing and N/N-1 version
+//!   negotiation;
+//! - [`server`]: the serving loop (concurrency, `$/cancel`, `deadline_ms`)
+//!   and the Unix-socket listener with peer credentials (shim → core);
+//! - [`client`]: long-lived stdio plugin processes and [`client::PluginAdapter`]
+//!   (core → plugin);
+//! - [`compose`]: the `decide` composite (extract → engine → render → validate);
+//! - [`discovery`]: `PATH` / config discovery and sha256 pins;
+//! - [`conformance`]: `rsz plugin check`.
 
 #![forbid(unsafe_code)]
 
@@ -23,7 +31,13 @@ pub use rightsizer_core::{
     ResourceSpec, RunRecord, Tenant, UnitId, WorkloadKey,
 };
 
+pub mod client;
+pub mod compose;
+pub mod conformance;
+pub mod discovery;
 pub mod protocol;
+pub mod rpc;
+pub mod server;
 
 /// A native submission, as the plugin received it (plugins.md §2).
 /// JSON: `{"kind": "document", "media_type": ..., "bytes": "<base64>"}`, …

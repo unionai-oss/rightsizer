@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [features]
 default = ["k8s", "slurm", "postgres"]
-k8s = ["dep:rightsizer-k8s", "rightsizer-k8s/webhook", "rightsizer-k8s/cluster"]
+k8s = ["dep:rightsizer-k8s", "rightsizer-k8s/webhook", "rightsizer-k8s/cluster", "dep:kube", "dep:k8s-openapi", "dep:base64"]
 slurm = ["dep:rightsizer-slurm"]
 postgres = ["rightsizer-engine/postgres"]
 s3 = ["rightsizer-engine/s3"]
@@ -22,11 +22,14 @@ remote = ["rightsizer-engine/remote"]
 
 [dependencies]
 rightsizer-core.workspace = true
-rightsizer-engine.workspace = true
+rightsizer-engine = { workspace = true, features = ["object-store", "sqlite"] }
 rightsizer-history.workspace = true
 rightsizer-estimators.workspace = true
 rightsizer-plugin.workspace = true
 rightsizer-k8s = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 rightsizer-slurm = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +45,7 @@ chrono.workspace = true
 ulid.workspace = true
 humantime.workspace = true
 async-trait.workspace = true
+axum.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

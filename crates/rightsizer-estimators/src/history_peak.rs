@@ -27,7 +27,7 @@ use rightsizer_core::grid::Grid;
 use rightsizer_core::{Estimate, EstimateKind, Provenance, RunRecord, WorkloadContext};
 
 use crate::common::{
-    Bump, MIB, Resource, censored_max, cpu_mean_obs, cpu_peak_obs, duration_estimate, durations, gpu_obs, lognormal_cells, memory_obs,
+    Bump, MIB, Resource, censored_max, cpu_mean_obs, cpu_peak_obs, duration_estimate, durations, gpu_obs, lognormal_cells, memory_demand_obs, staged_now,
     prefer_same_digest, t_peak_median,
 };
 use crate::{EstimateAxis, EstimateError, Estimator, EstimatorInfo, Needs};
@@ -108,9 +108,10 @@ impl HistoryPeak {
 
     fn records<'a>(&self, ctx: &'a WorkloadContext) -> Vec<&'a RunRecord> {
         let o = ctx.platform.overhead.median_bytes();
+        let st = staged_now(ctx);
         let digest = ctx.code.as_ref().map(|c| c.digest.as_str());
         prefer_same_digest(&ctx.history, digest, self.params.k, |r| {
-            memory_obs(r, o).is_some() || cpu_mean_obs(r, 0.0).is_some() || cpu_peak_obs(r, 0.0).is_some() || gpu_obs(r).is_some()
+            memory_demand_obs(r, o, st).is_some() || cpu_mean_obs(r, 0.0).is_some() || cpu_peak_obs(r, 0.0).is_some() || gpu_obs(r).is_some()
         })
     }
 }
@@ -131,6 +132,7 @@ impl Estimator for HistoryPeak {
         let g = &self.grid;
         let bump = Bump { factor: p.bump_factor, add_bytes: p.bump_add_mib * MIB };
         let o = ctx.platform.overhead.median_bytes();
+        let st = staged_now(ctx);
         let cpu_o = ctx.platform.overhead.cpu_millis as f64 / 1000.0;
         let mut e = Estimate::empty(Provenance {
             estimator: self.info.id.clone(),
@@ -139,7 +141,7 @@ impl Estimator for HistoryPeak {
             features: String::new(),
             latency_ms: 0,
         });
-        e.memory = censored_max(recs.iter().filter_map(|r| memory_obs(r, o)), Resource::Memory, &bump)
+        e.memory = censored_max(recs.iter().filter_map(|r| memory_demand_obs(r, o, st)), Resource::Memory, &bump)
             .map(|c| lognormal_cells(g, Resource::Memory, c.center * p.margin, p.sigma, c.lower));
         e.cpu_mean = censored_max(recs.iter().filter_map(|r| cpu_mean_obs(r, cpu_o)), Resource::Cpu, &bump)
             .map(|c| lognormal_cells(g, Resource::Cpu, c.center * p.cpu_margin, p.sigma, c.lower));

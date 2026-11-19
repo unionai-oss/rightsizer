@@ -97,7 +97,7 @@ def build_estimate(
     gpu_threshold: float | None = None,
     axes: Sequence[str] | None = None,
     cpu_fields: Sequence[str] = ("cpu_mean", "cpu_peak"),
-    memory_basis: str = "need",
+    memory_basis: str = "demand",
     memory_overhead_bytes: float = 0.0,
     features: str = "features-v1",
     latency_ms: int = 0,
@@ -105,9 +105,12 @@ def build_estimate(
     """An ``Estimate`` dict from per-key option probabilities (``memory``,
     ``cpu``, ``gpu``, each over its options as written in the prompt).
 
-    ``memory_basis="need"`` maps the memory cells as they are (models.md §4:
-    "probabilities map cell to cell"); ``"demand"`` converts the tuner's need
-    label to demand (:func:`need_to_demand`) with ``memory_overhead_bytes``."""
+    ``memory_basis="demand"`` (the default) converts the tuner's need label,
+    need = (peak + runtime) x 1.05, to the demand rightsizer estimators emit
+    (SPEC §5.2; :func:`need_to_demand` with ``memory_overhead_bytes``), so the
+    decision's own overhead and headroom are not counted twice; ``"need"``
+    maps the memory cells as they are (models.md §4: "probabilities map cell
+    to cell"; conservative by up to about a cell)."""
     if kind not in ("demand", "action"):
         raise ValueError(f"kind must be demand or action, not {kind!r}")
     want = set(normalize_axes(axes) or ESTIMATE_AXES)

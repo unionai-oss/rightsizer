@@ -1,0 +1,18 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: oom
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 900
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: main
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-c", "import time; time.sleep(3); x = b'x' * (300 << 20); time.sleep(5)"]
+          resources:
+            requests: {cpu: 250m, memory: 128Mi}
+            limits: {memory: 128Mi}

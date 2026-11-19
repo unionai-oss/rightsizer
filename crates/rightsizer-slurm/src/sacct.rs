@@ -594,14 +594,73 @@ pub fn to_run_record(j: &SacctJob, cfg: &ImportConfig) -> Option<RunRecord> {
         gpu_util_mean,
         t_peak_frac: None,
         duration_s: Some(elapsed),
+        staged_bytes: None,
         source: SourceKind::Sacct,
         trust: if j.account.is_empty() { Trust::Unverified } else { Trust::Verified },
     })
 }
 
+/// The invocation id of a ladder (`rsz slurm sbatch --watch`): every job
+/// attributed (verified) to the same decision is an attempt of it.
+pub fn ladder_invocation(decision_id: &Ulid) -> String {
+    format!("rsz-sbatch:{decision_id}")
+}
+
 /// Convert many jobs.
 pub fn to_run_records(jobs: &[SacctJob], cfg: &ImportConfig) -> Vec<RunRecord> {
     jobs.iter().filter_map(|j| to_run_record(j, cfg)).collect()
+}
+
+/// A verified ladder group: `(decision id, array task, het offset)`.
+pub type LadderGroup = (Ulid, Option<u64>, Option<u32>);
+
+/// Jobs whose AdminComment *verifies* the same decision, by group, in
+/// submission (job id) order: candidate attempts of one ladder.
+pub fn verified_groups(jobs: &[SacctJob]) -> BTreeMap<LadderGroup, Vec<u64>> {
+    let mut g: BTreeMap<LadderGroup, Vec<u64>> = BTreeMap::new();
+    for j in jobs {
+        if let Some((Some(id), true)) = parse_admin_comment(&j.admin_comment) {
+            g.entry((id, j.array_task, j.het_offset)).or_default().push(j.job_id);
+        }
+    }
+    for v in g.values_mut() {
+        v.sort_unstable();
+    }
+    g
+}
+
+/// Link the attempts of ladders (`rsz slurm sbatch --watch`): for each
+/// verified group whose decision `is_ladder` (the wrapper wrote its attempt
+/// record under [`ladder_invocation`]), the group's records become attempts
+/// 1, 2, … of that invocation (plus `_<task>` / `+<offset>` for array tasks
+/// and het components), so attribution sees the attempt that recovered an
+/// OOM and the wrapper's lease. Records are matched by their
+/// `{cluster}:{job id}` invocation. Returns how many records were linked.
+pub fn link_ladders(jobs: &[SacctJob], records: &mut [RunRecord], cfg: &ImportConfig, is_ladder: impl Fn(&Ulid) -> bool) -> usize {
+    let cluster_of: BTreeMap<u64, String> = jobs.iter().map(|j| (j.job_id, if j.cluster.is_empty() { cfg.cluster.clone() } else { j.cluster.clone() })).collect();
+    let mut n = 0;
+    for ((id, task, het), ids) in verified_groups(jobs) {
+        if !is_ladder(&id) {
+            continue;
+        }
+        let mut inv = ladder_invocation(&id);
+        if let Some(t) = task {
+            inv.push_str(&format!("_{t}"));
+        }
+        if let Some(h) = het {
+            inv.push_str(&format!("+{h}"));
+        }
+        for (k, jid) in ids.iter().enumerate() {
+            let Some(c) = cluster_of.get(jid) else { continue };
+            let old = format!("{c}:{jid}");
+            for r in records.iter_mut().filter(|r| r.invocation_id == old) {
+                r.invocation_id = inv.clone();
+                r.attempt = k as u32 + 1;
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// `sacct` as an [`OutcomeSource`].

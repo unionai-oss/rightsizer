@@ -47,7 +47,7 @@ use rightsizer_core::{Estimate, EstimateKind, InputFormat, Provenance, RunRecord
 
 use crate::common::{
     Bump, MIB, Obs, Resource, censored_max, cpu_mean_obs, cpu_peak_obs, duration_estimate, durations, gpu_obs, learnable, lognormal_cells,
-    memory_obs, prefer_same_digest, t_peak_median,
+    memory_demand_obs, prefer_same_digest, staged_now, t_peak_median,
 };
 use crate::{EstimateAxis, EstimateError, Estimator, EstimatorInfo, Needs};
 
@@ -259,12 +259,13 @@ impl RulesSized {
     pub fn memory_basis(&self, ctx: &WorkloadContext) -> Option<MemoryBasis> {
         let p = &self.params;
         let o = ctx.platform.overhead.median_bytes();
+        let st = staged_now(ctx);
         let b_now = ctx.input_bytes();
         let digest = ctx.code.as_ref().map(|c| c.digest.as_str());
-        let cands = prefer_same_digest(&ctx.history, digest, p.history_k, |r| memory_obs(r, o).is_some());
+        let cands = prefer_same_digest(&ctx.history, digest, p.history_k, |r| memory_demand_obs(r, o, st).is_some());
         if let Some(anchor) = nearest_by_size(&cands, b_now) {
             let bump = p.bump();
-            let obs = memory_obs(anchor, o)?;
+            let obs = memory_demand_obs(anchor, o, st)?;
             let s = scale(b_now, anchor.input_bytes());
             let (mut center, mut lower) = if obs.is_lower_bound() {
                 (bump.apply(obs.value, Resource::Memory) * s, obs.value * s)
@@ -273,7 +274,7 @@ impl RulesSized {
             };
             // Other lower bounds from runs no larger than this one.
             for r in &cands {
-                let Some(ob) = memory_obs(r, o).filter(Obs::is_lower_bound) else { continue };
+                let Some(ob) = memory_demand_obs(r, o, st).filter(Obs::is_lower_bound) else { continue };
                 let no_larger = match (b_now, r.input_bytes()) {
                     (Some(n), Some(h)) => h <= n,
                     _ => true,

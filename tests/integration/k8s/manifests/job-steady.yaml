@@ -1,0 +1,18 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: steady
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 900
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: main
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-c", "import time; x = b'x' * (100 << 20); time.sleep(50)"]
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 512Mi}

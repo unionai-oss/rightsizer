@@ -22,7 +22,7 @@ use rightsizer_core::{
     RunRecord, RunStatus, UnitId, WorkloadContext, WorkloadKey,
 };
 use rightsizer_estimators::EstimatorChain;
-use rightsizer_features::{DefaultResolver, SsrfGuard};
+use rightsizer_features::{DefaultResolver, ReadBudget, ReadOptions, SsrfGuard};
 use rightsizer_history::{DecisionFilter, HistoryStore};
 use tokio::sync::Semaphore;
 use ulid::Ulid;
@@ -114,14 +114,22 @@ impl EngineBuilder {
                 metrics.error("config", "invalid");
             }
         }
-        let view = StoreView::new(opened.store, config.history.clone(), config.breaker.cache_ttl, metrics.clone());
-        let memo = Memo::new(config.decision.memo_ttl, config.decision.memo_capacity);
+        let view = StoreView::with_clock(opened.store, config.history.clone(), config.breaker.cache_ttl, metrics.clone(), self.clock.clone());
+        let memo = Memo::with_clock(grid.clone(), config.decision.memo_ttl, config.decision.memo_capacity, self.clock.clone()).with_point_sigma(config.decision.point_sigma);
         let limiter = Semaphore::new(config.decision.max_concurrent_decisions.max(1));
         let resolver = Arc::new(DefaultResolver::new(SsrfGuard::new(&config.features.allow_hosts)));
         let privacy = crate::chain::privacy(&config.privacy);
+        let read_opts = ReadOptions::new(ReadBudget {
+            per_input_bytes: config.features.max_input_bytes,
+            per_context: Duration::from_millis(config.features.budget_ms.max(1) as u64),
+            ..ReadBudget::default()
+        })
+        .with_guard(SsrfGuard::new(&config.features.allow_hosts))
+        .with_salt(privacy.salt.clone());
         Ok(Engine {
             inner: Arc::new(Inner {
                 resolver,
+                read_opts,
                 privacy,
                 chains: Mutex::new(HashMap::new()),
                 config_error: (!errors.is_empty()).then(|| errors.join("; ")),
@@ -142,8 +150,9 @@ impl EngineBuilder {
 
 struct Inner {
     /// Input readers' resolver (SSRF-guarded).
-    #[allow(dead_code)] // TODO(rightsizer-features): used once `build_context` is wired in (see `context`).
     resolver: Arc<DefaultResolver>,
+    /// Read options template (budgets, guard, salt); per decision the time budget and `hash_only` are set.
+    read_opts: ReadOptions,
     privacy: rightsizer_features::Privacy,
     /// Chains for per-request `policy.chain` overrides, by member names.
     chains: Mutex<HashMap<Vec<String>, EstimatorChain>>,
@@ -197,6 +206,21 @@ pub struct OutcomeReport {
     pub tripped: Vec<BreakerScope>,
     /// A ladder lease was closed.
     pub lease_closed: bool,
+}
+
+/// What [`Engine::sweep`] found and did.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct SweepReport {
+    /// Keys looked at.
+    pub keys: usize,
+    /// Failed invocations whose ladder lease expired open.
+    pub expired_leases: usize,
+    /// Of those, failures attributed as not caused by rightsizer (no trip).
+    pub not_caused: usize,
+    /// Breakers tripped (dry run: that would be tripped).
+    pub tripped: Vec<BreakerScope>,
+    /// Leases closed.
+    pub leases_closed: usize,
 }
 
 /// One breaker as `rsz breaker status` shows it.
@@ -318,9 +342,21 @@ impl Engine {
         &self.inner.view
     }
 
-    /// Key listing, when the store supports it.
+    /// An injected key lister (compat; prefer [`Engine::keys`]).
     pub fn key_lister(&self) -> Option<&Arc<dyn KeyLister>> {
         self.inner.keys.as_ref()
+    }
+
+    /// Every workload key with stored runs: an injected lister, else
+    /// `HistoryStore::keys()` (every backend), sorted and de-duplicated.
+    pub async fn keys(&self) -> Result<Vec<WorkloadKey>, EngineError> {
+        let mut ks = match &self.inner.keys {
+            Some(l) => l.keys(),
+            None => self.store().keys().await?,
+        };
+        ks.sort_by_key(|k| k.to_string());
+        ks.dedup();
+        Ok(ks)
     }
 
     /// The estimator chain.
@@ -433,13 +469,56 @@ impl Engine {
                         (r.runs, r.available)
                     }
                 };
-                // TODO(rightsizer-features): `build_context` once its future is `Send` (see `context`).
-                // The read budget, when reads land: min(features.budget_ms, half the time left).
-                let _ = deadline;
-                let ctx = crate::context::complete_seed(key, unit, seed, prior, platform, history, &self.inner.privacy, cfg.decision.history_limit);
+                let ctx = self.seed_context(key, unit, seed, prior, platform, history, deadline).await;
                 (ctx, available)
             }
         }
+    }
+
+    /// Seed → context via `rightsizer_features::build_context_with`: code
+    /// info, distribution markers, input metadata read within
+    /// min(`features.budget_ms`, half of what is left of the decision
+    /// budget), salted URI hashes, allowlisted labels. With
+    /// `manifest.extra.inputs_hash_only` (the K8s admission path) no input
+    /// is read: URIs are only hashed. `history` is used as given (groups
+    /// pass the union of their members' history), truncated to
+    /// `decision.history_limit`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn seed_context(
+        &self,
+        key: &WorkloadKey,
+        unit: &UnitId,
+        seed: &rightsizer_core::ContextSeed,
+        prior: &Prior,
+        platform: &PlatformRef,
+        history: Vec<RunRecord>,
+        deadline: Option<Instant>,
+    ) -> WorkloadContext {
+        let cfg = &self.inner.config;
+        let mut opts = self.inner.read_opts.clone();
+        let mut per = Duration::from_millis(cfg.features.budget_ms.max(1) as u64);
+        if let Some(d) = deadline {
+            per = per.min(d.saturating_duration_since(Instant::now()) / 2);
+        }
+        opts.budget.per_context = per.max(Duration::from_millis(1));
+        opts.hash_only = crate::context::inputs_hash_only(seed);
+        let labels = std::collections::BTreeMap::new();
+        let mut ctx = rightsizer_features::build_context_with(
+            seed,
+            key.clone(),
+            unit.clone(),
+            prior.clone(),
+            platform.clone(),
+            Vec::new(),
+            &labels,
+            &self.inner.privacy,
+            &opts,
+            self.inner.resolver.as_ref(),
+        )
+        .await;
+        ctx.history = history;
+        ctx.history.truncate(cfg.decision.history_limit);
+        ctx
     }
 
     /// Resolve the effective mode and the estimator skip list.
@@ -549,22 +628,11 @@ impl Engine {
                 ph.push_str("(skip)");
             }
         }
-        MemoKey {
-            key: format!("{}#{}", ctx.key, ctx.unit.0),
-            code_digest: ctx.code.as_ref().map(|c| c.digest.clone()).unwrap_or_default(),
-            bucket: rightsizer_features::feature_bucket(&ctx.inputs, &self.inner.grid),
-            policy_hash: rightsizer_core::digest::sha256_hex(ph.as_bytes())[..16].to_string(),
-        }
+        MemoKey::new(ctx, &self.inner.grid, &rightsizer_core::digest::sha256_hex(ph.as_bytes())[..16])
     }
 
     /// The chain's answer: memo hit, or one (single-flight) chain call.
     pub(crate) async fn estimate(&self, ctx: &WorkloadContext, chain: &EstimatorChain, skip: &[String], use_memo: bool) -> (ChainResult, bool) {
-        let now = self.now();
-        let memo = &self.inner.memo;
-        let k = self.memo_key(ctx, chain, skip);
-        if use_memo && let Some(hit) = memo.get(&k, now) {
-            return (hit, true);
-        }
         let run = || async {
             let _permit = self.inner.limiter.acquire().await.ok();
             let a = chain.estimate(ctx, skip).await;
@@ -586,11 +654,8 @@ impl Engine {
         if !use_memo {
             return (run().await, false);
         }
-        let cell = memo.flight(&k);
-        let res = cell.get_or_init(run).await.clone();
-        memo.put(k.clone(), res.clone(), now);
-        memo.land(&k, &cell);
-        (res, false)
+        let k = self.memo_key(ctx, chain, skip);
+        self.inner.memo.get_or_compute(&k, run).await
     }
 
     pub(crate) fn params(&self, req: &DecideRequest, eff: &Effective, block: Option<HoldReason>) -> DecisionParams {
@@ -913,7 +978,7 @@ impl Engine {
         let now = self.now();
         let mut report = OutcomeReport { written: self.inner.view.put(Pending::Run(Box::new(rec.clone()))).await, ..Default::default() };
         let key_s = rec.key.to_string();
-        self.inner.memo.invalidate_key(&key_s);
+        self.inner.memo.invalidate_workload(&key_s);
         self.inner.view.invalidate(&rec.key);
         let platform = rec.key.platform.clone();
 
@@ -957,16 +1022,7 @@ impl Engine {
         if rec.status.is_failure() {
             let history = self.store().runs(&rec.key, cfg.decision.history_limit.max(64)).await.unwrap_or_default();
             let attempts: Vec<RunRecord> = history.iter().filter(|h| h.invocation_id == rec.invocation_id).cloned().collect();
-            let others: Vec<RunRecord> = history.iter().filter(|h| h.invocation_id != rec.invocation_id).cloned().collect();
-            beyond = safety::input_beyond_history(&rec, &others);
-            let actx = AttributionContext {
-                origin_prior: origin.clone(),
-                retry_at_or_above_prior_failed: safety::retry_at_or_above_prior_failed(&rec, &attempts, &origin),
-                input_beyond_history: false,
-                now,
-                classification_window: chrono::Duration::from_std(cfg.policy.classification_window).unwrap_or_default(),
-            };
-            attribution = safety::attribute(&rec, &actx);
+            (attribution, beyond) = self.attribute_failure(&rec, &history, &origin, now);
             report.attribution = Some(match attribution {
                 Attribution::Caused => "caused",
                 Attribution::NotCaused => "not_caused",
@@ -981,10 +1037,7 @@ impl Engine {
                     l.closed_at.is_none() && since(now, failure_end) < cfg.policy.lease_ttl
                 });
                 if !recovered && !lease_live {
-                    let scope = match (beyond, input_bucket(rec.input_bytes(), &self.inner.grid)) {
-                        (true, Some(b)) => BreakerScope::InputBucket { key: rec.key.clone(), bucket: b },
-                        _ => BreakerScope::Workload { key: rec.key.clone() },
-                    };
+                    let scope = self.failure_scope(&rec, beyond);
                     let detail = format!("invocation {} attempt {} failed rightsizer-caused ({:?}) and was not recovered", rec.invocation_id, rec.attempt, rec.status);
                     if self.trip_if_closed(scope.clone(), TripReason::UnrecoveredFailure, detail).await {
                         report.tripped.push(scope);
@@ -1031,6 +1084,100 @@ impl Engine {
         for p in proposals {
             if matches!(p.scope, BreakerScope::Fleet | BreakerScope::EstimatorVersion { .. }) && self.trip_if_closed(p.scope.clone(), p.reason, p.detail).await {
                 report.tripped.push(p.scope);
+            }
+        }
+        Ok(report)
+    }
+
+    /// S5 attribution of a failed record against its key's `history` (the
+    /// invocation's other attempts and the other invocations), as
+    /// `(attribution, input beyond history)`. Shared by [`Engine::outcome`]
+    /// and [`Engine::sweep`].
+    fn attribute_failure(&self, rec: &RunRecord, history: &[RunRecord], origin: &Requests, now: DateTime<Utc>) -> (Attribution, bool) {
+        let cfg = &self.inner.config;
+        let attempts: Vec<RunRecord> = history.iter().filter(|h| h.invocation_id == rec.invocation_id).cloned().collect();
+        let others: Vec<RunRecord> = history.iter().filter(|h| h.invocation_id != rec.invocation_id).cloned().collect();
+        let beyond = safety::input_beyond_history(rec, &others);
+        let actx = AttributionContext {
+            origin_prior: origin.clone(),
+            retry_at_or_above_prior_failed: safety::retry_at_or_above_prior_failed(rec, &attempts, origin),
+            input_beyond_history: false,
+            now,
+            classification_window: chrono::Duration::from_std(cfg.policy.classification_window).unwrap_or_default(),
+        };
+        (safety::attribute(rec, &actx), beyond)
+    }
+
+    /// The breaker a caused, unrecovered failure trips: the input bucket when
+    /// its input was beyond the history's sizes, else the workload.
+    fn failure_scope(&self, rec: &RunRecord, beyond: bool) -> BreakerScope {
+        match (beyond, input_bucket(rec.input_bytes(), &self.inner.grid)) {
+            (true, Some(b)) => BreakerScope::InputBucket { key: rec.key.clone(), bucket: b },
+            _ => BreakerScope::Workload { key: rec.key.clone() },
+        }
+    }
+
+    /// The unclassified-failure sweep (SPEC §2.3 S5, §7.2): a ladder lease
+    /// still open `policy.lease_ttl` past the end of its invocation's last
+    /// failure means the escalation never reported, so that failure counts
+    /// as **unrecovered**. For each such failure that is caused (or still
+    /// unclassified: S5 counts it once the classification window passes)
+    /// the per-workload breaker (input-bucket when the input was beyond the
+    /// history) is tripped if closed, and the lease is closed with the
+    /// failure's status so it is swept once. Run by `rsz history compact`;
+    /// the K8s watcher can call it periodically. `dry_run` reports without
+    /// writing.
+    pub async fn sweep(&self, dry_run: bool) -> Result<SweepReport, EngineError> {
+        let cfg = &self.inner.config;
+        let now = self.now();
+        let mut report = SweepReport::default();
+        for key in self.keys().await? {
+            report.keys += 1;
+            let history = self.store().runs(&key, cfg.decision.history_limit.max(64)).await?;
+            let mut invocations: Vec<&str> = history.iter().filter(|r| r.status.is_failure()).map(|r| r.invocation_id.as_str()).collect();
+            invocations.sort_unstable();
+            invocations.dedup();
+            for inv in invocations {
+                let Some(att) = self.store().attempt_get(&key, inv).await? else { continue };
+                if !att.lease.as_ref().is_some_and(|l| l.closed_at.is_none()) {
+                    continue;
+                }
+                let tries: Vec<&RunRecord> = history.iter().filter(|r| r.invocation_id == inv).collect();
+                let Some(last) = tries.iter().filter(|r| r.status.is_failure()).max_by_key(|r| (r.attempt, r.started_at)).copied() else { continue };
+                if tries.iter().any(|r| r.attempt > last.attempt && r.status == RunStatus::Succeeded) {
+                    continue; // recovered; the classifier will close the lease
+                }
+                let end = last.started_at + chrono::Duration::milliseconds((last.duration_s.unwrap_or(0.0).max(0.0) * 1000.0) as i64);
+                if since(now, end) < cfg.policy.lease_ttl {
+                    continue; // the ladder may still report
+                }
+                report.expired_leases += 1;
+                let origin = last.origin_prior.clone().unwrap_or_else(|| att.origin_prior.clone());
+                let (attribution, beyond) = self.attribute_failure(last, &history, &origin, now);
+                if attribution == Attribution::NotCaused {
+                    report.not_caused += 1;
+                } else {
+                    let scope = self.failure_scope(last, beyond);
+                    if dry_run {
+                        report.tripped.push(scope);
+                    } else {
+                        let detail = format!(
+                            "invocation {inv} attempt {} failed ({:?}) and its ladder lease expired open {} s past the failure: unrecovered",
+                            last.attempt,
+                            last.status,
+                            cfg.policy.lease_ttl.as_secs()
+                        );
+                        if self.trip_if_closed(scope.clone(), TripReason::UnrecoveredFailure, detail).await {
+                            report.tripped.push(scope);
+                        }
+                    }
+                }
+                if !dry_run {
+                    match self.store().attempt_close_lease(&key, inv, now, last.status).await {
+                        Ok(()) => report.leases_closed += 1,
+                        Err(e) => tracing::warn!(error = %e, key = %key, invocation = inv, "sweep: lease close failed"),
+                    }
+                }
             }
         }
         Ok(report)

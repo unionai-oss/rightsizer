@@ -1,0 +1,72 @@
+{
+  "context": {
+    "kind": "seed",
+    "key": "python://alice/etl",
+    "unit": "main",
+    "seed": {
+      "inputs": [
+        {
+          "name": "x",
+          "bytes": 3221225472,
+          "format": "csv"
+        }
+      ],
+      "manifest": {
+        "sidecars": 0,
+        "init_containers": 0,
+        "distributed": false
+      },
+      "labels": {}
+    },
+    "prior": {
+      "spec": {
+        "requests": {
+          "cpu": 2000,
+          "memory": 8589934592
+        },
+        "limits": {}
+      },
+      "defaulted": []
+    },
+    "platform": {
+      "kind": "python",
+      "version": "",
+      "overhead": {
+        "memory_mib": [],
+        "cpu_millis": 0
+      },
+      "retry": {
+        "same_size": 0
+      },
+      "cpu_window_s": 15,
+      "memory_enforced": true
+    }
+  },
+  "constraints": {
+    "pinned": [],
+    "held": [],
+    "floor": {},
+    "ceiling": {}
+  },
+  "state": {
+    "shapes": [],
+    "request_model": {
+      "kind": "free"
+    },
+    "price": {
+      "kind": "packed"
+    },
+    "floors": {}
+  },
+  "policy": {
+    "mode": "off",
+    "max_mode": null,
+    "risk": null,
+    "chain": null,
+    "enforce_without_prior": null,
+    "exploration": null,
+    "allow_gpu_type_change": null,
+    "can_classify": null
+  },
+  "dry_run": true
+}

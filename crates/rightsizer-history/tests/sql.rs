@@ -42,6 +42,33 @@ async fn sqlite_reads_n_and_n_minus_1_rows() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn sqlite_reads_breaker_rows_at_the_legacy_scope_path() {
+    use rightsizer_core::breaker::BreakerScope;
+    let s = SqliteStore::in_memory_with(SqliteOptions { role: Role::Operator, ..Default::default() }).unwrap();
+    let scope = BreakerScope::Workload { key: k1() };
+    let old = trip(scope.clone(), t(1));
+    {
+        let c = s.connection().lock().unwrap();
+        c.execute(
+            "INSERT INTO breaker_trips (id, scope_path, at_ms, body) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![old.id.to_string(), scope.legacy_path().unwrap(), 1000, serde_json::to_string(&old).unwrap()],
+        )
+        .unwrap();
+    }
+    let new = trip(scope.clone(), t(2));
+    s.breaker_trip(&new).await.unwrap();
+    let paths: Vec<String> = {
+        let c = s.connection().lock().unwrap();
+        let mut st = c.prepare("SELECT scope_path FROM breaker_trips ORDER BY id").unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(paths, vec![scope.legacy_path().unwrap(), scope.path()]);
+    assert!(scope.path().starts_with("workload/k8s/"));
+    assert_eq!(s.breaker_get(&scope).await.unwrap().trips.len(), 2);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn sqlite_lease_takeover_and_stats() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("h.db");

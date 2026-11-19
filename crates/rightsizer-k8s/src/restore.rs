@@ -13,6 +13,7 @@ use crate::objects::{self, Kind};
 use crate::path;
 use crate::segs;
 use crate::prior::{PRIOR_ANNOTATION, SigningKeys};
+use crate::render::SIZED_LABEL;
 use crate::resources::{bytes_value, cpu_value};
 
 /// What restore found.
@@ -100,8 +101,10 @@ pub fn restore(object: &Value, keys: &SigningKeys) -> Result<Restore> {
     for a in [PRIOR_ANNOTATION, DECISION_ID, RECOMMENDATION] {
         ops.push(Op::Remove { path: path!["metadata", "annotations", a] });
     }
+    ops.push(Op::Remove { path: path!["metadata", "labels", SIZED_LABEL] });
     for s in &w.sites {
         ops.push(Op::Remove { path: join(&s.meta_path, &segs!["annotations", DECISION_ID]) });
+        ops.push(Op::Remove { path: join(&s.meta_path, &segs!["labels", SIZED_LABEL]) });
     }
     if w.kind == Kind::CronJob {
         ops.push(Op::Remove { path: path!["spec", "jobTemplate", "metadata", "annotations", DECISION_ID] });
@@ -114,16 +117,20 @@ pub fn restore(object: &Value, keys: &SigningKeys) -> Result<Restore> {
         metas.push(path!["spec", "jobTemplate", "metadata"]);
     }
     for m in metas {
-        let ann = join(&m, &segs!["annotations"]);
-        if edit::get(&after, &ann).and_then(Value::as_object).is_some_and(|o| o.is_empty()) {
-            let had = edit::get(object, &ann).and_then(Value::as_object).is_some_and(|o| o.keys().all(|k| k.starts_with("rightsizer.io/")));
-            if had {
-                ops.push(Op::Remove { path: ann.clone() });
-                let rest = edit::get(&after, &m).and_then(Value::as_object).map(|o| o.len()).unwrap_or(0);
-                if rest == 1 && m != path!["metadata"] {
-                    ops.push(Op::Remove { path: m.clone() });
+        let mut removed = 0;
+        for map in ["annotations", "labels"] {
+            let p = join(&m, &segs![map]);
+            if edit::get(&after, &p).and_then(Value::as_object).is_some_and(|o| o.is_empty()) {
+                let had = edit::get(object, &p).and_then(Value::as_object).is_some_and(|o| o.keys().all(|k| k.starts_with("rightsizer.io/")));
+                if had {
+                    ops.push(Op::Remove { path: p.clone() });
+                    removed += 1;
                 }
             }
+        }
+        let rest = edit::get(&after, &m).and_then(Value::as_object).map(|o| o.len()).unwrap_or(0);
+        if removed > 0 && rest == removed && m != path!["metadata"] {
+            ops.push(Op::Remove { path: m.clone() });
         }
     }
     let _ = pointer(&[]);

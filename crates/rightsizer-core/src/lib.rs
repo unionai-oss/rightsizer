@@ -17,6 +17,7 @@
 #![warn(missing_docs)]
 
 pub mod breaker;
+pub mod clock;
 pub mod constraints;
 pub mod cost;
 pub mod decide;

@@ -15,6 +15,13 @@
       "description": "`\"rightsizer-plugin/1\"`.",
       "type": "string"
     },
+    "protocols": {
+      "description": "Extension: other versions the caller also speaks (N/N-1), besides\n`protocol` (its preferred one).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "schemas": {
       "description": "Schema versions spoken (`{\"context\": \"1\", \"decision\": \"1\", \"run\": \"1\"}`).",
       "type": "object",

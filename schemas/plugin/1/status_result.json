@@ -4,9 +4,30 @@
   "description": "`status` result.",
   "type": "object",
   "properties": {
+    "caller": {
+      "description": "Extension: the caller as the daemon sees it (uid, tenants)."
+    },
+    "decide_latency_ms": {
+      "description": "Extension: `decide` latency over the last requests, ms (p50, p99, max, count).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LatencySummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "fleet_breaker": {
       "description": "Fleet breaker.",
       "$ref": "#/$defs/BreakerState"
+    },
+    "kinds": {
+      "description": "Extension: adapters served (built-in and plugins).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "mode_ceiling": {
       "description": "Fleet `mode_ceiling`, if readable.",
@@ -30,6 +51,13 @@
     "protocol": {
       "description": "Protocol.",
       "type": "string"
+    },
+    "requests": {
+      "description": "Extension: requests served since start.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
     },
     "store_reachable": {
       "description": "Store reachable.",
@@ -65,6 +93,39 @@
           "type": "string",
           "const": "half_open"
         }
+      ]
+    },
+    "LatencySummary": {
+      "description": "Latency percentiles.",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Samples.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max": {
+          "description": "Max, ms.",
+          "type": "number",
+          "format": "double"
+        },
+        "p50": {
+          "description": "Median, ms.",
+          "type": "number",
+          "format": "double"
+        },
+        "p99": {
+          "description": "99th percentile, ms.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "count",
+        "p50",
+        "p99",
+        "max"
       ]
     },
     "Mode": {

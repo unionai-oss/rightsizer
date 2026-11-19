@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use rightsizer_core::{PlatformRef, PlatformState, WorkloadKey};
+use rightsizer_core::{PlatformRef, PlatformState};
 use rightsizer_engine::{Config, ContextInput, DecideRequest, Policy};
 #[allow(unused_imports)]
 use rightsizer_plugin::{Adapter, AdapterEnv, Extracted, Native, PlatformModel};
@@ -45,7 +45,8 @@ async fn units(adapter: &dyn Adapter, model: Option<&dyn PlatformModel>, platfor
     };
     let mut groups: BTreeMap<String, Vec<DecideRequest>> = BTreeMap::new();
     for (i, u) in ex.units.into_iter().enumerate() {
-        let key = WorkloadKey::new(platform, ex.tenant.clone(), u.key_suffix.clone()).map_err(Fail::parse)?;
+        // The unit's full key when the adapter set one (Flyte task pods), else `{kind}://{tenant}/{suffix}`.
+        let key = u.workload_key(platform, &ex.tenant).map_err(Fail::parse)?;
         let pref = model.map(|m| m.reference(&u)).unwrap_or_else(|| PlatformRef::new(platform));
         let g = u.group.as_ref().map(|g| format!("g:{}", g.0)).unwrap_or_else(|| format!("u:{i}"));
         groups.entry(g).or_default().push(DecideRequest {
@@ -69,7 +70,8 @@ pub async fn extract(platform: &str, file: &str, bytes: Vec<u8>, cfg: &Config) -
         "k8s" | "kubernetes" => {
             let env = AdapterEnv {
                 cluster: cfg.k8s.cluster.clone(),
-                settings: serde_json::to_value(&cfg.k8s).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default(),
+                // `[k8s]` plus `[k8s.adapter]` pass-through (flyte, overhead, shapes, …).
+                settings: rightsizer_k8s::runtime::settings_map(&cfg.k8s),
                 ..Default::default()
             };
             let a = rightsizer_k8s::K8sAdapter::new(Default::default());

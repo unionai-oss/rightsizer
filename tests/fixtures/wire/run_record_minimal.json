@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "key": "flyte://acme/proj/dev/env.train",
+  "invocation_id": "inv-3",
+  "attempt": 1,
+  "started_at": "2027-01-15T11:00:00Z",
+  "inputs": [],
+  "status": "succeeded",
+  "status_confidence": "observed",
+  "memory_peak": {
+    "value": 1073741824.0,
+    "censor": "exact",
+    "resolution_s": 1.0
+  },
+  "source": {
+    "kind": "self_report"
+  },
+  "trust": "unverified"
+}

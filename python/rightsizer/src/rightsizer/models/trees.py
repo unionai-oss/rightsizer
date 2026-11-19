@@ -16,6 +16,8 @@ What :func:`convert` writes:
     1.05; the file's scale ``2^20 / 1.05`` removes the headroom, so the axis
     reads as the container peak (rightsizer adds runtime overhead and headroom
     itself; on Flyte the 70 MiB runtime is still counted twice -- conservative).
+    This is ``memory_basis="demand"``, the default; ``"need"`` keeps the
+    trained label (scale ``2^20``).
   - ``cpu_mean``'s tuner target is ``log2(cores)`` of the busiest 15 s window
     (RightSizeCPU rows) or the mean (RightSizeMem rows).
 - ``<out stem>.gpu.json`` (``rightsizer-trees-gpu/1``, when ``gpu=True``): the
@@ -85,12 +87,19 @@ _DIRECT = {
     "m_code_lines": "code.lines",
     "c_code_lines": "code.lines",
     "g_code_lines": "code.lines",
+    # The tuner's log2(max integer literal > 1), else 0: Rust's `max_literal=` token.
+    "m_log_max_literal": "code.max_literal_log2",
+    "c_log_max_literal": "code.max_literal_log2",
+    "g_log_max_literal": "code.max_literal_log2",
     "n_hist": "hist.n_success",
     "log_hist_mem": "hist.log2_peak_max_mib",
     "log_hist_mem_scaled": "hist.log2_scaled_mib",
     "log_hist_size_ratio": "hist.log2_size_ratio",
     "hist_mean_cores": "hist.cpu_mean_max",
 }
+# Token features are named `tok.<raw token>` (the tuner's suffix verbatim); the
+# Rust `features-v1` vector reads `CodeInfo.tokens` entries `tok:<raw token>`
+# (crates/rightsizer-estimators/src/features_v1.rs, rightsizer_features::tokens).
 _TOKEN_PREFIXES = ("m_tok_", "c_tok_", "g_tok_", "cuda_", "k8s_")
 TOKEN_FEATURE_PREFIX = "tok."
 UNMAPPED_PREFIX = "tuner."
@@ -202,8 +211,17 @@ def _export_regressors(models: Mapping[str, Mapping[float, Any]], names: list[st
     return doc
 
 
-def convert(repo_or_dir: str, revision: str | None, out: str, *, gpu: bool = True, id: str = "gbt") -> dict:
-    """Convert a trees release; returns a report (files, feature mapping, unmapped features)."""
+def convert(repo_or_dir: str, revision: str | None, out: str, *, gpu: bool = True, id: str = "gbt",
+            memory_basis: str = "demand") -> dict:
+    """Convert a trees release; returns a report (files, feature mapping, unmapped features).
+
+    ``memory_basis="demand"`` (default) divides the need label by its
+    headroom (scale ``2^20 / 1.05``), the demand rightsizer estimators emit;
+    the runtime overhead (70 MiB on Flyte, 0 on K8s) cannot be expressed in
+    ``rightsizer-trees/1`` targets and stays in. ``"need"`` keeps the label
+    as trained (scale ``2^20``)."""
+    if memory_basis not in ("demand", "need"):
+        raise ValueError(f"memory_basis must be demand or need, not {memory_basis!r}")
     path, repo, version = resolve(repo_or_dir, revision)
     with open(os.path.join(path, CONFIG_FILE)) as f:
         cfg = json.load(f)
@@ -213,7 +231,7 @@ def convert(repo_or_dir: str, revision: str | None, out: str, *, gpu: bool = Tru
         if len(state[k]) != len(levels):
             raise ValueError(f"{k}: {len(state[k])} models for {len(levels)} levels")
     names, mapped, unmapped = feature_mapping(cfg["features"])
-    headroom = float(cfg.get("label_headroom", 1.05))
+    headroom = float(cfg.get("label_headroom", 1.05)) if memory_basis == "demand" else 1.0
     doc = _export_regressors(
         {"memory": dict(zip(levels, state["mem"])), "cpu_mean": dict(zip(levels, state["cpu"]))}, names,
         {"memory": ("log2", 2**20 / headroom), "cpu_mean": ("log2", 1.0)}, version, id)
@@ -237,7 +255,7 @@ def convert(repo_or_dir: str, revision: str | None, out: str, *, gpu: bool = Tru
         with open(gout, "w") as f:
             json.dump(gdoc, f, separators=(",", ":"), allow_nan=False)
         files.append(gout)
-    return {"files": files, "repo": repo, "version": version, "levels": levels, "mapped": mapped,
+    return {"files": files, "repo": repo, "version": version, "levels": levels, "memory_basis": memory_basis, "mapped": mapped,
             "unmapped": unmapped, "n_features": len(names)}
 
 

@@ -13,8 +13,12 @@
 //! - [`restore`], [`ladder`] (`rsz apply --watch` step function), [`mode`].
 //! - [`yaml`], [`edit`]: the YAML span locator and the edit renderers.
 //!
-//! Features: [`webhook`] (axum + rustls), [`cluster`] (kube-rs watcher,
-//! restore I/O, Prometheus importer).
+//! - [`manifests`] (`rsz webhook manifests`), [`view`] (cluster inputs interface).
+//!
+//! Features: `engine` ([`admit`]: the admission request path; [`runtime`];
+//! [`ledger_shared`]), [`webhook`] (axum + rustls server, cert hot reload),
+//! [`cluster`] (kube-rs: cached cluster view, leader-elected watcher,
+//! prefetcher, restore I/O, `apply --watch`, Prometheus importer, node agent).
 
 #![forbid(unsafe_code)]
 
@@ -37,6 +41,15 @@ pub mod resources;
 pub mod restore;
 pub mod settings;
 pub mod validate;
+pub mod manifests;
+pub mod view;
+
+#[cfg(feature = "engine")]
+pub mod admit;
+#[cfg(feature = "engine")]
+pub mod ledger_shared;
+#[cfg(feature = "engine")]
+pub mod runtime;
 
 #[cfg(feature = "cluster")]
 pub mod cluster;

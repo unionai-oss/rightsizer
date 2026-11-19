@@ -1,156 +1,84 @@
-//! The memo and single-flight (SPEC §6.3).
+//! The memo and single-flight (SPEC §6.3): `rightsizer_estimators::memo`,
+//! the one memo of the workspace, re-exported.
 //!
-//! The memo stores the chain's **estimate only**; constraints, S3, breakers
-//! and the mode are re-evaluated on every hit. Key = (workload key, code
-//! digest, feature bucket, policy hash). An outcome for a key invalidates
-//! every entry of that key (its history changed). Concurrent misses on one
-//! memo key share one chain call (single-flight).
-//!
-//! TODO(rightsizer-estimators memo module): when the estimators crate ships
-//! its memo, replace [`Memo`] with it; the key and invalidation contract here
-//! are what the engine relies on.
+//! The memo stores the chain's **normalized estimate** (or a clean
+//! decline); constraints, S3, breakers and the mode are re-evaluated on
+//! every hit. Key = (workload key, unit, code digest, feature bucket, policy
+//! hash). The engine builds it on its injected clock with
+//! `decision.memo_ttl`, `decision.memo_capacity` and `decision.point_sigma`
+//! (so a hit decides exactly like the miss that filled it). An outcome for a
+//! key invalidates every entry of that key (`Memo::invalidate_workload`).
+//! Concurrent misses on one key share one chain call
+//! (`Memo::get_or_compute`); errors are shared with waiters but never stored.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-use chrono::{DateTime, Utc};
-use rightsizer_core::Estimate;
-use tokio::sync::OnceCell;
-
-use crate::clock::since;
-
-/// A memo key (SPEC §6.3).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MemoKey {
-    /// Canonical workload key (+ unit).
-    pub key: String,
-    /// Code digest (`""` when unknown).
-    pub code_digest: String,
-    /// Feature bucket ([`rightsizer_features::feature_bucket`]).
-    pub bucket: String,
-    /// Hash of everything that shapes the estimate: chain members and versions, grid.
-    pub policy_hash: String,
-}
-
-/// What the chain answered for one context.
-#[derive(Clone, Debug)]
-pub struct ChainResult {
-    /// The winning estimate.
-    pub estimate: Option<Estimate>,
-    /// `(id, reason)` of members that did not answer.
-    pub skipped: Vec<(String, String)>,
-    /// Whether any member failed (rather than declined).
-    pub any_error: bool,
-}
-
-#[derive(Clone)]
-struct Entry {
-    result: ChainResult,
-    at: DateTime<Utc>,
-}
-
-/// The memo: bounded, with TTL.
-pub struct Memo {
-    entries: Mutex<HashMap<MemoKey, Entry>>,
-    inflight: Mutex<HashMap<MemoKey, Arc<OnceCell<ChainResult>>>>,
-    ttl: std::time::Duration,
-    capacity: usize,
-}
-
-impl Memo {
-    /// A memo holding at most `capacity` entries for `ttl`.
-    pub fn new(ttl: std::time::Duration, capacity: usize) -> Self {
-        Memo { entries: Mutex::new(HashMap::new()), inflight: Mutex::new(HashMap::new()), ttl, capacity: capacity.max(1) }
-    }
-
-    /// A live entry.
-    pub fn get(&self, k: &MemoKey, now: DateTime<Utc>) -> Option<ChainResult> {
-        let mut g = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        match g.get(k) {
-            Some(e) if since(now, e.at) < self.ttl => Some(e.result.clone()),
-            Some(_) => {
-                g.remove(k);
-                None
-            }
-            None => None,
-        }
-    }
-
-    /// Store an answer. Only answers worth reusing are stored: an estimate,
-    /// or a clean decline (errors are retried next time).
-    pub fn put(&self, k: MemoKey, result: ChainResult, now: DateTime<Utc>) {
-        if result.any_error {
-            return;
-        }
-        let mut g = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        if g.len() >= self.capacity && !g.contains_key(&k) {
-            // Evict expired entries, then the oldest.
-            let ttl = self.ttl;
-            g.retain(|_, e| since(now, e.at) < ttl);
-            if g.len() >= self.capacity
-                && let Some(oldest) = g.iter().min_by_key(|(_, e)| e.at).map(|(k, _)| k.clone())
-            {
-                g.remove(&oldest);
-            }
-        }
-        g.insert(k, Entry { result, at: now });
-    }
-
-    /// Drop every entry of a workload key (any unit).
-    pub fn invalidate_key(&self, key: &str) {
-        let prefix = format!("{key}#");
-        let mut g = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        g.retain(|k, _| k.key != key && !k.key.starts_with(&prefix));
-    }
-
-    /// Entries currently held.
-    pub fn len(&self) -> usize {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
-    }
-
-    /// Whether the memo is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// The single-flight cell for `k`: every concurrent miss gets the same cell.
-    pub(crate) fn flight(&self, k: &MemoKey) -> Arc<OnceCell<ChainResult>> {
-        let mut g = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
-        g.entry(k.clone()).or_insert_with(|| Arc::new(OnceCell::new())).clone()
-    }
-
-    /// Forget a finished flight.
-    pub(crate) fn land(&self, k: &MemoKey, cell: &Arc<OnceCell<ChainResult>>) {
-        let mut g = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
-        if g.get(k).is_some_and(|c| Arc::ptr_eq(c, cell)) {
-            g.remove(k);
-        }
-    }
-}
+pub use rightsizer_estimators::memo::{Memo, MemoAnswer, MemoAnswer as ChainResult, MemoKey};
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rightsizer_core::clock::ManualClock;
+    use rightsizer_core::{AxisEstimate, Estimate, Grid, Provenance};
+
     use super::*;
 
-    fn k(key: &str) -> MemoKey {
-        MemoKey { key: key.into(), code_digest: String::new(), bucket: String::new(), policy_hash: "p".into() }
+    fn k(key: &str, unit: &str) -> MemoKey {
+        MemoKey { workload_key: key.into(), unit: unit.into(), code_digest: None, feature_bucket: String::new(), policy_hash: "p".into() }
     }
 
-    #[test]
-    fn ttl_capacity_and_invalidation() {
-        let t0 = Utc::now();
-        let m = Memo::new(std::time::Duration::from_secs(60), 2);
-        let r = ChainResult { estimate: None, skipped: vec![], any_error: false };
-        m.put(k("a#u"), r.clone(), t0);
-        m.put(k("b#u"), r.clone(), t0 + chrono::Duration::seconds(1));
-        m.put(k("c#u"), r.clone(), t0 + chrono::Duration::seconds(2));
+    fn est() -> Estimate {
+        let mut e = Estimate::empty(Provenance { estimator: "x".into(), version: "1".into(), ..Default::default() });
+        e.memory = Some(AxisEstimate::Point { value: 3.0 * (1u64 << 30) as f64 });
+        e
+    }
+
+    #[tokio::test]
+    async fn ttl_on_the_clock_capacity_invalidation_and_single_flight() {
+        let t0 = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let clock = Arc::new(ManualClock::new(t0));
+        let m = Memo::with_clock(Grid::rs_grid_v1(), std::time::Duration::from_secs(60), 2, clock.clone());
+        let r = ChainResult { estimate: Some(est()), skipped: vec![], any_error: false };
+        m.put_answer(k("a", "u"), r.clone());
+        clock.advance(std::time::Duration::from_secs(1));
+        m.put_answer(k("b", "u"), r.clone());
+        clock.advance(std::time::Duration::from_secs(1));
+        m.put_answer(k("c", "u"), r.clone());
         assert_eq!(m.len(), 2);
-        assert!(m.get(&k("a#u"), t0).is_none(), "oldest evicted");
-        assert!(m.get(&k("b#u"), t0 + chrono::Duration::seconds(30)).is_some());
-        assert!(m.get(&k("b#u"), t0 + chrono::Duration::seconds(90)).is_none(), "expired");
-        m.invalidate_key("c");
-        assert!(m.is_empty());
-        m.put(k("d#u"), ChainResult { any_error: true, ..r }, t0);
+        assert!(m.get_answer(&k("a", "u")).is_none(), "oldest evicted");
+        clock.advance(std::time::Duration::from_secs(30));
+        assert!(m.get_answer(&k("b", "u")).is_some());
+        clock.advance(std::time::Duration::from_secs(60));
+        assert!(m.get_answer(&k("b", "u")).is_none(), "expired on the injected clock");
+        m.put_answer(k("c", "v"), r.clone());
+        m.invalidate_workload("c");
+        assert!(m.is_empty(), "every unit of the key");
+        m.put_answer(k("d", "u"), ChainResult { any_error: true, ..r.clone() });
         assert!(m.is_empty(), "errors are not memoized");
+        let declined = m.put_answer(k("e", "u"), ChainResult::default());
+        assert_eq!(m.get_answer(&k("e", "u")), Some(declined), "clean declines are");
+
+        // Single-flight: 8 concurrent misses, one computation.
+        let m = Arc::new(Memo::with_clock(Grid::rs_grid_v1(), std::time::Duration::from_secs(60), 10, clock.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hs = Vec::new();
+        for _ in 0..8 {
+            let (m, calls, r) = (m.clone(), calls.clone(), r.clone());
+            hs.push(tokio::spawn(async move {
+                m.get_or_compute(&k("f", "u"), || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    r
+                })
+                .await
+            }));
+        }
+        for h in hs {
+            let (a, _) = h.await.unwrap();
+            assert!(matches!(a.estimate.and_then(|e| e.memory), Some(AxisEstimate::Cells { .. })), "stored normalized");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let (_, hit) = m.get_or_compute(&k("f", "u"), || async { unreachable!() }).await;
+        assert!(hit);
     }
 }

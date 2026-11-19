@@ -65,6 +65,7 @@ fn record(i: usize, h: &H) -> RunRecord {
         gpu_util_mean: None,
         t_peak_frac: Some(0.5),
         duration_s: h.dur,
+        staged_bytes: None,
         source: OutcomeSource::Watcher,
         trust: Trust::Unverified,
     }

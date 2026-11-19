@@ -1,0 +1,5 @@
+#!/bin/sh
+# Deliberately broken plugin for the conformance suite (RSZ_DEMO_BREAK=render):
+# the nomad-demo plugin with one fault injected (crates/rightsizer-plugin/tests/conformance.rs).
+here=$(cd "$(dirname "$0")" && pwd)
+RSZ_DEMO_KIND=flappy RSZ_DEMO_BREAK=render exec python3 "$here/../../../../examples/plugins/rsz-plugin-nomad-demo" "$@"

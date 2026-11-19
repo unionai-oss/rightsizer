@@ -162,7 +162,7 @@ class PointerModel:
     and truncated from the left to ``max_len``, as the reference does."""
 
     def __init__(self, release: Release, backend: Any, tokenizer: ChatTokenizer | None = None, *,
-                 kind: str = "demand", memory_basis: str = "need", prompt_options: Mapping[str, Any] | None = None):
+                 kind: str = "demand", memory_basis: str = "demand", prompt_options: Mapping[str, Any] | None = None):
         self.release = release
         self.backend = backend
         self.tok = tokenizer or ChatTokenizer.from_pretrained(release.config["base_model"])

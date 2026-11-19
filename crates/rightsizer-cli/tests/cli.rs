@@ -8,11 +8,16 @@ use serde_json::Value;
 
 struct Sandbox {
     dir: tempfile::TempDir,
+    /// `"sqlite"` (default) or `"file"` (object store on the local FS).
+    backend: &'static str,
 }
 
 impl Sandbox {
     fn new() -> Self {
-        let s = Sandbox { dir: tempfile::tempdir().unwrap() };
+        Self::with_backend("sqlite")
+    }
+    fn with_backend(backend: &'static str) -> Self {
+        let s = Sandbox { dir: tempfile::tempdir().unwrap(), backend };
         std::fs::write(s.path("rightsizer.toml"), "").unwrap();
         s
     }
@@ -20,7 +25,10 @@ impl Sandbox {
         self.dir.path().join(p)
     }
     fn store(&self) -> String {
-        format!("json://{}", self.path("history.json").display())
+        match self.backend {
+            "file" => format!("file://{}", self.path("history").display()),
+            _ => format!("sqlite://{}", self.path("history.db").display()),
+        }
     }
     fn write(&self, name: &str, body: &str) -> PathBuf {
         let p = self.path(name);
@@ -147,7 +155,21 @@ fn exit_codes() {
 
 #[test]
 fn history_import_show_export_and_shadow() {
+    // Key listing (`shadow --tenant`, `export --jsonl`) works on every factory store.
+    for backend in ["sqlite", "file"] {
+        history_round_trip(&Sandbox::with_backend(backend));
+    }
+}
+
+#[test]
+fn the_interim_json_store_is_gone() {
     let s = Sandbox::new();
+    let o = s.bare().args(["--store", "json:///tmp/x.json", "history", "show", "k8s://c/ns/job/x"]).output().unwrap();
+    // Not strict: a warning naming the replacements, decisions keep the prior.
+    assert!(String::from_utf8_lossy(&o.stderr).contains("sqlite:///"), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+fn history_round_trip(s: &Sandbox) {
     let mut jsonl = runs_jsonl("flyte://acme/ml/development/etl.clean", 10, 16, 2.0);
     jsonl.push_str(&runs_jsonl("flyte://acme/ml/development/embed.batch", 6, 8, 3.0));
     let f = s.write("runs.jsonl", &jsonl);
@@ -178,7 +200,11 @@ fn history_import_show_export_and_shadow() {
     let out = s.path("export.jsonl");
     s.rsz().args(["history", "export", "--jsonl"]).arg(&out).assert().success();
     assert_eq!(std::fs::read_to_string(&out).unwrap().lines().count(), 16);
-    s.rsz().args(["history", "compact", "--dry-run"]).assert().success();
+    let o = s.rsz().args(["history", "compact", "--dry-run", "-o", "json"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["sweep"]["keys"], 2, "the sweep runs over every key ({}): {v}", s.backend);
+    assert_eq!(v["sweep"]["expired_leases"], 0);
 }
 
 #[test]

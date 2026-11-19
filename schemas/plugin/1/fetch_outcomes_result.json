@@ -784,6 +784,17 @@
           "description": "Where the record came from.",
           "$ref": "#/$defs/OutcomeSource"
         },
+        "staged_bytes": {
+          "description": "Memory-backed (tmpfs) staging bytes the unit had at this run (its\n`manifest.memory_backed_bytes`), counted in `memory_peak`. Estimators\nlearn demand = peak − overhead median − this (SPEC §5.2), so the\ndecision's `+ memory_backed_bytes` does not count staging twice.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "started_at": {
           "description": "Start time.",
           "type": "string",

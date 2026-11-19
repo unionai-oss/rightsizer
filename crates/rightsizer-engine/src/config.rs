@@ -239,6 +239,12 @@ pub struct HistoryConfig {
     pub max_age: Duration,
     /// Write buffer bound when the store is unreachable (10k).
     pub buffer: usize,
+    /// Treat the store as durable (overrides detection; e.g. a local
+    /// `file://` store on a single login node). `None` = detect.
+    pub durable: Option<bool>,
+    /// Treat the store as shared by every writer (overrides detection; a
+    /// local store is shared when one host runs every surface). `None` = detect.
+    pub shared: Option<bool>,
 }
 
 impl Default for HistoryConfig {
@@ -254,6 +260,8 @@ impl Default for HistoryConfig {
             keep_last: 64,
             max_age: Duration::from_secs(90 * 86_400),
             buffer: 10_000,
+            durable: None,
+            shared: None,
         }
     }
 }
@@ -443,6 +451,24 @@ pub struct K8sConfig {
     pub signing_key_file: Option<PathBuf>,
     /// Prometheus URL for the importer.
     pub prometheus_url: Option<String>,
+    /// The webhook's internal per-request deadline, ms (kubernetes.md §3.2:
+    /// 1 s, below the apiserver's `timeoutSeconds`). Additive (rightsizer-k8s).
+    pub webhook_deadline_ms: u32,
+    /// `[k8s.inputs]`: the prefetcher's per-namespace allowlist (kubernetes.md §4.3).
+    pub inputs: K8sInputsConfig,
+    /// Namespace holding the watcher's leader-election Lease.
+    pub lease_namespace: Option<String>,
+    /// Extra adapter settings passed through to `rightsizer_k8s::K8sSettings`
+    /// (`flyte`, `overhead`, `shapes`, `prices`, `autopilot`, `accelerators`, …).
+    pub adapter: toml::Table,
+}
+
+/// `[k8s.inputs]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct K8sInputsConfig {
+    /// Namespace (or `"*"`) → URI prefixes whose metadata the prefetcher may read.
+    pub allow: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for K8sConfig {
@@ -458,6 +484,10 @@ impl Default for K8sConfig {
             webhook_timeout_ms: 2000,
             signing_key_file: None,
             prometheus_url: None,
+            webhook_deadline_ms: 1000,
+            inputs: K8sInputsConfig::default(),
+            lease_namespace: None,
+            adapter: toml::Table::new(),
         }
     }
 }
@@ -478,16 +508,58 @@ pub struct SlurmConfig {
     pub gres: BTreeMap<String, String>,
     /// Whether `ConstrainRAMSpace` is on (memory enforced).
     pub constrain_ram_space: Option<bool>,
+    /// `squeue` binary (`rsz slurm sbatch --watch`).
+    pub squeue: Option<PathBuf>,
+    /// `scontrol` binary (inventory refresh).
+    pub scontrol: Option<PathBuf>,
+    /// `sacctmgr` binary (inventory refresh, associations).
+    pub sacctmgr: Option<PathBuf>,
+    /// `JobAcctGatherFrequency` task interval, s (default: from `scontrol show config`).
+    pub job_acct_gather_frequency: Option<u32>,
+    /// Default account when a submission names none and the user has no default association.
+    pub default_account: Option<String>,
+    /// Slurm version (default: from `scontrol show config`).
+    pub version: Option<String>,
+    /// Ladder memory factor for `rsz slurm sbatch --watch` (2.0).
+    pub ladder_memory_factor: Option<f32>,
+    /// Ladder steps for `rsz slurm sbatch --watch` (2).
+    pub ladder_max_steps: Option<u32>,
+    /// Price per node-hour by partition (`"default"` as fallback).
+    pub prices: BTreeMap<String, f64>,
+    /// Submitters (user names) whose jobs are already sized (launchers.md §1.4).
+    pub presized_submitters: Vec<String>,
+    /// Inventory refresh interval (5 min).
+    #[serde(with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    pub inventory_refresh: Option<Duration>,
+    /// Token lifetime, s (600).
+    pub token_ttl_s: Option<u64>,
 }
 
 /// `[flyte]` (flyte.md).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlyteConfig {
     /// Flyte endpoint for `flyte.remote` backfill.
     pub endpoint: Option<String>,
     /// Python interpreter for `rsz flyte …` delegation.
     pub python: Option<PathBuf>,
+    /// Whether a scalar `memory=` (request only) is memory-enforced by the
+    /// backend (flyte.md §4.2, SPEC §16 open question 5). The Flyte v2
+    /// devbox sets limit = request, so the default is `true`; set `false`
+    /// for deployments whose platform defaults leave the limit unset.
+    pub scalar_memory_enforced: bool,
+    /// In local mode, record measured peaks (`platform = flyte-local`,
+    /// `requested = None`; learning excludes them) (flyte.md §4.5).
+    pub observe_local: bool,
+    /// Schedulable node shapes for `PlatformState` (flyte.md §6.4). Empty:
+    /// increases are clamped to the definition ceiling, or held.
+    pub shapes: Vec<rightsizer_core::NodeShape>,
+}
+
+impl Default for FlyteConfig {
+    fn default() -> Self {
+        FlyteConfig { endpoint: None, python: None, scalar_memory_enforced: true, observe_local: false, shapes: Vec::new() }
+    }
 }
 
 /// `[ray]` (ray.md).
@@ -500,6 +572,18 @@ pub struct RayConfig {
     pub address: Option<String>,
     /// Python interpreter for `rsz ray …` delegation.
     pub python: Option<PathBuf>,
+    /// Schedulable node shapes for `PlatformState` when the cluster has no
+    /// autoscaler node types (ray.md §2 "Platform state"). Empty and no
+    /// autoscaler: increases are clamped to the definition ceiling, or held.
+    pub shapes: Vec<rightsizer_core::NodeShape>,
+    /// The operator labelled nodes with `A100-40G` / `A100-80G` accelerator
+    /// types (ray.md §2 "Rendering"); otherwise only Ray's automatic
+    /// constants are rendered into `accelerator_type`.
+    pub labelled_accelerators: bool,
+    /// In-task records are written with credentials whose write access is
+    /// limited to this tenant's prefix, so they are `Authenticated`
+    /// (ray.md §8, SPEC §8.2). The operator asserts it; default `Unverified`.
+    pub tenant_scoped_credentials: bool,
 }
 
 /// `[serve]` (plugins.md §3).
@@ -514,6 +598,17 @@ pub struct ServeConfig {
     pub tenants_by_uid: BTreeMap<String, Vec<String>>,
     /// Prometheus metrics listen address.
     pub metrics_listen: Option<String>,
+    /// Socket file mode (octal string, default `"0666"`: callers are
+    /// authenticated by `SO_PEERCRED`, not by file permissions).
+    pub socket_mode: Option<String>,
+    /// Also let a uid act for the Slurm accounts it has associations with
+    /// (`sacctmgr`, cached 5 min) besides `tenants_by_uid` (default true).
+    pub slurm_associations: Option<bool>,
+    /// Requests served concurrently per connection (default 64).
+    pub max_concurrent_requests: Option<usize>,
+    /// Graceful-shutdown grace period for in-flight requests (10 s).
+    #[serde(with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    pub shutdown_grace: Option<Duration>,
 }
 
 /// `[plugins.KIND]` (plugins.md §3.4).
@@ -530,6 +625,8 @@ pub struct PluginConfig {
     pub env: BTreeMap<String, String>,
     /// Per-request deadline, ms.
     pub deadline_ms: Option<u32>,
+    /// Conformance fixtures directory (`rsz plugin check`).
+    pub fixtures: Option<PathBuf>,
 }
 
 /// The process environment, injectable for tests.
@@ -590,13 +687,36 @@ pub fn find_config_file(env: &ConfigEnv) -> Result<Option<PathBuf>, ConfigError>
     Ok(env.candidates().into_iter().find(|p| p.is_file()))
 }
 
-/// Parse an override value: a TOML literal, else a bare comma list, else a string.
+/// JSON → TOML (`null` has no TOML form: `None`).
+fn json_to_toml(v: serde_json::Value) -> Option<toml::Value> {
+    Some(match v {
+        serde_json::Value::Null => return None,
+        serde_json::Value::Bool(b) => toml::Value::Boolean(b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => toml::Value::Integer(i),
+            None => toml::Value::Float(n.as_f64()?),
+        },
+        serde_json::Value::String(s) => toml::Value::String(s),
+        serde_json::Value::Array(a) => toml::Value::Array(a.into_iter().map(json_to_toml).collect::<Option<_>>()?),
+        serde_json::Value::Object(o) => {
+            toml::Value::Table(o.into_iter().map(|(k, v)| json_to_toml(v).map(|v| (k, v))).collect::<Option<_>>()?)
+        }
+    })
+}
+
+/// Parse an override value: a TOML literal, else JSON (objects and arrays,
+/// as the Python side parses them), else a bare comma list, else a string.
 fn parse_override_value(raw: &str) -> toml::Value {
     let doc = format!("v = {raw}");
     if let Ok(t) = doc.parse::<toml::Table>()
         && let Some(v) = t.get("v")
     {
         return v.clone();
+    }
+    if let Ok(j) = serde_json::from_str::<serde_json::Value>(raw)
+        && let Some(v) = json_to_toml(j)
+    {
+        return v;
     }
     if raw.contains(',') {
         return toml::Value::Array(raw.split(',').map(|s| toml::Value::String(s.trim().to_string())).filter(|v| v.as_str() != Some("")).collect());
@@ -812,6 +932,13 @@ mod tests {
         assert_eq!(c.risk.profile(), Some(RiskProfile::AVERSE));
         assert!(c.strict);
         assert_eq!(l.overrides.len(), 9);
+        // JSON objects (as the Python side writes them), not a comma split.
+        assert_eq!(
+            parse_override_value(r#"{"m6i.xlarge": 0.192, "g5": 1}"#),
+            toml::Value::Table(toml::toml! { "m6i.xlarge" = 0.192
+            g5 = 1 })
+        );
+        assert_eq!(parse_override_value("a, b"), toml::Value::Array(vec!["a".into(), "b".into()]));
     }
 
     #[test]
@@ -870,5 +997,74 @@ sha256 = "9f2c"
         assert_eq!(c.estimator.members["gate"].threshold, Some(0.95));
         let again = Config::from_toml_str(&c.to_toml()).unwrap();
         assert_eq!(again, c);
+    }
+    #[test]
+    fn keys_other_crates_read_are_accepted() {
+        // Estimators (mTLS, batching, params), the K8s adapter pass-through
+        // and the Slurm adapter keys must not trip `deny_unknown_fields`.
+        let c = Config::from_toml_str(
+            r#"
+[estimator.members.svc]
+kind = "remote"
+url = "https://est.example"
+client_cert = "/etc/rsz/c.pem"
+client_key = "/etc/rsz/k.pem"
+ca_cert = "/etc/rsz/ca.pem"
+max_batch = 32
+coalesce_ms = 10
+params = { margin = 1.2 }
+[k8s.adapter]
+cpu_window_s = 30
+prices = { "m6i.xlarge" = 0.192 }
+[slurm]
+presized_submitters = ["launcher"]
+default_account = "ml"
+squeue = "/usr/bin/squeue"
+"#,
+        )
+        .unwrap();
+        let m = &c.estimator.members["svc"];
+        assert_eq!((m.max_batch, m.coalesce_ms), (Some(32), Some(10)));
+        assert!(m.client_cert.is_some() && m.client_key.is_some() && m.ca_cert.is_some() && m.params.is_some());
+        assert_eq!(c.k8s.adapter.get("cpu_window_s").and_then(|v| v.as_integer()), Some(30));
+        assert_eq!(c.slurm.presized_submitters, vec!["launcher".to_string()]);
+        // Typos are still errors.
+        assert!(Config::from_toml_str("[k8s]\nwebhook_listn = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn flyte_section_keys() {
+        // Scalar memory is enforced by default (the devbox sets limit = request).
+        assert!(Config::default().flyte.scalar_memory_enforced);
+        let c = Config::from_toml_str(
+            r#"
+[flyte]
+scalar_memory_enforced = false
+observe_local = true
+shapes = [{ name = "devbox", cpu = 8000, memory = 8589934592, price_per_hour = 0.4 }]
+"#,
+        )
+        .unwrap();
+        assert!(!c.flyte.scalar_memory_enforced && c.flyte.observe_local);
+        assert_eq!(c.flyte.shapes.len(), 1);
+        assert_eq!(c.flyte.shapes[0].memory.0, 8 << 30);
+    }
+
+    #[test]
+    fn ray_section_keys() {
+        let c = Config::from_toml_str(
+            r#"
+[ray]
+tenant = "team-a/cluster-1"
+labelled_accelerators = true
+tenant_scoped_credentials = true
+shapes = [{ name = "cpu-16", cpu = 16000, memory = 68719476736, price_per_hour = 0.8 }]
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.ray.tenant.as_deref(), Some("team-a/cluster-1"));
+        assert!(c.ray.labelled_accelerators && c.ray.tenant_scoped_credentials);
+        assert_eq!(c.ray.shapes[0].memory.0, 64 << 30);
+        assert!(!Config::default().ray.tenant_scoped_credentials);
     }
 }

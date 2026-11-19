@@ -342,3 +342,29 @@ async fn reads_what_the_python_writer_writes() {
     let n: usize = run_py(PY_READ, d.path()).unwrap().parse().unwrap();
     assert!(n >= 1);
 }
+
+#[tokio::test]
+async fn breaker_paths_carry_the_platform_and_read_the_legacy_layout() {
+    use rightsizer_core::breaker::BreakerScope;
+    let d = tempfile::tempdir().unwrap();
+    let s = ObjectHistoryStore::local(d.path(), op()).unwrap();
+    let k = k2();
+    let scope = BreakerScope::Workload { key: k.clone() };
+    // A trip written by an N-1 build: no platform segment.
+    let old = trip(scope.clone(), t(1));
+    let legacy = d.path().join(format!("v1/breakers/{}/trips/{}.json", scope.legacy_path().unwrap(), old.id));
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, serde_json::to_vec(&old).unwrap()).unwrap();
+    // A new trip lands under `{platform}/{tenant}`, like runs.
+    let new = trip(scope.clone(), t(2));
+    s.breaker_trip(&new).await.unwrap();
+    let f = files(d.path());
+    let hash = k.hash();
+    assert!(f.contains(&format!("v1/breakers/workload/flyte/acme/proj/dev/{hash}/trips/{}.json", new.id)), "{f:?}");
+    let o = s.breaker_get(&scope).await.unwrap();
+    assert_eq!(o.trips.iter().map(|t| t.id).collect::<Vec<_>>(), vec![old.id, new.id], "both layouts read");
+    // A reset at the new path closes both.
+    s.breaker_reset(&reset(scope.clone(), t(3))).await.unwrap();
+    assert!(!s.breaker_get(&scope).await.unwrap().is_open());
+    assert_eq!(s.breaker_list().await.unwrap().len(), 1);
+}

@@ -19,6 +19,13 @@
       "$ref": "#/$defs/Requests",
       "default": {}
     },
+    "ceiling_reason": {
+      "description": "Why `ceiling` is set, reported as the clamp reason (advisory and\n`rightsizer_clamped_total{reason}`) instead of `\"user\"` when the user\nceiling binds: e.g. `\"no_platform_state\"` when an adapter without\nnode shapes set it to the definition ceiling or the prior (S4).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "floor": {
       "description": "Platform minimums (the core adds the size-scaled floor).",
       "$ref": "#/$defs/Requests",

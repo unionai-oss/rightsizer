@@ -19,6 +19,9 @@
 -- only when admin_comment is still empty, so an admin's own admin_comment is
 -- never overwritten; a job with a token (valid or not) always gets ours.
 --
+-- RIGHTSIZER_DISABLED = true (written by `rsz slurm install --disable`)
+-- short-circuits the script: no key is loaded and no admin_comment written.
+--
 -- Configuration (read at load time): the key file path is RIGHTSIZER_KEY_FILE
 -- (global or environment of slurmctld), default /etc/slurm/rightsizer.key;
 -- it must be readable by SlurmUser only (0600).
@@ -52,8 +55,11 @@ end
 
 local KEY_FILE = rawget(_G, "RIGHTSIZER_KEY_FILE") or os.getenv("RIGHTSIZER_KEY_FILE") or DEFAULT_KEY_FILE
 local SKEW_S = tonumber(rawget(_G, "RIGHTSIZER_SKEW_S") or os.getenv("RIGHTSIZER_SKEW_S") or "") or 120
+local DISABLED = rawget(_G, "RIGHTSIZER_DISABLED") and true or false
 local KEYS = nil
-if token then
+if DISABLED then
+  log("disabled (RIGHTSIZER_DISABLED): jobs pass through without attribution")
+elseif token then
   local ok, keys, err = pcall(token.load_key_file, KEY_FILE)
   if ok and keys then
     KEYS = keys
@@ -103,12 +109,33 @@ end
 rightsizer_job_submit = { attribute = attribute, keys = function() return KEYS end, key_file = KEY_FILE }
 
 function slurm_job_submit(job_desc, part_list, submit_uid)
+  if DISABLED then return slurm.SUCCESS end
   local ok, err = pcall(attribute, job_desc, submit_uid)
   if not ok then log("attribution failed: " .. tostring(err)) end
   return slurm.SUCCESS
 end
 
+-- A user may lower a pending job's resources (`scontrol update`) after
+-- job_submit verified its token. admin_comment cannot be changed here:
+-- slurmctld denies a user's update that sets it (admin-only field), and
+-- this plugin never rejects. So the change is only logged; the sacct
+-- importer drops the attribution of a verified job whose resources no
+-- longer match its decision (`rsz history import slurm`).
+local function modified_resources(jd)
+  local function set(v) return v ~= nil and v ~= NO_VAL and v ~= 65534 end
+  return set(jd.min_mem_per_node) or set(jd.min_mem_per_cpu) or set(jd.cpus_per_task)
+    or jd.tres_per_node ~= nil or jd.tres_per_job ~= nil or jd.tres_per_task ~= nil or jd.mem_per_tres ~= nil
+end
+
 function slurm_job_modify(job_desc, job_rec, part_list, modify_uid)
+  if DISABLED then return slurm.SUCCESS end
+  pcall(function()
+    local ac = job_rec and job_rec.admin_comment
+    if type(ac) == "string" and ac:match("^rightsizer:[^:]+:verified$") and modified_resources(job_desc) then
+      log(string.format("job %.0f: resources modified by uid %.0f after verification (%s); sacct import will not attribute it",
+        tonumber(job_rec.job_id) or -1, tonumber(modify_uid) or -1, ac))
+    end
+  end)
   return slurm.SUCCESS
 end
 

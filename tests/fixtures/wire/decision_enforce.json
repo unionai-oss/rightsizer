@@ -1,0 +1,238 @@
+{
+  "v": 1,
+  "id": "01M7S70Q91FRJP97FWJ36ZM4AZ",
+  "key": "flyte://acme/proj/dev/env.train",
+  "unit": "main",
+  "mode": "recommend",
+  "recommended": {
+    "requests": {
+      "cpu": 12000,
+      "memory": 51539607552,
+      "gpu": {
+        "accel": "A100-80G",
+        "count": 1
+      }
+    },
+    "limits": {
+      "memory": 51539607552
+    }
+  },
+  "applied": {
+    "requests": {
+      "cpu": 12000,
+      "memory": 51539607552,
+      "gpu": {
+        "accel": "A100-80G",
+        "count": 1
+      }
+    },
+    "limits": {
+      "memory": 51539607552
+    }
+  },
+  "prior": {
+    "spec": {
+      "requests": {
+        "cpu": 8000,
+        "memory": 68719476736,
+        "gpu": {
+          "accel": "A100-80G",
+          "count": 1
+        }
+      },
+      "limits": {
+        "memory": 68719476736
+      }
+    },
+    "defaulted": []
+  },
+  "held": [
+    {
+      "axis": "gpu_count",
+      "reason": "pinned"
+    },
+    {
+      "axis": "gpu_type",
+      "reason": "pinned"
+    }
+  ],
+  "source": {
+    "kind": "estimator",
+    "id": "rules-sized",
+    "version": "1"
+  },
+  "estimate": {
+    "v": 1,
+    "kind": "demand",
+    "memory": {
+      "kind": "cells",
+      "grid": "rs-grid-v1",
+      "probs": [
+        0.0,
+        0.0,
+        0.0,
+        1.265308e-39,
+        2.5751e-33,
+        2.150622e-25,
+        1.8464776e-20,
+        1.7986172e-14,
+        6.632703e-11,
+        7.846088e-7,
+        0.00012958831,
+        0.021067867,
+        0.16853523,
+        0.5815201,
+        0.19961466,
+        0.028912362,
+        0.00021787197,
+        0.0000015332097,
+        1.6057566e-10,
+        5.0737192e-14,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "cpu_mean": {
+      "kind": "cells",
+      "grid": "rs-grid-v1",
+      "probs": [
+        2.3768786e-26,
+        3.5233377e-15,
+        3.5965478e-10,
+        2.7030694e-7,
+        0.000018798512,
+        0.0003314261,
+        0.0024301226,
+        0.009814815,
+        0.07657374,
+        0.17957921,
+        0.23125164,
+        0.20337267,
+        0.21979408,
+        0.06129085,
+        0.01276176,
+        0.0023086322,
+        0.00045859787,
+        0.000012973593,
+        4.1355474e-7,
+        6.0352345e-10,
+        6.7723605e-15,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "cpu_peak": {
+      "kind": "cells",
+      "grid": "rs-grid-v1",
+      "probs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.20645869,
+        0.2745074,
+        0.35618135,
+        0.123674385,
+        0.037588034,
+        0.0015879899,
+        0.000002132226,
+        4.2373918e-9,
+        7.3496764e-14,
+        0.0,
+        0.0
+      ]
+    },
+    "gpu_memory": {
+      "kind": "cells",
+      "grid": "rs-grid-v1",
+      "probs": [
+        0.0,
+        1.875e-42,
+        2.1830976e-33,
+        1.21130555e-27,
+        1.625462e-20,
+        3.8266842e-16,
+        6.0627704e-11,
+        6.210075e-8,
+        0.0000054905386,
+        0.0001180379,
+        0.0026570272,
+        0.104592524,
+        0.49448285,
+        0.33537897,
+        0.061545275,
+        0.0012113989,
+        0.0000083513005,
+        1.4682074e-8,
+        7.357448e-13,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "duration_s": {
+      "kind": "quantiles",
+      "q": [
+        [
+          0.1,
+          1800.0
+        ],
+        [
+          0.5,
+          1803.0
+        ],
+        [
+          0.9,
+          1807.0
+        ]
+      ]
+    },
+    "t_peak_frac": 0.75,
+    "provenance": {
+      "estimator": "rules-sized",
+      "version": "1",
+      "grid": "rs-grid-v1",
+      "features": "features-v1",
+      "latency_ms": 0
+    }
+  },
+  "propensity": 1.0,
+  "expected_cost": 3.2272447013791608,
+  "p_fail": 0.0043011913,
+  "advisories": [],
+  "explanation": [
+    "estimate from rules-sized@1",
+    "memory demand p50 19.86Gi p95 31.05Gi; need = (demand + overhead 70Mi + staged 0) × 1.05",
+    "cpu mean p50 3.50 p95 5.42 cores",
+    "bounds: memory floor unset (platform unset, size-scaled unset), ceiling 2Ti (grid); cpu ceiling 128 (grid); trust region ≥ 32Gi (anchor 64Gi)",
+    "S3: ladder none; risk oom×16 delay×1 neighbour×4",
+    "recommended memory 48Gi cpu 12: expected $3.2272, p_fail 0.004",
+    "applied memory 48Gi cpu 12: expected $3.2272, p_fail 0.004 (prior memory 64Gi cpu 8: expected $4.1050, p_fail 0.000)",
+    "gpu_count held at the prior: pinned",
+    "gpu_type held at the prior: pinned",
+    "mode recommend: applied is what enforce would apply",
+    "mode enforce → recommend: the history store is not durable and shared"
+  ],
+  "context_digest": "sha256:19b2f984c6abc63b17a3409319f2fccabb0b1e456b3a1588ded9700b8b6bb5aa"
+}

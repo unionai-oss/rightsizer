@@ -108,6 +108,12 @@ def test_convert_matches_sklearn(release, names, tmp_path):
     assert all(n.get("missing") == "none" for a in doc["axes"].values() for q in a["quantiles"]
                for t in q["trees"] for n in t["nodes"] if "leaf" not in n)
     assert not math.isnan(sum(got["memory"][0.5]))
+    # memory_basis="need" keeps the trained label (no headroom division).
+    need = str(tmp_path / "need.json")
+    assert trees.convert(d, None, need, gpu=False, memory_basis="need")["memory_basis"] == "need"
+    got_need = evaluate_trees(json.load(open(need)), rows)["memory"]
+    for lv in LEVELS:
+        assert np.allclose(got_need[lv], np.array(got["memory"][lv]) * 1.05, rtol=1e-9)
 
 
 def test_cli_convert(release, tmp_path, capsys):

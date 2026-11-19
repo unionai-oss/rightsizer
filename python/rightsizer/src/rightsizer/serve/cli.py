@@ -44,8 +44,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8095)
     p.add_argument("--kind", default="demand", choices=["demand", "action"])
     p.add_argument("--readout", default="auto", choices=["auto", "pointer", "generate"])
-    p.add_argument("--memory-basis", default="need", choices=["need", "demand"],
-                   help="need: pass the tuner's memory cells through; demand: convert need -> demand")
+    p.add_argument("--memory-basis", default="demand", choices=["demand", "need"],
+                   help="demand (default): convert the tuner's need label (peak + runtime) x 1.05 to demand, "
+                        "as rightsizer estimators emit; need: pass the memory cells through")
     p.add_argument("--device", default="cpu", help="transformers backend: cpu, cuda, cuda:1, mps")
     p.add_argument("--dtype", help="float32 (transformers default), bfloat16, auto (launch default)")
     p.add_argument("--merge", action="store_true", help="--launch: serve a merged checkpoint (no LoRA)")

@@ -24,6 +24,8 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("--out", required=True)
     c.add_argument("--no-gpu", action="store_true", help="do not write the <out>.gpu.json companion")
     c.add_argument("--id", default="gbt")
+    c.add_argument("--memory-basis", default="demand", choices=["demand", "need"],
+                   help="demand (default): need label / headroom; need: the label as trained")
     m = sub.add_parser("merge", help="fold a pointer release's LoRA into its base model (needs torch)")
     m.add_argument("repo")
     m.add_argument("--revision")
@@ -43,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "convert":
         from .trees import convert
 
-        report = convert(args.repo, args.revision, args.out, gpu=not args.no_gpu, id=args.id)
+        report = convert(args.repo, args.revision, args.out, gpu=not args.no_gpu, id=args.id, memory_basis=args.memory_basis)
         print(json.dumps(report, indent=2))
         return 0
     if args.cmd in ("merge", "adapter"):

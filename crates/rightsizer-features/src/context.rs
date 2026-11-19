@@ -107,19 +107,13 @@ pub async fn build_context_with(
     ctx
 }
 
-/// SPEC §5.2 truncation with a total order: largest first (unknown sizes
-/// count as 0), then by name, then known before unknown sizes, then by the
-/// canonical JSON of the whole entry; at most 64 kept.
-///
-/// `WorkloadContext::canonicalize` sorts by (size, name) only, so two
-/// entries that tie there (same name, `Some(0)` vs `None`, or the same name
-/// and size with different metadata) keep their input order. Sorting with
-/// this total order first makes the result independent of input order;
-/// `canonicalize`'s stable sort then leaves it unchanged.
+/// SPEC §5.2 truncation with a total order
+/// ([`rightsizer_core::canonical_input_order`]: largest first, unknown
+/// sizes as 0, then by name, then known before unknown sizes, then by the
+/// canonical JSON of the whole entry); at most 64 kept. The same order
+/// `WorkloadContext::canonicalize` applies.
 pub fn canonical_inputs(inputs: &mut Vec<InputMeta>) {
-    inputs.sort_by_cached_key(|m| {
-        (std::cmp::Reverse(m.bytes.unwrap_or(0)), m.name.clone(), m.bytes.is_none(), rightsizer_core::digest::canonical_json(m))
-    });
+    rightsizer_core::canonical_input_order(inputs);
     inputs.truncate(WorkloadContext::MAX_INPUTS);
 }
 

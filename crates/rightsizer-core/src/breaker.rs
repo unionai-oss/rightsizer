@@ -53,13 +53,36 @@ pub enum BreakerScope {
 
 impl BreakerScope {
     /// The store path segment for `{prefix}/v1/breakers/{scope}` (SPEC §8.1).
+    /// Workload-scoped breakers sit under `{platform}/{tenant}`, like runs
+    /// (`workload/{platform}/{tenant}/{key hash}`,
+    /// `bucket/{platform}/{tenant}/{key hash}/{bucket}`), so per-tenant IAM
+    /// can tell platforms apart.
     pub fn path(&self) -> String {
         match self {
-            BreakerScope::Workload { key } => format!("workload/{}/{}", key.tenant, key.hash()),
-            BreakerScope::InputBucket { key, bucket } => format!("bucket/{}/{}/{}", key.tenant, key.hash(), sanitize(bucket)),
+            BreakerScope::Workload { key } => format!("workload/{}/{}/{}", key.platform, key.tenant, key.hash()),
+            BreakerScope::InputBucket { key, bucket } => format!("bucket/{}/{}/{}/{}", key.platform, key.tenant, key.hash(), sanitize(bucket)),
             BreakerScope::EstimatorVersion { id, version } => format!("estimator/{}/{}", sanitize(id), sanitize(version)),
             BreakerScope::Fleet => "fleet".into(),
         }
+    }
+
+    /// The previous (N-1) path of a workload-scoped breaker, without the
+    /// platform segment (`workload/{tenant}/{key hash}`). Readers look at
+    /// both; writers use [`path`](Self::path) only. `None` when the path did
+    /// not change.
+    pub fn legacy_path(&self) -> Option<String> {
+        match self {
+            BreakerScope::Workload { key } => Some(format!("workload/{}/{}", key.tenant, key.hash())),
+            BreakerScope::InputBucket { key, bucket } => Some(format!("bucket/{}/{}/{}", key.tenant, key.hash(), sanitize(bucket))),
+            BreakerScope::EstimatorVersion { .. } | BreakerScope::Fleet => None,
+        }
+    }
+
+    /// Every path a reader checks: [`path`](Self::path), then the legacy one.
+    pub fn read_paths(&self) -> Vec<String> {
+        let mut v = vec![self.path()];
+        v.extend(self.legacy_path());
+        v
     }
 }
 
@@ -520,7 +543,11 @@ mod tests {
     #[test]
     fn scope_paths() {
         assert_eq!(BreakerScope::Fleet.path(), "fleet");
-        assert!(BreakerScope::Workload { key: key() }.path().starts_with("workload/c/ns/"));
+        let w = BreakerScope::Workload { key: key() };
+        assert_eq!(w.path(), format!("workload/k8s/c/ns/{}", key().hash()), "platform segment, like runs");
+        assert_eq!(w.legacy_path(), Some(format!("workload/c/ns/{}", key().hash())));
+        assert_eq!(w.read_paths().len(), 2);
+        assert_eq!(BreakerScope::Fleet.legacy_path(), None);
         assert_eq!(BreakerScope::EstimatorVersion { id: "gbt".into(), version: "1/2".into() }.path(), "estimator/gbt/1_2");
         let j = serde_json::to_value(BreakerScope::Fleet).unwrap();
         assert_eq!(j, serde_json::json!({"kind": "fleet"}));

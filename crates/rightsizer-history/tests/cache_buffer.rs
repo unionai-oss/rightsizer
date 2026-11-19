@@ -250,3 +250,45 @@ async fn buffer_retries_in_the_background_with_backoff() {
     assert_eq!(inner.inner.runs(&k1(), 100).await.unwrap().len(), 10);
     h.abort();
 }
+
+#[tokio::test]
+async fn cache_ttls_run_on_an_injected_clock() {
+    use rightsizer_core::clock::ManualClock;
+    let inner = Flaky::new();
+    let k = k1();
+    inner.put_run(&rec(&k, "a", 1, t(0))).await.unwrap();
+    let clock = Arc::new(ManualClock::new(t(0)));
+    let c = CachedStore::with_clock(inner.clone(), CacheOptions::default(), clock.clone());
+    assert!(matches!(c.history(&k, 10).await, HistoryRead::Fresh(_)));
+    assert!(matches!(c.breaker(&BreakerScope::Fleet).await, BreakerRead::Known(_)));
+    inner.set_down(true);
+    // Real time does not matter; only the injected clock does.
+    clock.advance(Duration::from_secs(59));
+    assert!(matches!(c.history(&k, 10).await, HistoryRead::Cached { age, .. } if age == Duration::from_secs(59)));
+    assert!(matches!(c.breaker(&BreakerScope::Fleet).await, BreakerRead::Known(_)));
+    clock.advance(Duration::from_secs(2));
+    assert_eq!(c.breaker(&BreakerScope::Fleet).await, BreakerRead::Unknown, "control TTL (60 s) passed");
+    assert!(c.history(&k, 10).await.records().is_some(), "history TTL (10 min) not yet");
+    clock.advance(Duration::from_secs(600));
+    assert!(c.history(&k, 10).await.is_unavailable());
+    // invalidate_control keeps history cached.
+    inner.set_down(false);
+    c.history(&k, 10).await;
+    c.invalidate_control();
+    assert_eq!(c.cached_keys(), 1);
+}
+
+#[tokio::test]
+async fn deferred_writes_are_queued_untried() {
+    let inner = Flaky::new();
+    let w = BufferedWriter::new(inner.clone(), BufferOptions { capacity: 2, ..Default::default() });
+    let k = k1();
+    assert_eq!(w.defer_run(rec(&k, "a", 1, t(0))).await, WriteOutcome::Buffered);
+    assert_eq!(w.defer_decision_now(decision(&k, Utc::now(), Mode::Enforce, "gbt")), WriteOutcome::Buffered);
+    assert_eq!(w.buffered(), 2);
+    assert_eq!(w.defer_run(rec(&k, "b", 1, t(1))).await, WriteOutcome::Dropped, "full");
+    assert_eq!(inner.inner.runs(&k, 10).await.unwrap().len(), 0, "not tried");
+    assert_eq!(w.flush().await, 2);
+    assert_eq!(w.buffered(), 0);
+    assert_eq!(inner.inner.runs(&k, 10).await.unwrap().len(), 1);
+}

@@ -74,8 +74,15 @@ OPTS = dict(zip(prompting.KEYS, prompting.OPTIONS))
 
 
 def test_build_estimate_demand_and_threshold():
-    e = estimate.build_estimate(_probs(), OPTS, estimator="r", version="abc", gpu_threshold=0.5)
+    # memory_basis="need": the tuner's cells as labelled.
+    e = estimate.build_estimate(_probs(), OPTS, estimator="r", version="abc", gpu_threshold=0.5, memory_basis="need")
     assert e["kind"] == "demand" and e["memory"]["probs"][6] == pytest.approx(0.7)
+    # The default converts need -> demand: the same mass, never higher on the grid.
+    d = estimate.build_estimate(_probs(), OPTS, estimator="r", version="abc", gpu_threshold=0.5)
+    assert sum(d["memory"]["probs"]) == pytest.approx(1.0)
+    assert d["memory"]["probs"][6] < 0.7 and sum(d["memory"]["probs"][:7]) >= sum(e["memory"]["probs"][:7])
+    assert d["memory"] == estimate.build_estimate(_probs(), OPTS, estimator="r", version="abc", gpu_threshold=0.5,
+                                                  memory_basis="demand")["memory"]
     assert e["cpu_mean"] == e["cpu_peak"] and e["cpu_mean"]["probs"][3] == 1.0
     assert e["gpu_memory"]["probs"][0] == 0.0 and sum(e["gpu_memory"]["probs"]) == pytest.approx(1.0)
     e = estimate.build_estimate(_probs(), OPTS, estimator="r", version="abc", gpu_threshold=0.25)
@@ -250,3 +257,20 @@ def test_build_estimator_picks_the_readout(tmp_path):
     assert est.n == 3 and est.info()["id"] == "Qwen/Qwen3-8B"
     with pytest.raises(ValueError, match="backend-url"):
         build_estimator(ServeOptions(model=str(tmp_path), backend="sglang"))
+
+
+def test_memory_basis_defaults_to_demand():
+    import inspect
+
+    from rightsizer.models import load, pointer
+    from rightsizer.serve.cli import parser
+
+    assert estimate.build_estimate.__kwdefaults__["memory_basis"] == "demand"
+    assert inspect.signature(pointer.PointerModel.__init__).parameters["memory_basis"].default == "demand"
+    assert load.ServeOptions(model="m").memory_basis == "demand"
+    assert parser().parse_args(["--model", "m", "--backend", "vllm"]).memory_basis == "demand"
+    assert parser().parse_args(["--model", "m", "--backend", "vllm", "--memory-basis", "need"]).memory_basis == "need"
+    from rightsizer.models import cli, trees
+
+    assert inspect.signature(trees.convert).parameters["memory_basis"].default == "demand"
+    assert cli._parser().parse_args(["convert", "r", "--out", "o"]).memory_basis == "demand"

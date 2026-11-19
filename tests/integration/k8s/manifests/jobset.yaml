@@ -1,0 +1,24 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: js
+spec:
+  replicatedJobs:
+    - name: workers
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              containers:
+                - name: main
+                  image: busybox:latest
+                  imagePullPolicy: IfNotPresent
+                  command: ["sh", "-c", "sleep 5"]
+                  resources:
+                    requests: {cpu: "1", memory: 2Gi}
+                    limits: {memory: 2Gi}

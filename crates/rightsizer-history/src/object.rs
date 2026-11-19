@@ -845,18 +845,32 @@ impl HistoryStore for ObjectHistoryStore {
     }
 
     async fn breaker_get(&self, scope: &BreakerScope) -> Result<BreakerObjects, StoreError> {
-        let base = self.rel(&format!("breakers/{}", scope.path()));
-        let resets = self.read_reset(&format!("{base}.json")).await?;
-        let trip_dir = format!("{base}/trips/");
-        let paths: Vec<String> = self
-            .list(&trip_dir, None)
-            .await?
-            .into_iter()
-            .map(|m| m.location.to_string())
-            .filter(|p| p.ends_with(".json") && !p[trip_dir.len()..].contains('/'))
-            .collect();
-        let trips: Vec<Trip> = self.get_many::<Trip>(paths).await?.into_iter().map(|(_, t)| t).filter(|t| &t.scope == scope).collect();
-        Ok(BreakerObjects { trips, resets: resets.into_iter().filter(|r| &r.scope == scope).collect() })
+        // The current path and the N-1 one (workload scopes without the
+        // platform segment); trips are deduplicated by id.
+        let mut trips: Vec<Trip> = Vec::new();
+        let mut resets: Vec<Reset> = Vec::new();
+        for seg in scope.read_paths() {
+            let base = self.rel(&format!("breakers/{seg}"));
+            resets.extend(self.read_reset(&format!("{base}.json")).await?);
+            let trip_dir = format!("{base}/trips/");
+            let paths: Vec<String> = self
+                .list(&trip_dir, None)
+                .await?
+                .into_iter()
+                .map(|m| m.location.to_string())
+                .filter(|p| p.ends_with(".json") && !p[trip_dir.len()..].contains('/'))
+                .collect();
+            for (_, t) in self.get_many::<Trip>(paths).await? {
+                if &t.scope == scope && !trips.iter().any(|x| x.id == t.id) {
+                    trips.push(t);
+                }
+            }
+        }
+        trips.sort_by_key(|t| t.id);
+        resets.retain(|r| &r.scope == scope);
+        resets.sort_by_key(|r| r.at);
+        resets.dedup();
+        Ok(BreakerObjects { trips, resets })
     }
 
     async fn breaker_list(&self) -> Result<Vec<(BreakerScope, BreakerObjects)>, StoreError> {

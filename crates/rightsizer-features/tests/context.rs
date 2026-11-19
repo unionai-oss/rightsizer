@@ -246,3 +246,23 @@ fn remote_view_follows_privacy() {
     assert_eq!(o.labels.keys().collect::<Vec<_>>(), vec!["team"]);
     assert_eq!(o.history.len(), 32);
 }
+
+/// Compile-time check: the engine spawns decisions, so `build_context`'s
+/// future (and `read_inputs`') must be `Send`.
+#[allow(dead_code)]
+fn build_context_future_is_send(seed: &ContextSeed, labels: &BTreeMap<String, String>, privacy: &Privacy, r: &OneStore) {
+    fn assert_send<T: Send>(_: T) {}
+    assert_send(build_context(
+        seed,
+        key(),
+        UnitId("main".into()),
+        Prior::default(),
+        PlatformRef::new("k8s"),
+        vec![],
+        labels,
+        privacy,
+        ReadBudget::default(),
+        r,
+    ));
+    assert_send(rightsizer_features::read_inputs(&seed.inputs, r, ReadBudget::default()));
+}

@@ -21,4 +21,4 @@ server:
     # nodePort set by k3s.sh (30909), mapped to host 127.0.0.1:${RSZ_IT_PROM_PORT:-19090}
   resources:
     requests: {cpu: 50m, memory: 256Mi}
-    limits: {memory: 1Gi}
+    limits: {memory: 2Gi}   # 1Gi was OOMKilled under the K8s suite's pod churn (2026-11-19)

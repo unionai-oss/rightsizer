@@ -56,7 +56,10 @@ function M.popen_runner(rsz, sock, timeout_ms)
 end
 
 function M.neg_path(getenv)
-  local user = (getenv("USER") or getenv("LOGNAME") or "unknown"):gsub("[^%w._-]", "_")
+  -- $USER / $LOGNAME are unset under cron, systemd and `docker exec -u`:
+  -- fall back to the home directory's name before a shared "unknown".
+  local home = getenv("HOME")
+  local user = (getenv("USER") or getenv("LOGNAME") or (home and home:match("([^/]+)/*$")) or "unknown"):gsub("[^%w._-]", "_")
   return "/tmp/rightsizer-cli-filter-" .. user .. ".neg"
 end
 

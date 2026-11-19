@@ -926,13 +926,14 @@ class RunRecord(WireModel):
     gpu_util_mean: Optional[float] = None
     t_peak_frac: Optional[float] = None
     duration_s: Optional[float] = None
+    staged_bytes: Optional[int] = None  # memory-backed staging bytes counted in memory_peak (Rust: RunRecord.staged_bytes)
 
     _KEYS: ClassVar[frozenset] = frozenset(
         {
             "v", "key", "cluster", "invocation_id", "attempt", "decision_id", "started_at", "inputs",
             "code_digest", "requested", "origin_prior", "status", "status_confidence", "memory_peak", "cpu_mean",
             "cpu_peak_window", "cpu_throttled_frac", "gpu_memory_peak", "gpu_util_mean", "t_peak_frac",
-            "duration_s", "source", "trust",
+            "duration_s", "staged_bytes", "source", "trust",
         }
     )
 
@@ -962,6 +963,8 @@ class RunRecord(WireModel):
                 object.__setattr__(self, k, _float(v, f"RunRecord.{k}", 0.0, 1.0))
         if self.duration_s is not None:
             object.__setattr__(self, "duration_s", _float(self.duration_s, "RunRecord.duration_s", lo=0.0))
+        if self.staged_bytes is not None:
+            object.__setattr__(self, "staged_bytes", _u64(self.staged_bytes, "RunRecord.staged_bytes"))
         if self.requested is not None and not isinstance(self.requested, ResourceSpec):
             raise WireError("RunRecord.requested: expected ResourceSpec")
         if self.origin_prior is not None and not isinstance(self.origin_prior, Requests):
@@ -992,6 +995,7 @@ class RunRecord(WireModel):
         _put(out, "gpu_util_mean", self.gpu_util_mean)
         _put(out, "t_peak_frac", self.t_peak_frac)
         _put(out, "duration_s", self.duration_s)
+        _put(out, "staged_bytes", self.staged_bytes)
         out["source"] = self.source.to_dict()
         out["trust"] = self.trust.value
         return out
@@ -1044,6 +1048,7 @@ class RunRecord(WireModel):
             gpu_util_mean=frac("gpu_util_mean"),
             t_peak_frac=frac("t_peak_frac"),
             duration_s=None if d.get("duration_s") is None else _float(d["duration_s"], f"{where}.duration_s", lo=0.0),
+            staged_bytes=None if d.get("staged_bytes") is None else _u64(d["staged_bytes"], f"{where}.staged_bytes"),
             source=OutcomeSource.from_dict(d["source"], allow_unknown=allow_unknown, where=f"{where}.source"),
             trust=Trust.parse(d["trust"], f"{where}.trust"),
         )

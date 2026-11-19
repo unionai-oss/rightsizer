@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use super::{InputMeta, Requests, ResourceSpec, WorkloadKey};
+use super::{Bytes, InputMeta, Requests, ResourceSpec, WorkloadKey};
 
 /// One attempt's outcome (SPEC §5.7). Dedup key: `(key, invocation_id,
 /// attempt, source)`.
@@ -72,6 +72,12 @@ pub struct RunRecord {
     /// Duration, seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_s: Option<f64>,
+    /// Memory-backed (tmpfs) staging bytes the unit had at this run (its
+    /// `manifest.memory_backed_bytes`), counted in `memory_peak`. Estimators
+    /// learn demand = peak − overhead median − this (SPEC §5.2), so the
+    /// decision's `+ memory_backed_bytes` does not count staging twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_bytes: Option<Bytes>,
     /// Where the record came from.
     pub source: OutcomeSource,
     /// Trust level (SPEC §8.2).

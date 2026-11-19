@@ -48,10 +48,12 @@ prompt tests import the tuner checkout (`RIGHTSIZER_TUNER_PATH`) and need
 
 ```toml
 [project.scripts]
-rightsizer = "rightsizer.models.cli:rightsizer"   # rightsizer serve ... | rightsizer models ...
+rightsizer = "rightsizer.cli:main"   # rightsizer serve ... | models ... | flyte ... | ray ... | version
 ```
 
-`python -m rightsizer.serve` and `python -m rightsizer.models` work without it.
+`python -m rightsizer.serve` and `python -m rightsizer.models` work without it;
+`rightsizer.models.cli:rightsizer` (serve / models only) is kept for compatibility.
+These extras are declared in `python/rightsizer/pyproject.toml`.
 
 ## Tests
 

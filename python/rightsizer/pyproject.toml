@@ -1,0 +1,74 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rightsizer"
+version = "0.1.0.dev0"
+description = "Size AI workload resource requests before they run (native core + typed Python API)."
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["rightsizer-runtime==0.1.0.dev0"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.optional-dependencies]
+# Platform integrations (ARCHITECTURE.md §1): `import rightsizer` imports neither.
+flyte = ["flyte>=2.13,<2.14"]
+ray = ["ray>=2.60"]
+# History writes through fsspec (rightsizer-runtime's writer).
+fsspec = ["rightsizer-runtime[fsspec]==0.1.0.dev0"]
+# Model serving (models.md; see src/rightsizer/models/DEPENDENCIES.md).
+# rightsizer serve with --backend vllm | sglang | openai: NumPy heads, no torch.
+serve = [
+    "numpy>=1.26",
+    "safetensors>=0.6",
+    "huggingface_hub>=1.1,<2",
+    "tokenizers>=0.22",
+    "jinja2>=3.1",
+]
+# The in-process reference backend (--backend transformers), rightsizer models merge.
+torch = [
+    "rightsizer[serve]",
+    "torch>=2.4",
+    "transformers>=4.51",
+    "peft>=0.15",
+]
+# rightsizer models convert (unionai/rightsize-trees).
+trees = [
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "skops>=0.13",
+    "huggingface_hub>=1.1,<2",
+]
+# rightsizer.export: sklearn HistGradientBoosting exporter (LightGBM is optional: `export-lightgbm`).
+export = ["numpy>=1.26", "scikit-learn>=1.5"]
+export-lightgbm = ["rightsizer[export]", "lightgbm>=4"]
+test = ["pytest>=7", "pytest-asyncio>=0.23", "jsonschema>=4", "pyarrow>=14"]
+
+[project.scripts]
+rightsizer = "rightsizer.cli:main"
+
+[tool.maturin]
+python-source = "src"
+module-name = "rightsizer._core"
+manifest-path = "../../crates/rightsizer-py/Cargo.toml"
+features = ["extension-module"]
+# Release wheels drop local symbols (22.6 MB -> 17.6 MB .so on macOS arm64).
+strip = true
+# abi3 (CPython >= 3.10) comes from pyo3's `abi3-py310` feature (workspace Cargo.toml).
+include = [{ path = "src/rightsizer/py.typed", format = "wheel" }]
+exclude = ["src/rightsizer/**/__pycache__/**"]
+
+[tool.uv.sources]
+rightsizer-runtime = { path = "../rightsizer-runtime", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

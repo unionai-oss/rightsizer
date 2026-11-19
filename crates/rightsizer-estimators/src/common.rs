@@ -96,7 +96,9 @@ fn finite_pos(m: &Measurement) -> bool {
 }
 
 /// Memory demand of a record: container peak − the overhead median (SPEC
-/// §5.2), floored at 16 MiB. OOM-killed runs are always lower bounds, whatever
+/// §5.2), floored at 16 MiB, staging **not** removed (the `features-v1`
+/// history features keep the tuner's container-peak semantics; estimators
+/// use [`memory_demand_obs`]). OOM-killed runs are always lower bounds, whatever
 /// the importer wrote.
 pub fn memory_obs(r: &RunRecord, overhead_median: f64) -> Option<Obs> {
     if !learnable(r) {
@@ -105,6 +107,31 @@ pub fn memory_obs(r: &RunRecord, overhead_median: f64) -> Option<Obs> {
     let m = r.memory_peak.filter(finite_pos)?;
     let censor = if r.status == RunStatus::OomKilled { Censor::AtLeast } else { m.censor };
     Some(Obs { value: (m.value - overhead_median.max(0.0)).max(MIN_MEMORY_DEMAND), censor })
+}
+
+/// Memory-backed (tmpfs) staging bytes of the context being decided: its
+/// `manifest.memory_backed_bytes` (0 when none). The decision adds this to
+/// demand (`need = (demand + overhead + staged) × headroom`, SPEC §5.2).
+pub fn staged_now(ctx: &rightsizer_core::WorkloadContext) -> f64 {
+    ctx.manifest.memory_backed_bytes.map(|b| b.0 as f64).unwrap_or(0.0)
+}
+
+/// Staging bytes counted in a record's container peak: the record's own
+/// `staged_bytes`, else `fallback` (the current context's [`staged_now`]).
+/// The fallback is safe: the decision adds the current staging back, so
+/// `need ≥ peak` whatever the run staged; only a recorded value is exact
+/// when staging changed between runs.
+pub fn staged_of(r: &RunRecord, fallback: f64) -> f64 {
+    r.staged_bytes.map(|b| b.0 as f64).unwrap_or(fallback).max(0.0)
+}
+
+/// Memory demand as the estimators learn it (SPEC §5.2): container peak −
+/// overhead median − staged bytes ([`staged_of`]), floored at 16 MiB, so
+/// the decision's `+ memory_backed_bytes` does not count staging twice.
+/// Censoring as [`memory_obs`].
+pub fn memory_demand_obs(r: &RunRecord, overhead_median: f64, staged_fallback: f64) -> Option<Obs> {
+    let staged = staged_of(r, staged_fallback);
+    memory_obs(r, overhead_median).map(|o| Obs { value: (o.value - staged).max(MIN_MEMORY_DEMAND), ..o })
 }
 
 /// GPU memory demand (busiest device × nothing: the record holds the busiest

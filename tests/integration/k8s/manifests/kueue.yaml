@@ -1,0 +1,26 @@
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: rsz-it-default
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: rsz-it-cq
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: rsz-it-default
+          resources:
+            - {name: cpu, nominalQuota: "4"}
+            - {name: memory, nominalQuota: 8Gi}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: lq
+  namespace: rsz-it-kq
+spec:
+  clusterQueue: rsz-it-cq

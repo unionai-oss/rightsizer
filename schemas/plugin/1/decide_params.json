@@ -4,6 +4,17 @@
   "description": "`decide` params (shim → daemon).",
   "type": "object",
   "properties": {
+    "attempt": {
+      "description": "Extension: the attempt being sized (escalate-on-retry, SPEC §7.2).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AttemptContext"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "deadline_ms": {
       "description": "Deadline.",
       "type": [
@@ -13,8 +24,12 @@
       "format": "uint32",
       "minimum": 0
     },
+    "dry_run": {
+      "description": "Extension: decide but do not record.",
+      "type": "boolean"
+    },
     "env": {
-      "description": "Hosting environment.",
+      "description": "Hosting environment. Over the daemon socket, `principal` and\n`namespace` are ignored: the daemon derives them from `SO_PEERCRED`.",
       "$ref": "#/$defs/AdapterEnv",
       "default": {
         "settings": {}
@@ -38,6 +53,10 @@
     "native": {
       "description": "The submission.",
       "$ref": "#/$defs/Native"
+    },
+    "watch": {
+      "description": "Extension: a `Caller` ladder drives this submission (`rsz slurm\nsbatch --watch`), so reductions may rest on S3(a).",
+      "type": "boolean"
     }
   },
   "required": [
@@ -86,6 +105,43 @@
           "default": {}
         }
       }
+    },
+    "AttemptContext": {
+      "description": "The current attempt, as an orchestrator publishes it (SPEC §7.2).",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "description": "1-based.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "invocation_id": {
+          "description": "Stable across attempts of one task instance.",
+          "type": "string"
+        },
+        "max_attempts": {
+          "description": "`None`: unknown → no ladder.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "v": {
+          "description": "Wire version (1).",
+          "type": "integer",
+          "format": "uint16",
+          "default": 1,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "invocation_id",
+        "attempt"
+      ]
     },
     "Mode": {
       "description": "Mode, ordered `off < observe < recommend < enforce` (SPEC §4).",

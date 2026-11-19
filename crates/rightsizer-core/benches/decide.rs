@@ -35,6 +35,7 @@ fn record(i: usize) -> RunRecord {
         gpu_util_mean: None,
         t_peak_frac: Some(0.6),
         duration_s: Some(1800.0 + i as f64 * 10.0),
+        staged_bytes: None,
         source: OutcomeSource::Watcher,
         trust: Trust::Verified,
     }

@@ -297,3 +297,16 @@ async fn local_files_through_default_resolver() {
     assert_eq!(out[1].shape, Some(vec![2, 3]));
     assert_eq!((out[2].format, out[2].bytes, out[2].shape.clone()), (InputFormat::Dir, Some(30), Some(vec![3])));
 }
+
+#[tokio::test]
+async fn hash_only_does_no_io() {
+    let store = mem_store(&[("d/a.parquet", parquet_bytes(10, 0))]).await;
+    let r = OneStore::new(store.clone());
+    let o = ReadOptions { hash_only: true, ..opts() };
+    let out = read_inputs_with(&[input("x", "mem://d/a.parquet")], &r, &o).await;
+    assert_eq!(out[0].rows, None);
+    assert_eq!(out[0].bytes, None);
+    assert!(out[0].uri_hash.as_deref().is_some_and(|h| h.starts_with("sha256:")), "URI still hashed");
+    assert_eq!(store.bytes_read(), 0);
+    assert_eq!(store.heads.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

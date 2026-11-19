@@ -1,0 +1,332 @@
+//! `rightsizer._core.Engine`: the engine, JSON in / JSON out.
+//!
+//! - Every blocking call releases the GIL while Rust works.
+//! - `decide`, `decide_group`, `attempt_decide` (and their `a…` awaitables)
+//!   never raise (S1): an unreadable request, a missing engine or a panic
+//!   becomes a prior decision.
+//! - Everything else raises `rightsizer.RightsizerError` on failure.
+//! - The engine is rebuilt (from the same configuration) after `fork()` and
+//!   after a Python estimator is registered.
+
+use std::sync::{Arc, Mutex};
+
+use pyo3::prelude::*;
+use rightsizer_core::{AttemptContext, Decision, PriorReason, RunRecord};
+use rightsizer_engine::{Config, DecideRequest};
+use rightsizer_history::Role;
+
+use crate::api;
+use crate::errors::rs_err;
+use crate::estimator;
+use crate::runtime::{PyRt, block_on};
+
+struct Built {
+    pid: u32,
+    generation: u64,
+    engine: rightsizer_engine::Engine,
+}
+
+/// The engine handle shared by the Python object and its async calls.
+pub struct Shared {
+    config: Config,
+    role: Role,
+    built: Mutex<Option<Built>>,
+    /// One build at a time; waiters wait asynchronously (no runtime thread
+    /// is parked on it, so a fan-out of awaitables cannot starve the
+    /// blocking pool the build may need).
+    gate: tokio::sync::Mutex<()>,
+}
+
+impl Shared {
+    /// A handle; nothing is built until first use.
+    pub fn new(config: Config, role: Role) -> Arc<Self> {
+        Arc::new(Shared { config, role, built: Mutex::new(None), gate: tokio::sync::Mutex::new(()) })
+    }
+
+    /// The current engine if it belongs to this process and estimator registry.
+    fn current(&self) -> Option<rightsizer_engine::Engine> {
+        let g = self.built.lock().unwrap_or_else(|e| e.into_inner());
+        let b = g.as_ref()?;
+        (b.pid == std::process::id() && b.generation == estimator::generation()).then(|| b.engine.clone())
+    }
+
+    /// The engine for this process and estimator registry, building it if
+    /// needed (after `fork()` or a new Python estimator).
+    pub async fn engine_async(self: Arc<Self>) -> Result<rightsizer_engine::Engine, String> {
+        if let Some(e) = self.current() {
+            return Ok(e);
+        }
+        let _gate = self.gate.lock().await;
+        if let Some(e) = self.current() {
+            return Ok(e);
+        }
+        let pid = std::process::id();
+        let generation = estimator::generation();
+        let (config, role, front) = (self.config.clone(), self.role, estimator::registered());
+        let engine = api::build_engine(config, role, front).await?;
+        let mut g = self.built.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = g.take()
+            && old.pid != pid
+        {
+            // Forked: the parent's engine holds tasks, clients and locks of a
+            // runtime that does not exist here. Never touch or drop it.
+            std::mem::forget(old);
+        }
+        *g = Some(Built { pid, generation, engine: engine.clone() });
+        Ok(engine)
+    }
+
+    /// Blocking variant of [`Shared::engine_async`]; call without the GIL.
+    pub fn engine(self: &Arc<Self>) -> Result<rightsizer_engine::Engine, String> {
+        if let Some(e) = self.current() {
+            return Ok(e);
+        }
+        block_on(self.clone().engine_async())?
+    }
+}
+
+/// `Engine(config=None, *, store=None, role="client", env_overrides=True)`.
+#[pyclass(name = "Engine", module = "rightsizer._core", frozen)]
+pub struct PyEngine {
+    shared: Arc<Shared>,
+}
+
+fn decide_or_prior(shared: &Arc<Shared>, req: DecideRequest) -> impl std::future::Future<Output = Decision> + Send + 'static {
+    let shared = shared.clone();
+    async move {
+        match shared.engine_async().await {
+            Ok(e) => e.decide(req).await,
+            Err(msg) => api::fallback_decision(&req, PriorReason::ConfigError, msg),
+        }
+    }
+}
+
+fn run_decide(py: Python<'_>, shared: &Arc<Shared>, request_json: &str) -> String {
+    let req = match api::parse_request(request_json) {
+        Ok(r) => r,
+        Err(d) => return api::to_json(&*d),
+    };
+    let shared = shared.clone();
+    py.detach(move || {
+        let fallback = || api::fallback_decision(&req, PriorReason::Panic, String::new());
+        let engine = match shared.engine() {
+            Ok(e) => e,
+            Err(msg) => return api::to_json(&api::fallback_decision(&req, PriorReason::ConfigError, msg)),
+        };
+        let r2 = req.clone();
+        match block_on(async move { engine.decide(r2).await }) {
+            Ok(d) => api::to_json(&d),
+            Err(panic) => {
+                let mut d = fallback();
+                d.explanation.push(format!("panic: {panic}"));
+                api::to_json(&d)
+            }
+        }
+    })
+}
+
+#[pymethods]
+impl PyEngine {
+    #[new]
+    #[pyo3(signature = (config=None, *, store=None, role=None, env_overrides=true))]
+    fn new(py: Python<'_>, config: Option<String>, store: Option<String>, role: Option<String>, env_overrides: bool) -> PyResult<Self> {
+        let role = api::parse_role(role.as_deref()).map_err(|e| rs_err(py, e))?;
+        let cfg = py.detach(|| api::load_config(config.as_deref(), store.as_deref(), env_overrides)).map_err(|e| rs_err(py, e))?;
+        let shared = Shared::new(cfg, role);
+        // Build now so `strict` configuration errors surface here.
+        let s2 = shared.clone();
+        py.detach(move || s2.engine()).map_err(|e| rs_err(py, e))?;
+        Ok(PyEngine { shared })
+    }
+
+    /// The effective configuration as JSON.
+    fn config_json(&self) -> String {
+        api::to_json(&self.shared.config)
+    }
+
+    /// The configuration error that made this engine inert, if any.
+    fn config_error(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        let s = self.shared.clone();
+        let e = py.detach(move || s.engine()).map_err(|e| rs_err(py, e))?;
+        Ok(e.config_error().map(str::to_string))
+    }
+
+    /// Ids of the chain's members, top-down.
+    fn chain(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let s = self.shared.clone();
+        let e = py.detach(move || s.engine()).map_err(|e| rs_err(py, e))?;
+        Ok(e.chain().ids())
+    }
+
+    /// `DecideRequest` JSON → `Decision` JSON. Never raises.
+    fn decide(&self, py: Python<'_>, request_json: &str) -> String {
+        run_decide(py, &self.shared, request_json)
+    }
+
+    /// Awaitable `decide` (on the caller's event loop). Never raises.
+    fn adecide<'py>(&self, py: Python<'py>, request_json: &str) -> PyResult<Bound<'py, PyAny>> {
+        let parsed = api::parse_request(request_json);
+        let shared = self.shared.clone();
+        pyo3_async_runtimes::generic::future_into_py::<PyRt, _, _>(py, async move {
+            Ok(match parsed {
+                Err(d) => api::to_json(&*d),
+                Ok(req) => api::to_json(&decide_or_prior(&shared, req).await),
+            })
+        })
+    }
+
+    /// JSON array of requests → JSON array of decisions (one decision per
+    /// group, SPEC §4). Never raises.
+    fn decide_group(&self, py: Python<'_>, requests_json: &str) -> String {
+        let reqs: Vec<DecideRequest> = match serde_json::from_str(requests_json) {
+            Ok(r) => r,
+            Err(e) => return api::to_json(&vec![api::invalid_request_decision("null", &format!("group: {e}"))]),
+        };
+        let shared = self.shared.clone();
+        py.detach(move || {
+            let fallback = |reqs: &[DecideRequest], reason, msg: String| {
+                api::to_json(&reqs.iter().map(|r| api::fallback_decision(r, reason, msg.clone())).collect::<Vec<_>>())
+            };
+            let engine = match shared.engine() {
+                Ok(e) => e,
+                Err(msg) => return fallback(&reqs, PriorReason::ConfigError, msg),
+            };
+            let r2 = reqs.clone();
+            match block_on(async move { engine.decide_group(r2).await }) {
+                Ok(ds) => api::to_json(&ds),
+                Err(p) => fallback(&reqs, PriorReason::Panic, p),
+            }
+        })
+    }
+
+    /// Awaitable `decide_group`.
+    fn adecide_group<'py>(&self, py: Python<'py>, requests_json: &str) -> PyResult<Bound<'py, PyAny>> {
+        let reqs: Result<Vec<DecideRequest>, String> = serde_json::from_str(requests_json).map_err(|e| e.to_string());
+        let shared = self.shared.clone();
+        pyo3_async_runtimes::generic::future_into_py::<PyRt, _, _>(py, async move {
+            let reqs = match reqs {
+                Ok(r) => r,
+                Err(e) => return Ok(api::to_json(&vec![api::invalid_request_decision("null", &format!("group: {e}"))])),
+            };
+            Ok(match shared.engine_async().await {
+                Ok(e) => api::to_json(&e.decide_group(reqs).await),
+                Err(msg) => api::to_json(&reqs.iter().map(|r| api::fallback_decision(r, PriorReason::ConfigError, msg.clone())).collect::<Vec<_>>()),
+            })
+        })
+    }
+
+    /// A decision for attempt k of an invocation (SPEC §2.3 S5 ladders).
+    /// `attempt_json` is an `AttemptContext`. Never raises.
+    fn attempt_decide(&self, py: Python<'_>, request_json: &str, attempt_json: &str) -> String {
+        let req = match api::parse_request(request_json) {
+            Ok(r) => r,
+            Err(d) => return api::to_json(&*d),
+        };
+        let attempt: AttemptContext = match serde_json::from_str(attempt_json) {
+            Ok(a) => a,
+            Err(e) => return api::to_json(&api::fallback_decision(&req, PriorReason::Internal, format!("invalid attempt context: {e}"))),
+        };
+        let shared = self.shared.clone();
+        py.detach(move || {
+            let engine = match shared.engine() {
+                Ok(e) => e,
+                Err(msg) => return api::to_json(&api::fallback_decision(&req, PriorReason::ConfigError, msg)),
+            };
+            let r2 = req.clone();
+            match block_on(async move { engine.attempt_decide(r2, attempt).await }) {
+                Ok(d) => api::to_json(&d),
+                Err(p) => api::to_json(&api::fallback_decision(&req, PriorReason::Panic, p)),
+            }
+        })
+    }
+
+    /// Ingest a `RunRecord` (JSON). Returns the outcome report as JSON.
+    /// Raises `RightsizerError` on an invalid record or a store error.
+    fn outcome(&self, py: Python<'_>, record_json: &str) -> PyResult<String> {
+        let rec: RunRecord = serde_json::from_str(record_json).map_err(|e| rs_err(py, format!("invalid run record: {e}")))?;
+        let shared = self.shared.clone();
+        let r = py.detach(move || -> Result<String, String> {
+            let engine = shared.engine()?;
+            let rep = block_on(async move { engine.outcome(rec).await })?.map_err(|e| e.to_string())?;
+            Ok(api::outcome_report(&rep).to_string())
+        });
+        r.map_err(|e| rs_err(py, e))
+    }
+
+    /// Awaitable `outcome`.
+    fn aoutcome<'py>(&self, py: Python<'py>, record_json: &str) -> PyResult<Bound<'py, PyAny>> {
+        let rec: RunRecord = serde_json::from_str(record_json).map_err(|e| rs_err(py, format!("invalid run record: {e}")))?;
+        let shared = self.shared.clone();
+        pyo3_async_runtimes::generic::future_into_py::<PyRt, _, _>(py, async move {
+            let r: Result<String, String> = async {
+                let engine = shared.engine_async().await?;
+                let rep = engine.outcome(rec).await.map_err(|e| e.to_string())?;
+                Ok(api::outcome_report(&rep).to_string())
+            }
+            .await;
+            r.map_err(|e| Python::attach(|py| rs_err(py, e)))
+        })
+    }
+
+    /// Flush buffered writes; returns how many were written.
+    fn flush(&self, py: Python<'_>) -> PyResult<usize> {
+        let shared = self.shared.clone();
+        py.detach(move || -> Result<usize, String> {
+            let engine = shared.engine()?;
+            block_on(async move { engine.flush().await })
+        })
+        .map_err(|e| rs_err(py, e))
+    }
+
+    /// Breakers as JSON (`rsz breaker status`).
+    fn breaker_status(&self, py: Python<'_>) -> PyResult<String> {
+        let shared = self.shared.clone();
+        py.detach(move || -> Result<String, String> {
+            let engine = shared.engine()?;
+            let s = block_on(async move { engine.breaker_status().await })?.map_err(|e| e.to_string())?;
+            Ok(api::to_json(&s))
+        })
+        .map_err(|e| rs_err(py, e))
+    }
+
+    /// The fleet control object as JSON, or `None` when there is none.
+    fn control_get(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        let shared = self.shared.clone();
+        py.detach(move || -> Result<Option<String>, String> {
+            let engine = shared.engine()?;
+            let c = block_on(async move { engine.control_get().await })?.map_err(|e| e.to_string())?;
+            Ok(c.map(|c| api::to_json(&c)))
+        })
+        .map_err(|e| rs_err(py, e))
+    }
+
+    /// Shadow / audit replay (`rsz shadow`): `RunRecord`s (JSON array) and
+    /// options (JSON object: `since`, `platform`, `state`, `constraints`,
+    /// `policy`, `bootstrap`, `seed`, `per_run`) → `ReplayReport` JSON.
+    #[pyo3(signature = (records_json, options_json=None))]
+    fn replay(&self, py: Python<'_>, records_json: &str, options_json: Option<&str>) -> PyResult<String> {
+        let recs: Vec<RunRecord> = serde_json::from_str(records_json).map_err(|e| rs_err(py, format!("records: {e}")))?;
+        let opts: api::ReplayOpts = match options_json {
+            None => api::ReplayOpts::default(),
+            Some(o) => serde_json::from_str(o).map_err(|e| rs_err(py, format!("replay options: {e}")))?,
+        };
+        let opts = opts.into_options();
+        let shared = self.shared.clone();
+        py.detach(move || -> Result<String, String> {
+            let engine = shared.engine()?;
+            let r = block_on(async move { engine.replay(recs, &opts).await })?;
+            Ok(api::to_json(&r))
+        })
+        .map_err(|e| rs_err(py, e))
+    }
+
+    /// Prometheus text exposition of this engine's metrics.
+    fn metrics(&self, py: Python<'_>) -> PyResult<String> {
+        let shared = self.shared.clone();
+        py.detach(move || shared.engine().map(|e| e.metrics().render())).map_err(|e| rs_err(py, e))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<rightsizer._core.Engine history={:?}>", self.shared.config.history.uri.as_deref().map(rightsizer_history::redact_uri))
+    }
+}

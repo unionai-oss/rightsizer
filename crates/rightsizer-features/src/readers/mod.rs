@@ -70,6 +70,9 @@ pub struct ReadOptions {
     pub string_scalars: bool,
     /// Use the process-wide metadata cache.
     pub use_cache: bool,
+    /// No I/O at all: inputs keep what their refs know, URIs become salted
+    /// hashes (the K8s admission path, `manifest.extra.inputs_hash_only`).
+    pub hash_only: bool,
 }
 
 impl Default for ReadOptions {
@@ -89,6 +92,7 @@ impl ReadOptions {
             column_names: true,
             string_scalars: true,
             use_cache: true,
+            hash_only: false,
         }
     }
 
@@ -205,19 +209,26 @@ async fn run_reads(
     mode: Mode,
     deadline: tokio::time::Instant,
 ) {
-    let futs = which.iter().filter_map(|&i| {
+    if opts.hash_only {
+        return;
+    }
+    // Collected into a Vec first (not a lazy `filter_map` adapter): a lazy
+    // iterator of `async move` blocks borrowing `&usize` defeats rustc's
+    // higher-ranked `Send` inference, and the engine spawns decisions.
+    let mut futs = Vec::with_capacity(which.len());
+    for &i in which {
         let r = &refs[i];
-        let uri = r.uri.as_deref()?;
+        let Some(uri) = r.uri.as_deref() else { continue };
         if r.format == Some(InputFormat::Scalar) || (r.scalar.is_some() && r.format.is_none()) {
-            return None;
+            continue;
         }
         let slot = Arc::clone(&slots[i]);
-        Some(async move {
+        futs.push(async move {
             if let Err(e) = read_one(r, uri, &slot, resolver, opts, mode).await {
                 tracing::debug!(input = %r.name, error = %e, "input metadata unavailable");
             }
-        })
-    });
+        });
+    }
     let all = futures::stream::iter(futs).buffer_unordered(opts.concurrency.max(1)).collect::<Vec<()>>();
     if tokio::time::timeout_at(deadline, all).await.is_err() {
         tracing::debug!("feature time budget expired; unread inputs keep what is known");

@@ -1,19 +1,16 @@
 //! Context building from a seed (plugins.md §2, SPEC §5.2, §9, §11).
 //!
-//! Interim: input metadata is what the refs already know (no reads), code
-//! info comes from `rightsizer_features::code_info` (digest, `features-v1`
-//! tokens, source only if privacy allows; `Path` refs are read locally),
-//! labels are allowlisted, history is the store's.
+//! The engine calls `rightsizer_features::build_context_with`
+//! (`Engine::seed_context`): bounded input reads within
+//! min(`features.budget_ms`, half the decision budget left), salted URI
+//! hashes, code info, distribution markers, allowlisted labels. On the
+//! admission path (`manifest.extra.inputs_hash_only = true`) inputs are
+//! never read inline, only hashed.
 //!
-//! TODO(rightsizer-features): call `rightsizer_features::build_context`
-//! (bounded reads within `features.budget_ms`, salted URI hashes). It is
-//! wired in `Engine::context_of` but not used yet: its future is not
-//! provably `Send` for callers that `tokio::spawn` a decision (rustc's
-//! higher-ranked inference on `readers::read_pass`'s
-//! `which.iter().filter_map(|&i| Some(async move { .. }))` fed to
-//! `buffer_unordered`). Collecting the futures into a `Vec` first fixes it.
+//! [`complete_seed`] is the synchronous, I/O-free variant (known sizes only),
+//! kept for callers without a runtime.
 
-use rightsizer_core::{CodeInfo, CodeRef, ContextSeed, PlatformRef, Prior, RunRecord, UnitId, WorkloadContext, WorkloadKey};
+use rightsizer_core::{CodeInfo, CodeRef, ContextSeed, ScalarValue, PlatformRef, Prior, RunRecord, UnitId, WorkloadContext, WorkloadKey};
 use rightsizer_features::Privacy;
 
 /// Code info from a code ref; an unreadable path yields `None` (S1).
@@ -70,4 +67,15 @@ pub fn complete_seed(
     };
     ctx.canonicalize(history_limit);
     ctx
+}
+
+/// Whether the seed asks for hash-only inputs (`manifest.extra.inputs_hash_only`:
+/// `true`, `"true"` or `1`): no input URI is read inline.
+pub fn inputs_hash_only(seed: &ContextSeed) -> bool {
+    match seed.manifest.extra.get("inputs_hash_only") {
+        Some(ScalarValue::Bool(b)) => *b,
+        Some(ScalarValue::Str(s)) => s.eq_ignore_ascii_case("true"),
+        Some(ScalarValue::Int(i)) => *i != 0,
+        _ => false,
+    }
 }

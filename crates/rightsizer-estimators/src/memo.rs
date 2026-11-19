@@ -2,9 +2,12 @@
 //!
 //! - [`TtlCache`]: a bounded map with a time-to-live (oldest entries are
 //!   evicted when full).
-//! - [`Memo`]: the **memo** layer. It stores the **normalized estimate
-//!   only** — every axis as `Cells` on the grid — under [`MemoKey`] =
-//!   (workload key, unit, code digest, feature bucket, policy hash).
+//! - [`Memo`]: the **memo** layer — the one memo of the workspace (the
+//!   engine and the remote client both use it). It stores the **normalized
+//!   estimate only** — every axis as `Cells` on the grid — (or a clean
+//!   decline) under [`MemoKey`] = (workload key, unit, code digest, feature
+//!   bucket, policy hash), with a TTL on an injectable clock, per-workload
+//!   invalidation and single-flight ([`Memo::get_or_compute`]).
 //!   Constraints, S3, breakers and the mode are re-evaluated on every hit; the
 //!   memo never stores a decision. The feature bucket
 //!   ([`rightsizer_features::feature_bucket`]) puts each input's bytes on the
@@ -18,9 +21,14 @@
 //! submission (a pod's containers) share a workload key but not a demand.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::Hash;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use rightsizer_core::clock::{Clock, SystemClock, elapsed};
+use tokio::sync::OnceCell;
 
 use rightsizer_core::digest::{canonical_json, history_watermark, sha256_hex};
 use rightsizer_core::grid::{Grid, GridAxis};
@@ -142,20 +150,68 @@ pub fn normalized_estimate(est: &Estimate, grid: &Grid, point_sigma: f64) -> Res
     Ok(out)
 }
 
-/// The memo layer: normalized estimates by [`MemoKey`].
+/// What one chain (or estimator) call answered, as the memo keeps it: the
+/// winning estimate (normalized when stored), the members that did not
+/// answer, and whether any of them failed (rather than declined). Answers
+/// with `any_error` are shared with concurrent waiters but never stored.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MemoAnswer {
+    /// The winning estimate; `None` = every member declined (or failed).
+    pub estimate: Option<Estimate>,
+    /// `(id, reason)` of members that did not answer.
+    pub skipped: Vec<(String, String)>,
+    /// Whether any member failed (rather than declined).
+    pub any_error: bool,
+}
+
+struct MemoEntry {
+    answer: MemoAnswer,
+    at: DateTime<Utc>,
+}
+
+/// The memo layer (SPEC §6.3): normalized estimates — and clean declines —
+/// by [`MemoKey`], with a TTL on an injectable clock, bounded capacity
+/// (expired entries, then the oldest, are evicted), per-workload
+/// invalidation (an outcome changes the key's history) and single-flight:
+/// concurrent misses on one key share one computation
+/// ([`Memo::get_or_compute`]). Shared by the engine and the remote client.
 pub struct Memo {
-    cache: TtlCache<MemoKey, Estimate>,
+    entries: Mutex<HashMap<MemoKey, MemoEntry>>,
+    inflight: Mutex<HashMap<MemoKey, Arc<OnceCell<MemoAnswer>>>>,
     grid: Grid,
     point_sigma: f64,
+    ttl: Duration,
+    capacity: usize,
+    clock: Arc<dyn Clock>,
 }
 
 impl Memo {
     /// Default TTL (24 h, as the exact cache).
     pub const DEFAULT_TTL: Duration = Duration::from_secs(24 * 3600);
 
-    /// A memo on `grid` holding at most `capacity` entries for `ttl`.
+    /// A memo on `grid` holding at most `capacity` entries for `ttl`, on the system clock.
     pub fn new(grid: Grid, ttl: Duration, capacity: usize) -> Self {
-        Memo { cache: TtlCache::new(ttl, capacity), grid, point_sigma: rightsizer_core::normalize::POINT_SIGMA }
+        Self::with_clock(grid, ttl, capacity, Arc::new(SystemClock))
+    }
+
+    /// A memo whose TTL runs on `clock`.
+    pub fn with_clock(grid: Grid, ttl: Duration, capacity: usize, clock: Arc<dyn Clock>) -> Self {
+        Memo {
+            entries: Mutex::new(HashMap::new()),
+            inflight: Mutex::new(HashMap::new()),
+            grid,
+            point_sigma: rightsizer_core::normalize::POINT_SIGMA,
+            ttl,
+            capacity: capacity.max(1),
+            clock,
+        }
+    }
+
+    /// Normalize `Point` estimates with this σ (the engine's `decision.point_sigma`,
+    /// so a memo hit decides exactly like the miss that filled it).
+    pub fn with_point_sigma(mut self, sigma: f64) -> Self {
+        self.point_sigma = sigma;
+        self
     }
 
     /// The grid estimates are normalized onto.
@@ -168,26 +224,120 @@ impl Memo {
         MemoKey::new(ctx, &self.grid, policy_hash)
     }
 
-    /// A memoized normalized estimate.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<MemoKey, MemoEntry>> {
+        self.entries.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A memoized normalized estimate (`None` also for a memoized decline).
     pub fn get(&self, k: &MemoKey) -> Option<Estimate> {
-        self.cache.get(k)
+        self.get_answer(k).and_then(|a| a.estimate)
+    }
+
+    /// A live memoized answer (estimate or clean decline).
+    pub fn get_answer(&self, k: &MemoKey) -> Option<MemoAnswer> {
+        let now = self.clock.now();
+        let mut m = self.lock();
+        match m.get(k) {
+            Some(e) if elapsed(now, e.at) < self.ttl => Some(e.answer.clone()),
+            Some(_) => {
+                m.remove(k);
+                None
+            }
+            None => None,
+        }
     }
 
     /// Normalize and store `est`; returns the stored (normalized) estimate.
     pub fn put(&self, k: MemoKey, est: &Estimate) -> Result<Estimate, NormalizeError> {
         let n = normalized_estimate(est, &self.grid, self.point_sigma)?;
-        self.cache.insert(k, n.clone());
+        self.insert(k, MemoAnswer { estimate: Some(n.clone()), skipped: Vec::new(), any_error: false });
         Ok(n)
+    }
+
+    /// Store an answer (its estimate normalized). Answers with `any_error`
+    /// are not stored (errors are retried next time); neither is an estimate
+    /// that does not normalize. Returns the answer as stored.
+    pub fn put_answer(&self, k: MemoKey, mut answer: MemoAnswer) -> MemoAnswer {
+        if answer.any_error {
+            return answer;
+        }
+        if let Some(e) = &answer.estimate {
+            match normalized_estimate(e, &self.grid, self.point_sigma) {
+                Ok(n) => answer.estimate = Some(n),
+                Err(err) => {
+                    tracing::debug!(error = %err, "estimate not memoized");
+                    return answer;
+                }
+            }
+        }
+        self.insert(k, answer.clone());
+        answer
+    }
+
+    fn insert(&self, k: MemoKey, answer: MemoAnswer) {
+        let now = self.clock.now();
+        let mut m = self.lock();
+        if m.len() >= self.capacity && !m.contains_key(&k) {
+            let ttl = self.ttl;
+            m.retain(|_, e| elapsed(now, e.at) < ttl);
+            while m.len() >= self.capacity {
+                let Some(oldest) = m.iter().min_by_key(|(_, e)| e.at).map(|(k, _)| k.clone()) else { break };
+                m.remove(&oldest);
+            }
+        }
+        m.insert(k, MemoEntry { answer, at: now });
+    }
+
+    /// The memoized answer for `k`, or `compute()` — run once for all
+    /// concurrent misses on `k` (single-flight) and stored unless it has
+    /// `any_error`. Returns the answer and whether it was a memo hit.
+    pub async fn get_or_compute<F, Fut>(&self, k: &MemoKey, compute: F) -> (MemoAnswer, bool)
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = MemoAnswer>,
+    {
+        if let Some(hit) = self.get_answer(k) {
+            return (hit, true);
+        }
+        let cell = {
+            let mut g = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
+            g.entry(k.clone()).or_insert_with(|| Arc::new(OnceCell::new())).clone()
+        };
+        let mut ran = false;
+        let answer = cell
+            .get_or_init(|| {
+                ran = true;
+                async { self.put_answer(k.clone(), compute().await) }
+            })
+            .await
+            .clone();
+        if ran {
+            let mut g = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
+            if g.get(k).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+                g.remove(k);
+            }
+        }
+        (answer, false)
+    }
+
+    /// Drop every entry of a workload key (any unit), e.g. after an outcome.
+    pub fn invalidate_workload(&self, workload_key: &str) {
+        self.lock().retain(|k, _| k.workload_key != workload_key);
+    }
+
+    /// Drop everything.
+    pub fn clear(&self) {
+        self.lock().clear();
     }
 
     /// Entries held.
     pub fn len(&self) -> usize {
-        self.cache.len()
+        self.lock().len()
     }
 
     /// Whether empty.
     pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
+        self.len() == 0
     }
 }
 

@@ -323,6 +323,7 @@ fn rs_context(rv: &Value, grid_key: &str) -> WorkloadContext {
                 gpu_util_mean: None,
                 t_peak_frac: None,
                 duration_s: Some(3600.0),
+                staged_bytes: None,
                 source: OutcomeSource::Watcher,
                 trust: Trust::Verified,
             }

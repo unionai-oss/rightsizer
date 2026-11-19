@@ -300,6 +300,13 @@
           "$ref": "#/$defs/Requests",
           "default": {}
         },
+        "ceiling_reason": {
+          "description": "Why `ceiling` is set, reported as the clamp reason (advisory and\n`rightsizer_clamped_total{reason}`) instead of `\"user\"` when the user\nceiling binds: e.g. `\"no_platform_state\"` when an adapter without\nnode shapes set it to the definition ceiling or the prior (S4).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "floor": {
           "description": "Platform minimums (the core adds the size-scaled floor).",
           "$ref": "#/$defs/Requests",
@@ -1030,6 +1037,13 @@
         "id": {
           "description": "Stable within the submission, e.g. `\"spec.template.spec.containers[trainer]\"`.",
           "$ref": "#/$defs/UnitId"
+        },
+        "key": {
+          "description": "The full workload key, when it is not `{adapter kind}://{tenant}/{key_suffix}`\n(e.g. a Flyte task pod sized by the K8s webhook is keyed\n`flyte://{org}/{project}/{domain}/{task}`, kubernetes.md §2). The\nadapter derives it from trusted data only.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "key_suffix": {
           "description": "The user-overridable part of the workload key.",

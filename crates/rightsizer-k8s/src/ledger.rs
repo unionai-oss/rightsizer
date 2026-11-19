@@ -66,6 +66,10 @@ impl MemoryLedger {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// One reservation.
+    pub fn get(&self, namespace: &str, id: &str) -> Option<Reservation> {
+        self.items.lock().ok()?.iter().find(|x| x.namespace == namespace && x.id == id).cloned()
+    }
 }
 
 impl ReservationLedger for MemoryLedger {

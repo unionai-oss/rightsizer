@@ -1,0 +1,44 @@
+{
+  "v": 1,
+  "id": "01M7S70Q96T18X3NQDMPVSHRFD",
+  "key": "python://alice/etl",
+  "unit": "main",
+  "mode": "off",
+  "recommended": {
+    "requests": {
+      "cpu": 2000,
+      "memory": 8589934592
+    },
+    "limits": {}
+  },
+  "applied": {
+    "requests": {
+      "cpu": 2000,
+      "memory": 8589934592
+    },
+    "limits": {}
+  },
+  "prior": {
+    "spec": {
+      "requests": {
+        "cpu": 2000,
+        "memory": 8589934592
+      },
+      "limits": {}
+    },
+    "defaulted": []
+  },
+  "held": [],
+  "source": {
+    "kind": "prior",
+    "reason": "mode",
+    "detail": "mode off"
+  },
+  "propensity": 1.0,
+  "advisories": [],
+  "explanation": [
+    "kept the prior: mode",
+    "mode off"
+  ],
+  "context_digest": "sha256:bb067cc4db9339facdbb9d2b8469f085137d0259df2dc98fadaa1b0c6f52ff05"
+}

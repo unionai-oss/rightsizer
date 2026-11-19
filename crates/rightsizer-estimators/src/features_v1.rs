@@ -22,7 +22,10 @@
 //! | `scalar.{name}` | numeric value of scalar input `name` (bools 0/1) | no such numeric scalar |
 //! | `code.present` | 1 if code info is present | never |
 //! | `code.n_tokens` | distinct code tokens | no code |
-//! | `tok.{token}` | 1 if `token` is among the code tokens, else 0 — one per token in the **model's** vocabulary | no code |
+//! | `tok.{token}` | 1 if `CodeInfo.tokens` has `tok:{token}` (or a bare `{token}`), else 0 — one per token in the **model's** vocabulary | no code |
+//! | `num.{token}` | the literal of `num:{token}=<n>`, else 0 — one per name in the model's vocabulary | no code |
+//! | `code.max_literal_log2` | `log2(n)` of `max_literal=<n>`, else 0 (the tuner's `log_max_literal`) | no code |
+//! | `code.lines_log2` | `k` of `code_lines_log2=<k>` (available without the source) | no code, or no such token |
 //! | `code.lines`, `code.log2_bytes` | lines of / `log2b` bytes of the source | no source (privacy) |
 //! | `manifest.log2_memory_backed_bytes` | `log2b(bytes)`; 0 when none | never |
 //! | `manifest.sidecars`, `manifest.init_containers`, `manifest.distributed` | counts, 0/1 | never |
@@ -35,17 +38,30 @@
 //! | `hist.peak_per_byte` | that run's demand bytes / its input bytes | sizes unknown |
 //! | `hist.cpu_mean_max` | max mean cores | no CPU measurements |
 //! | `hist.log2_duration_median` | `log2b` median success duration, s | no durations |
+//!
+//! **Code tokens.** `CodeInfo.tokens` uses the wire format of
+//! `rightsizer_features::tokens` (`tok:<t>`, `num:<t>=<n>`,
+//! `max_literal=<n>`, `code_lines_log2=<k>`), read here only through
+//! `rightsizer_features::tokens::parse_token`, so the producer and this
+//! vector share one definition. Vector names use `.` (`tok.<t>`,
+//! `num.<t>`), with `<t>` the raw token string (e.g. `tok.read_parquet(`):
+//! that is what the tree converters write (`python/rightsizer/src/rightsizer/models/trees.py`
+//! maps the tuner's `{m,c,g}_tok_<t>`, `cuda_<t>`, `k8s_<t>` to `tok.<t>` and
+//! `{m,c,g}_log_max_literal` to `code.max_literal_log2`).
 
 use std::collections::BTreeMap;
 
 use rightsizer_core::stats::median;
 use rightsizer_core::{InputFormat, RunStatus, WorkloadContext};
+use rightsizer_features::tokens::{CodeToken, parse_token};
 
 use crate::common::{MIB, cpu_mean_obs, learnable, memory_obs};
 use crate::rules_sized::nearest_by_size;
 
-/// Prefix of code-token features.
+/// Prefix of code-token presence features.
 pub const TOKEN_PREFIX: &str = "tok.";
+/// Prefix of code-token numeric features.
+pub const NUMERIC_TOKEN_PREFIX: &str = "num.";
 
 fn log2b(x: f64) -> f64 {
     x.max(1.0).log2()
@@ -154,11 +170,30 @@ pub fn features_v1<'a>(ctx: &WorkloadContext, vocabulary: impl IntoIterator<Item
     // Code.
     put("code.present".into(), if ctx.code.is_some() { 1.0 } else { 0.0 });
     if let Some(c) = &ctx.code {
-        let toks: std::collections::BTreeSet<&str> = c.tokens.iter().map(String::as_str).collect();
-        put("code.n_tokens".into(), toks.len() as f64);
+        let mut present: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut numeric: BTreeMap<&str, u64> = BTreeMap::new();
+        let mut max_literal: Option<u64> = None;
+        for t in &c.tokens {
+            match parse_token(t) {
+                Some(CodeToken::Presence(p)) => {
+                    present.insert(p);
+                }
+                Some(CodeToken::Numeric(p, n)) => {
+                    let e = numeric.entry(p).or_insert(n);
+                    *e = (*e).max(n);
+                }
+                Some(CodeToken::MaxLiteral(n)) => max_literal = Some(max_literal.map_or(n, |m| m.max(n))),
+                Some(CodeToken::LinesLog2(k)) => put("code.lines_log2".into(), k as f64),
+                None => {}
+            }
+        }
+        put("code.n_tokens".into(), present.len() as f64);
+        put("code.max_literal_log2".into(), max_literal.filter(|&n| n > 1).map(|n| (n as f64).log2()).unwrap_or(0.0));
         for name in vocabulary {
             if let Some(t) = name.strip_prefix(TOKEN_PREFIX) {
-                put(name.to_string(), if toks.contains(t) { 1.0 } else { 0.0 });
+                put(name.to_string(), if present.contains(t) { 1.0 } else { 0.0 });
+            } else if let Some(t) = name.strip_prefix(NUMERIC_TOKEN_PREFIX) {
+                put(name.to_string(), numeric.get(t).copied().unwrap_or(0) as f64);
             }
         }
         if let Some(src) = &c.source {
@@ -263,6 +298,19 @@ mod tests {
         assert_eq!(f["hist.log2_peak_max_mib"], 11.0);
         assert!((f["hist.log2_size_ratio"] - (((1u64 << 30) as f64 + (1u64 << 20) as f64).log2() - 29.0)).abs() < 1e-9);
         assert!(!f.contains_key("prior.cpu_cores"));
+        // Real tokens from the features crate (`tok:`-prefixed) light up `tok.*`.
+        let src = "df = pd.read_parquet(p)\nfor b in range(batch_size=64): x = 4096\n";
+        ctx.code = Some(rightsizer_features::code_info(src, None, false));
+        let f = features_v1(&ctx, ["tok.read_parquet", "tok.read_parquet(", "tok.groupby", "num.batch_size", "num.n_jobs="]);
+        assert_eq!(f["tok.read_parquet"], 1.0, "{:?}", ctx.code);
+        assert_eq!(f["tok.read_parquet("], 1.0);
+        assert_eq!(f["tok.groupby"], 0.0);
+        assert_eq!(f["num.batch_size"], 64.0);
+        assert_eq!(f["num.n_jobs="], 0.0);
+        assert_eq!(f["code.max_literal_log2"], 12.0, "the tuner's log2(max literal > 1)");
+        assert_eq!(f["code.lines_log2"], 1.0);
+        assert!(!f.contains_key("code.lines"), "no source without send_source");
+        assert!(f["code.n_tokens"] >= 3.0);
         // Without code, token features are missing, not zero.
         ctx.code = None;
         let f = features_v1(&ctx, ["tok.read_parquet"]);

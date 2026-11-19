@@ -1,0 +1,82 @@
+{{- if .Values.nodeAgent.enabled }}
+# Node agent (kubernetes.md §6.2): cgroup v2 memory.peak / cpu.stat of
+# tracked containers every second, served on :{{ .Values.nodeAgent.port }} for the watcher (pull).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, watch]   # pods on this node (fieldSelector spec.nodeName)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ include "rightsizer.fullname" . }}-node-agent}
+subjects:
+  - {kind: ServiceAccount, name: {{ include "rightsizer.fullname" . }}-node-agent, namespace: {{ .Release.Namespace }}}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
+spec:
+  selector:
+    matchLabels: {{- include "rightsizer.selector" . | nindent 6 }}
+      app.kubernetes.io/component: node-agent
+  template:
+    metadata:
+      labels: {{- include "rightsizer.selector" . | nindent 8 }}
+        app.kubernetes.io/component: node-agent
+    spec:
+      serviceAccountName: {{ include "rightsizer.fullname" . }}-node-agent
+      hostPID: false
+      {{- with .Values.nodeAgent.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeAgent.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeAgent.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: node-agent
+          image: {{ include "rightsizer.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [node-agent, --listen=0.0.0.0:{{ .Values.nodeAgent.port }}, --cgroup-root=/host/sys/fs/cgroup, --interval-ms={{ .Values.nodeAgent.intervalMs }}]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - {name: RSZ_LOG, value: "info,kube=warn"}
+          ports:
+            - {name: http, containerPort: {{ .Values.nodeAgent.port }}}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          resources: {{- toYaml .Values.nodeAgent.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: cgroup, mountPath: /host/sys/fs/cgroup, readOnly: true}
+      volumes:
+        - name: cgroup
+          hostPath: {path: /sys/fs/cgroup, type: Directory}
+{{- end }}

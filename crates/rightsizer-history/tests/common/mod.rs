@@ -48,6 +48,7 @@ pub fn rec(k: &WorkloadKey, inv: &str, attempt: u32, started_at: DateTime<Utc>) 
         gpu_util_mean: None,
         t_peak_frac: None,
         duration_s: Some(12.0),
+        staged_bytes: None,
         source: OutcomeSource::Watcher,
         trust: Trust::Verified,
     }

@@ -204,6 +204,7 @@ mod tests {
             gpu_util_mean: None,
             t_peak_frac: None,
             duration_s: None,
+            staged_bytes: None,
             source: OutcomeSource::Watcher,
             trust: Trust::Verified,
         }

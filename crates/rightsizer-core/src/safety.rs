@@ -322,6 +322,7 @@ mod tests {
             gpu_util_mean: None,
             t_peak_frac: None,
             duration_s: Some(60.0),
+            staged_bytes: None,
             source: OutcomeSource::Watcher,
             trust: Trust::Verified,
         }

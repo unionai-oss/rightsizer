@@ -50,6 +50,12 @@ pub mod method {
     pub const STATUS: &str = "status";
     /// Cancel an in-flight request.
     pub const CANCEL: &str = "$/cancel";
+    /// shim → core (extension): open or close a ladder lease (`rsz slurm
+    /// sbatch --watch` run as a user; SPEC §7.2).
+    pub const LEASE: &str = "lease";
+    /// shim → core (extension): sign a ladder resubmission of an earlier
+    /// enforced decision (Slurm; the daemon checks it is a ladder step).
+    pub const SIGN: &str = "sign";
 }
 
 /// A request id.
@@ -179,6 +185,10 @@ pub struct InitializeParams {
     /// Feature schema (`"features-v1"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<String>,
+    /// Extension: other versions the caller also speaks (N/N-1), besides
+    /// `protocol` (its preferred one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<String>,
 }
 
 impl Default for InitializeParams {
@@ -187,6 +197,7 @@ impl Default for InitializeParams {
             protocol: PROTOCOL.into(),
             schemas: [("context", "1"), ("decision", "1"), ("run", "1")].into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
             features: Some("features-v1".into()),
+            protocols: Vec::new(),
         }
     }
 }
@@ -349,12 +360,23 @@ pub struct DecideParams {
     /// Requested mode (capped by policy, breakers and `mode_ceiling`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<Mode>,
-    /// Hosting environment.
+    /// Hosting environment. Over the daemon socket, `principal` and
+    /// `namespace` are ignored: the daemon derives them from `SO_PEERCRED`.
     #[serde(default)]
     pub env: AdapterEnv,
     /// Deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u32>,
+    /// Extension: the attempt being sized (escalate-on-retry, SPEC §7.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<rightsizer_core::AttemptContext>,
+    /// Extension: a `Caller` ladder drives this submission (`rsz slurm
+    /// sbatch --watch`), so reductions may rest on S3(a).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub watch: bool,
+    /// Extension: decide but do not record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
 }
 
 /// `decide` result.
@@ -411,6 +433,85 @@ pub struct StatusResult {
     /// Loaded plugins by kind.
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// Extension: adapters served (built-in and plugins).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
+    /// Extension: requests served since start.
+    #[serde(default)]
+    pub requests: u64,
+    /// Extension: `decide` latency over the last requests, ms (p50, p99, max, count).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decide_latency_ms: Option<LatencySummary>,
+    /// Extension: the caller as the daemon sees it (uid, tenants).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<serde_json::Value>,
+}
+
+/// Latency percentiles.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LatencySummary {
+    /// Samples.
+    pub count: u64,
+    /// Median, ms.
+    pub p50: f64,
+    /// 99th percentile, ms.
+    pub p99: f64,
+    /// Max, ms.
+    pub max: f64,
+}
+
+/// `lease` params (extension).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LeaseParams {
+    /// `open` (write the attempt record with an open lease if absent) or `close`.
+    pub action: LeaseAction,
+    /// The attempt record (open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<rightsizer_core::AttemptRecord>,
+    /// Key (close).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub key: Option<WorkloadKey>,
+    /// Invocation (close).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    /// Final status (close).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<rightsizer_core::RunStatus>,
+}
+
+/// Lease actions.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseAction {
+    /// Open.
+    Open,
+    /// Close.
+    Close,
+}
+
+/// `sign` params (extension).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SignParams {
+    /// Adapter kind (`slurm`).
+    pub kind: String,
+    /// The resubmission, already escalated.
+    pub native: Native,
+    /// The decisions it escalates.
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
+    pub decision_ids: Vec<ulid::Ulid>,
+}
+
+/// `sign` result (extension).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SignResult {
+    /// The token (per component, joined with `.`).
+    pub token: Option<String>,
 }
 
 /// `$/cancel` params.

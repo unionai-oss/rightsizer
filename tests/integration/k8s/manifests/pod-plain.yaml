@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  generateName: plain-
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: busybox:latest
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep 1"]
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}

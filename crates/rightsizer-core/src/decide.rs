@@ -923,8 +923,9 @@ impl<'a, 'b> Decider<'a, 'b> {
             ));
         }
         if mem_clamped {
-            advisories.push(Advisory::Clamped { axis: Axis::Memory, reason: b.mem_ceiling_source.as_str().into() });
-            explanation.push(format!("memory clamped to the ceiling {} ({})", fmt_b(Some(b.mem_ceiling)), b.mem_ceiling_source.as_str()));
+            let reason = clamp_reason(b.mem_ceiling_source, self.input.constraints);
+            explanation.push(format!("memory clamped to the ceiling {} ({reason})", fmt_b(Some(b.mem_ceiling))));
+            advisories.push(Advisory::Clamped { axis: Axis::Memory, reason });
         }
         self.clamp_advisories(&model, &space, app, &costs[app_best], &b, &mut advisories);
         self.gpu_advisories(&model, pr, &mut advisories);
@@ -1044,7 +1045,7 @@ impl<'a, 'b> Decider<'a, 'b> {
         {
             let up = Candidate { cpu: Some(next), ..app.clone() };
             if model.evaluate(&up, space).expected < cost.expected {
-                out.push(Advisory::Clamped { axis: Axis::Cpu, reason: b.cpu_ceiling_source.as_str().into() });
+                out.push(Advisory::Clamped { axis: Axis::Cpu, reason: clamp_reason(b.cpu_ceiling_source, self.input.constraints) });
             }
         }
     }
@@ -1134,6 +1135,15 @@ impl<'a, 'b> Decider<'a, 'b> {
                 out.push(Advisory::PriorOversized { axis: Axis::Cpu, ratio: pc.as_cores() / p95 });
             }
         }
+    }
+}
+
+/// The clamp reason for a ceiling source: `Constraints::ceiling_reason`
+/// overrides `"user"` (e.g. `"no_platform_state"`).
+fn clamp_reason(src: crate::constraints::CeilingSource, c: &Constraints) -> String {
+    match (src, &c.ceiling_reason) {
+        (crate::constraints::CeilingSource::User, Some(r)) if !r.is_empty() => r.clone(),
+        _ => src.as_str().into(),
     }
 }
 

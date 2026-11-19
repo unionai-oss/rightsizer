@@ -179,6 +179,10 @@ impl HistoryStore for Flaky {
         self.check()?;
         self.inner.compact(o).await
     }
+    async fn keys(&self) -> Result<Vec<WorkloadKey>, StoreError> {
+        self.check()?;
+        self.inner.keys().await
+    }
 }
 
 pub fn prior_gib(mem: u64, cpu: u32) -> Prior {
@@ -233,6 +237,7 @@ pub fn success(inv: &str, at: DateTime<Utc>, peak_gib: f64, req_gib: u64) -> Run
         gpu_util_mean: None,
         t_peak_frac: Some(0.5),
         duration_s: Some(3600.0),
+        staged_bytes: None,
         source: OutcomeSource::Watcher,
         trust: Trust::Verified,
     }

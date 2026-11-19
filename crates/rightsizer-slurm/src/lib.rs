@@ -15,6 +15,8 @@
 //! - [`sacct`]: the `sacct` importer ([`sacct::SacctSource`], an `OutcomeSource`).
 //! - [`wrapper`]: `rsz slurm sbatch [--watch]`; [`client`]: `rsz slurm
 //!   decide-client`, the helper cli_filter.lua runs.
+//! - [`service`]: the daemon side (`rsz serve`): identity → account →
+//!   tenant authorization, decide, signing, inventory refresh.
 //!
 //! Lua plugins live in `contrib/slurm/` (cli_filter.lua, job_submit.lua).
 
@@ -24,6 +26,7 @@
 pub mod adapter;
 pub mod attest;
 pub mod client;
+pub mod install;
 pub mod inventory;
 pub mod keys;
 pub mod options;
@@ -31,6 +34,7 @@ pub mod platform;
 pub mod runner;
 pub mod sacct;
 pub mod sbatch;
+pub mod service;
 pub mod settings;
 pub mod token;
 pub mod wrapper;

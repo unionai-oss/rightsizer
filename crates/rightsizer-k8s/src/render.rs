@@ -20,6 +20,10 @@ use crate::prior::{self, PRIOR_ANNOTATION, SigningKeys};
 use crate::resources::{self, bytes_value, cpu_value};
 use crate::settings::K8sSettings;
 
+/// Label put on sized/annotated pods (and pod templates) at admission so the
+/// watcher's informer can select them server-side (kubernetes.md §6.1).
+pub const SIZED_LABEL: &str = "rightsizer.io/sized";
+
 /// One unit's decision to render.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UnitRender {
@@ -255,10 +259,14 @@ fn unit_ops(v: &Value, w: &Workload, loc: &UnitLoc, d: &UnitRender, cx: &RenderC
     Ok((ops, applied))
 }
 
-fn recommendation(mode: Mode, id: &str, applied: &BTreeMap<String, ResourceSpec>) -> String {
+fn recommendation(mode: Mode, id: &str, applied: &BTreeMap<String, ResourceSpec>, unit_ids: &BTreeMap<String, String>) -> String {
     let mut units = serde_json::Map::new();
     for (u, s) in applied {
         let mut r = serde_json::Map::new();
+        if let Some(d) = unit_ids.get(u).filter(|d| d.as_str() != id) {
+            // The unit's own decision (the watcher joins outcomes per unit).
+            r.insert("decision".into(), Value::String(d.clone()));
+        }
         if let Some(c) = s.requests.cpu {
             r.insert("cpu".into(), cpu_value(c));
         }
@@ -317,6 +325,7 @@ pub fn render(sub: &Submission, req: &RenderRequest, cx: &RenderCtx<'_>) -> Resu
         let annotations = objects::string_map(v, "/metadata/annotations");
         let mut plan = ObjectPlan { ops: Vec::new(), resource_ops: 0 };
         let mut applied: BTreeMap<String, ResourceSpec> = BTreeMap::new();
+        let mut unit_ids: BTreeMap<String, String> = BTreeMap::new();
         let mut new_prior = existing.clone().unwrap_or_default();
         let mut ray_orig: BTreeMap<String, Option<String>> = BTreeMap::new();
         for d in &decisions {
@@ -326,6 +335,9 @@ pub fn render(sub: &Submission, req: &RenderRequest, cx: &RenderCtx<'_>) -> Resu
             let (ops, spec) = unit_ops(v, &w, loc, d, cx, &mut out.held, &mut ray_orig)?;
             out.applied.insert(d.unit.clone(), if req.mode == Mode::Enforce { spec.clone() } else { declared.clone() });
             applied.insert(loc.local_id.clone(), spec);
+            if let Some(id) = &d.decision_id {
+                unit_ids.insert(loc.local_id.clone(), id.clone());
+            }
             if req.mode == Mode::Enforce {
                 plan.resource_ops += ops.len();
                 plan.ops.extend(ops);
@@ -351,7 +363,7 @@ pub fn render(sub: &Submission, req: &RenderRequest, cx: &RenderCtx<'_>) -> Resu
                 let keys = cx.keys.ok_or_else(|| PluginError::Internal("enforce needs a signing key ([k8s] signing_key_file)".into()))?;
                 plan.ops.push(Op::set(ann_path(&meta, PRIOR_ANNOTATION), prior::sign(&new_prior, keys)));
                 plan.ops.push(Op::set(ann_path(&meta, DECISION_ID), decision_id.clone()));
-                plan.ops.push(Op::set(ann_path(&meta, RECOMMENDATION), recommendation(req.mode, &decision_id, &applied)));
+                plan.ops.push(Op::set(ann_path(&meta, RECOMMENDATION), recommendation(req.mode, &decision_id, &applied, &unit_ids)));
             }
         } else {
             // observe / recommend: annotation-only, once.
@@ -359,7 +371,7 @@ pub fn render(sub: &Submission, req: &RenderRequest, cx: &RenderCtx<'_>) -> Resu
                 continue;
             }
             plan.ops.push(Op::set(ann_path(&meta, DECISION_ID), decision_id.clone()));
-            plan.ops.push(Op::set(ann_path(&meta, RECOMMENDATION), recommendation(req.mode, &decision_id, &applied)));
+            plan.ops.push(Op::set(ann_path(&meta, RECOMMENDATION), recommendation(req.mode, &decision_id, &applied, &unit_ids)));
         }
         // Children carry the marker so pods and CronJob-created Jobs are not
         // sized again, and the watcher joins outcomes (admission only: files
@@ -367,10 +379,15 @@ pub fn render(sub: &Submission, req: &RenderRequest, cx: &RenderCtx<'_>) -> Resu
         if output == Output::JsonPatch && req.annotate && w.kind.is_template() {
             for site in &w.sites {
                 plan.ops.push(Op::set(ann_path(&site.meta_path, DECISION_ID), decision_id.clone()));
+                // Server-side selectable marker for the watcher's informer.
+                plan.ops.push(Op::set(join(&site.meta_path, &[Seg::from("labels"), Seg::from(SIZED_LABEL)]), "true".to_string()));
             }
             if w.kind == Kind::CronJob {
                 plan.ops.push(Op::set(ann_path(&path!["spec", "jobTemplate", "metadata"], DECISION_ID), decision_id.clone()));
             }
+        }
+        if output == Output::JsonPatch && req.annotate && !w.kind.is_template() {
+            plan.ops.push(Op::set(join(&meta, &[Seg::from("labels"), Seg::from(SIZED_LABEL)]), "true".to_string()));
         }
         if plan.ops.is_empty() {
             continue;

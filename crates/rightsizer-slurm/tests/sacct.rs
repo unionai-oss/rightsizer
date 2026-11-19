@@ -205,3 +205,20 @@ async fn outcome_source_json_and_text_fallback() {
         assert_eq!(only.len(), 1);
     }
 }
+
+#[test]
+fn ladder_attempts_are_linked_only_with_evidence() {
+    let mut jobs = parse_sacct_json(&fixture("sacct/jobs.json")).unwrap();
+    let id = Ulid::from_string("01JDZ7Q4W8M7C9B5V3N2X1Y0ZA").unwrap();
+    // Make job 28 (OOM) and 27 (completed) two verified attempts of one decision.
+    for j in jobs.iter_mut().filter(|j| j.job_id == 27 || j.job_id == 28) {
+        j.admin_comment = format!("rightsizer:{id}:verified");
+    }
+    let mut recs = to_run_records(&jobs, &cfg());
+    assert_eq!(link_ladders(&jobs, &mut recs, &cfg(), |_| false), 0);
+    assert!(recs.iter().any(|r| r.invocation_id == "rsz-it:27"));
+    let n = link_ladders(&jobs, &mut recs, &cfg(), |d| *d == id);
+    assert_eq!(n, 2);
+    let linked: Vec<_> = recs.iter().filter(|r| r.invocation_id == ladder_invocation(&id)).map(|r| (r.attempt, r.status)).collect();
+    assert_eq!(linked, vec![(1, RunStatus::Succeeded), (2, RunStatus::OomKilled)]);
+}

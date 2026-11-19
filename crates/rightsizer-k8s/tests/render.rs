@@ -204,7 +204,7 @@ fn recommend_and_observe_are_annotation_only() {
                 JsonPatchOp::Add { path, .. } | JsonPatchOp::Replace { path, .. } => path,
                 other => panic!("{other:?}"),
             };
-            assert!(p.contains("/annotations"), "{p}");
+            assert!(p.contains("/annotations") || p.contains("/labels"), "{p}");
         }
         let v = object_of(&applied(&n, &r.patch));
         assert_eq!(v["spec"]["template"]["spec"]["containers"][0]["resources"], value("job.yaml")["spec"]["template"]["spec"]["containers"][0]["resources"]);

@@ -390,18 +390,20 @@ impl HistoryStore for SqliteStore {
     }
 
     async fn breaker_get(&self, scope: &BreakerScope) -> Result<BreakerObjects, StoreError> {
+        // Current and N-1 (no platform segment) paths.
         let sp = scope_path(scope);
+        let legacy = scope.legacy_path().unwrap_or_else(|| sp.clone());
         let scope = scope.clone();
         self.with(move |c| {
             let mut objs = BreakerObjects::default();
-            let mut st = c.prepare_cached("SELECT body FROM breaker_trips WHERE scope_path = ?1 ORDER BY id").map_err(db_err)?;
-            for b in st.query_map(params![sp], |r| r.get::<_, String>(0)).map_err(db_err)? {
+            let mut st = c.prepare_cached("SELECT body FROM breaker_trips WHERE scope_path IN (?1, ?2) ORDER BY id").map_err(db_err)?;
+            for b in st.query_map(params![sp, legacy], |r| r.get::<_, String>(0)).map_err(db_err)? {
                 if let Some(t) = decode::<Trip>(&b.map_err(db_err)?, "breaker_trips").filter(|t| t.scope == scope) {
                     objs.trips.push(t);
                 }
             }
-            let mut st = c.prepare_cached("SELECT body FROM breaker_resets WHERE scope_path = ?1 ORDER BY at_ms").map_err(db_err)?;
-            for b in st.query_map(params![sp], |r| r.get::<_, String>(0)).map_err(db_err)? {
+            let mut st = c.prepare_cached("SELECT body FROM breaker_resets WHERE scope_path IN (?1, ?2) ORDER BY at_ms").map_err(db_err)?;
+            for b in st.query_map(params![sp, legacy], |r| r.get::<_, String>(0)).map_err(db_err)? {
                 if let Some(r) = decode::<Reset>(&b.map_err(db_err)?, "breaker_resets").filter(|r| r.scope == scope) {
                     objs.resets.push(r);
                 }

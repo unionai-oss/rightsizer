@@ -11,6 +11,8 @@
 -- Configuration: RIGHTSIZER_RSZ (path of `rsz`, default /usr/bin/rsz) and
 -- RIGHTSIZER_SOCKET (daemon socket, default /run/rightsizer.sock), as
 -- globals set by the site at the top of this file or environment variables.
+-- RIGHTSIZER_DISABLED = true (written by `rsz slurm install --disable`)
+-- short-circuits the script: every submission passes through untouched.
 
 local RSZ = rawget(_G, "RIGHTSIZER_RSZ") or os.getenv("RIGHTSIZER_RSZ") or "/usr/bin/rsz"
 local SOCK = rawget(_G, "RIGHTSIZER_SOCKET") or os.getenv("RIGHTSIZER_SOCKET") or "/run/rightsizer.sock"
@@ -32,6 +34,7 @@ function slurm_cli_setup_defaults(options, early_pass)
 end
 
 function slurm_cli_pre_submit(options, offset)
+  if rawget(_G, "RIGHTSIZER_DISABLED") then return slurm.SUCCESS end
   if not ok_mod then return slurm.SUCCESS end
   local ok = pcall(cli.pre_submit, options, offset, {
     slurm = slurm,

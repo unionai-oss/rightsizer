@@ -494,9 +494,13 @@ impl HistoryStore for PostgresStore {
     }
 
     async fn breaker_get(&self, scope: &BreakerScope) -> Result<BreakerObjects, StoreError> {
+        // Current and N-1 (no platform segment) paths.
         let sp = scope_path(scope);
-        let trips = self.bodies(&format!("SELECT body FROM {} WHERE scope_path = $1 ORDER BY id", self.t("breaker_trips")), &[&sp]).await?;
-        let resets = self.bodies(&format!("SELECT body FROM {} WHERE scope_path = $1 ORDER BY at_ms", self.t("breaker_resets")), &[&sp]).await?;
+        let legacy = scope.legacy_path().unwrap_or_else(|| sp.clone());
+        let trips =
+            self.bodies(&format!("SELECT body FROM {} WHERE scope_path IN ($1, $2) ORDER BY id", self.t("breaker_trips")), &[&sp, &legacy]).await?;
+        let resets =
+            self.bodies(&format!("SELECT body FROM {} WHERE scope_path IN ($1, $2) ORDER BY at_ms", self.t("breaker_resets")), &[&sp, &legacy]).await?;
         Ok(BreakerObjects {
             trips: trips.into_iter().filter_map(|v| decode::<Trip>(v, "breaker_trips")).filter(|t| &t.scope == scope).collect(),
             resets: resets.into_iter().filter_map(|v| decode::<Reset>(v, "breaker_resets")).filter(|r| &r.scope == scope).collect(),

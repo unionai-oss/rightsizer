@@ -51,14 +51,24 @@ impl WorkloadContext {
         total_input_bytes(&self.inputs)
     }
 
-    /// Apply the deterministic truncation rules of SPEC §5.2: inputs sorted
-    /// largest first (unknown sizes last), then by name, truncated to 64;
-    /// history truncated to `history_limit`.
+    /// Apply the deterministic truncation rules of SPEC §5.2: inputs in
+    /// [`canonical_input_order`] (largest first, unknown sizes as 0, then by
+    /// name, then a total tie-break), truncated to 64; history truncated to
+    /// `history_limit`.
     pub fn canonicalize(&mut self, history_limit: usize) {
-        self.inputs.sort_by(|a, b| b.bytes.unwrap_or(0).cmp(&a.bytes.unwrap_or(0)).then_with(|| a.name.cmp(&b.name)));
+        canonical_input_order(&mut self.inputs);
         self.inputs.truncate(Self::MAX_INPUTS);
         self.history.truncate(history_limit);
     }
+}
+
+/// Sort inputs into the canonical order of SPEC §5.2 with a **total**
+/// order, so the result never depends on the input order: largest first
+/// (unknown sizes count as 0), then by name, then known before unknown
+/// sizes, then by the canonical JSON of the whole entry. Shared by
+/// [`WorkloadContext::canonicalize`] and `rightsizer_features::canonical_inputs`.
+pub fn canonical_input_order(inputs: &mut [InputMeta]) {
+    inputs.sort_by_cached_key(|m| (std::cmp::Reverse(m.bytes.unwrap_or(0)), m.name.clone(), m.bytes.is_none(), crate::digest::canonical_json(m)));
 }
 
 /// Sum of known input sizes; `None` when no input has a size.
@@ -457,5 +467,41 @@ mod tests {
         assert_eq!(ctx.inputs[0].name, "i06");
         let tokens = serde_json::to_value(ScalarValue::Int(3)).unwrap();
         assert_eq!(tokens, serde_json::json!({"kind": "int", "value": 3}));
+    }
+
+    #[test]
+    fn canonicalize_is_a_total_order() {
+        // Ties on (size, name) used to keep input order (a stable sort on a
+        // partial key): same name with `Some(0)` vs `None`, and the same name
+        // and size with different metadata.
+        let mut a = InputMeta::blob("x", 0);
+        a.bytes = None;
+        let b = InputMeta::blob("x", 0);
+        let mut c = InputMeta::blob("y", 5);
+        c.rows = Some(1);
+        let mut d = InputMeta::blob("y", 5);
+        d.rows = Some(2);
+        let orders = [vec![a.clone(), b.clone(), c.clone(), d.clone()], vec![d.clone(), c.clone(), b.clone(), a.clone()], vec![b.clone(), d.clone(), a.clone(), c.clone()]];
+        let mut seen = Vec::new();
+        for inputs in orders {
+            let mut ctx = WorkloadContext {
+                v: 1,
+                key: WorkloadKey::parse("k8s://c/ns/job/x").unwrap(),
+                unit: UnitId("main".into()),
+                platform: PlatformRef::new("k8s"),
+                code: None,
+                inputs,
+                manifest: ManifestFeatures::default(),
+                prior: Prior::default(),
+                history: vec![],
+                labels: BTreeMap::new(),
+            };
+            ctx.canonicalize(32);
+            seen.push(ctx.inputs);
+        }
+        assert!(seen.windows(2).all(|w| w[0] == w[1]), "order must not depend on input order");
+        assert_eq!(seen[0][0].name, "y");
+        assert_eq!(seen[0][2].bytes, Some(0), "known before unknown");
+        assert_eq!(seen[0][3].bytes, None);
     }
 }
