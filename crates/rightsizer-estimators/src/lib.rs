@@ -3,27 +3,58 @@
 //! `gbt` (trees/1), the Estimator Protocol v1 client (feature `remote`, SPEC
 //! §6.3) and chains (SPEC §6.5).
 //!
-//! Status: the trait, [`EstimatorInfo`], [`EstimateError`], the [`prior`]
-//! estimator and the [`chain`] are complete; `rules_sized`, `history_peak`,
-//! `gbt` and `remote` are stubs that decline (`Insufficient`) until
-//! implemented.
+//! | module | what |
+//! |---|---|
+//! | [`rules_sized`] | `rules-sized`: per-format cold-start law, nearest-size anchoring × `scale` |
+//! | [`history_peak`] | `history-peak`: censored max × margin, VPA OOM bump |
+//! | [`prior`] | `prior`: degenerate at the prior |
+//! | [`gbt`] | `gbt`: quantile trees ([`trees`], `rightsizer-trees/1`) over [`features_v1`], novelty ([`novelty`], `rightsizer-novelty/1`) |
+//! | [`chain`] | top-down chains with a skip hook and budgets |
+//! | [`build`] | chains from the `[estimator]` config section |
+//! | [`memo`] | the memo and exact-cache layers (reusable by the engine) |
+//! | [`privacy`] | the remote view of a context (SPEC §11) |
+//! | `remote` | Estimator Protocol v1 client (feature `remote`) |
+//!
+//! Every built-in estimator emits workload **demand** (container peaks minus
+//! the overhead model's median, SPEC §5.2) as `Cells` on rs-grid-v1, except
+//! `gbt`, which emits `Quantiles`, and durations, which are `Quantiles` or a
+//! `Point` (SPEC §5.5).
 
 #![forbid(unsafe_code)]
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rightsizer_core::{Estimate, EstimateKind, WorkloadContext};
 use serde::{Deserialize, Serialize};
 
+pub mod build;
 pub mod chain;
+pub(crate) mod common;
+pub mod features_v1;
 pub mod gbt;
 pub mod history_peak;
+pub mod memo;
+pub mod novelty;
 pub mod prior;
+pub mod privacy;
 #[cfg(feature = "remote")]
 pub mod remote;
 pub mod rules_sized;
+pub mod trees;
 
-pub use chain::{ChainAnswer, EstimatorChain};
+#[cfg(test)]
+pub(crate) mod test_util;
+
+pub use build::{BuildError, BuiltChain, ChainSpec, MemberSpec, build_chain};
+pub use chain::{ChainAnswer, EstimatorChain, NoSkip, SkipPolicy};
+pub use gbt::Gbt;
+pub use history_peak::{HistoryPeak, HistoryPeakParams};
+pub use memo::{Memo, MemoKey, TtlCache, exact_key, normalized_estimate};
+pub use novelty::NoveltyModel;
 pub use prior::PriorEstimator;
+pub use rules_sized::{ColdStart, RulesSized, RulesSizedParams};
+pub use trees::TreeModel;
 
 /// Which estimate fields an estimator fills.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -144,6 +175,21 @@ pub trait Estimator: Send + Sync {
 
     /// Estimate one context.
     async fn estimate(&self, ctx: &WorkloadContext) -> Result<Estimate, EstimateError>;
+
+    /// Estimate within a caller budget. The default runs
+    /// [`estimate`](Self::estimate) under a timeout (expiry →
+    /// [`EstimateError::Timeout`]); network estimators override it to carry
+    /// the deadline into their requests (the caller's budget wins over their
+    /// default).
+    async fn estimate_within(&self, ctx: &WorkloadContext, budget: Option<Duration>) -> Result<Estimate, EstimateError> {
+        match budget {
+            None => self.estimate(ctx).await,
+            Some(b) => match tokio::time::timeout(b, self.estimate(ctx)).await {
+                Ok(r) => r,
+                Err(_) => Err(EstimateError::Timeout(b.as_millis().min(u64::MAX as u128) as u64)),
+            },
+        }
+    }
 
     /// Estimate many contexts. The default calls [`estimate`](Self::estimate)
     /// for each, in order.

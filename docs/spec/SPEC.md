@@ -17,6 +17,7 @@ Prior art: [`model-factory-resource-tuner`](https://github.com/unionai-oss/model
 | [launchers.md](launchers.md) | SkyPilot and dstack |
 | [orchestrators.md](orchestrators.md) | Metaflow, Airflow; notes on Kubeflow Pipelines, Dagster, Prefect, Argo |
 | [managed-ml.md](managed-ml.md) | Vertex AI, Azure ML, Databricks, Cloud Batch/Run, Snowflake |
+| [models.md](models.md) | serving model-factory models (Hugging Face) through vLLM, SGLang or transformers behind the Estimator Protocol |
 | [REVIEW-LOG.md](REVIEW-LOG.md) | design and review rounds |
 
 Section references like "kubernetes.md §3.4" point into the sibling
@@ -648,7 +649,9 @@ GET  /v1/health           -> 200 | 503
     (kubernetes.md §3.2).
 - **Reference server.** `rightsizer.serve` wraps any Python callable
   `ctx -> Estimate` (or a batch callable) as a protocol server. A Flyte app
-  template serves the tuner's models (M4).
+  template serves the tuner's models. Serving the published model-factory models
+  through vLLM, SGLang or `transformers` is in [models.md](models.md) (pulled
+  forward from M4 to M3).
 
 ### 6.4 LLM estimators
 
@@ -1401,7 +1404,7 @@ tuner's scorer replays rightsizer's decisions.
 | **A** adoption (after M0, in parallel with M1) | the importer and catalog half of `rightsizer-cloud` (AWS and Modal catalogs, prices, importers); `rsz audit` for Kubernetes (Prometheus), Slurm (`sacct`), AWS (SageMaker, Batch, CloudWatch) and Modal; HTML report; `rsz suggest` for Kubernetes YAML and Flyte/Ray literals (other key rules arrive with their milestones); `rsz mcp` | a 30-day audit of a real AWS account finishes in < 10 min with read-only credentials; counterfactual decisions equal `shadow`'s on the same history |
 | **M1** Flyte | `rightsizer-runtime`, `rightsizer` wheels; Flyte task, action, run and environment levels; child-side measurement; `flyte.remote` backfill; escalation; deploy-time sizing and `reconcile`; the request-only-memory integration test (§16, open question 5) | demo workflows in `enforce` with 0 rightsizer-caused failures over 1,000 invocations; 10k-way `flyte.map` overhead < 2 ms per call once memoized |
 | **M2** K8s | CLI, webhook (Pods, Jobs, JobSets, PyTorchJob), watcher, Prometheus importer, postgres store, Helm chart, alerts, `k8s restore` | 2 weeks shadow on a real cluster with join ratio ≥ 0.95; webhook p99 < 100 ms |
-| **M3** plugins | plugin protocol and daemon; Slurm (wrapper, `cli_filter`, `job_submit` token verification); Ray (functions, actors, Ray Data, Jobs); KubeRay, TrainJob, Volcano; node agent; Arrow/HF readers | Slurm test cluster with HMAC verification and rotation; Ray 10k-task fan-out < 5 ms per task |
+| **M3** plugins | plugin protocol and daemon; Slurm (wrapper, `cli_filter`, `job_submit` token verification); Ray (functions, actors, Ray Data, Jobs); KubeRay, TrainJob, Volcano; node agent; Arrow/HF readers; model-factory models served through vLLM/SGLang/transformers (models.md) | Slurm test cluster with HMAC verification and rotation; Ray 10k-task fan-out < 5 ms per task |
 | **M4** models | Estimator Protocol reference server; tuner models served; pool and gate with novelty/1; GPU type changes (opt-in); Slurm decision table | the gate beats `rules-sized` on the tuner's unseen split under rightsizer's decoder |
 | **M5** managed clouds I | AWS botocore hook, SageMaker (training, processing, transform, Pipelines deploy-time) and Batch (EC2, Fargate, EKS) adapters, caller ladders; `rightsizer_aws.pth` start-up hook, `rsz aws reconcile`; Modal proxy and `measure` | SDK v2, SDK v3 and boto3 fixtures sized identically; 0 rightsizer-caused failures over 500 enforced SageMaker and Batch jobs; a 10k-input Modal `.map` stays within the variant budget |
 | **M6** launchers and orchestrators | `AttemptContext` and escalate-on-retry; SkyPilot policy; dstack plugin and importer; `metaflow-rightsizer` and `rsz metaflow reconcile`; Airflow hooks and listener | fault injection (raise, hang, missing `_core`) leaves every SkyPilot, dstack and Airflow submission unchanged; an orchestrator retry after a reduced attempt escalates |

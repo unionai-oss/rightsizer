@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nightly-retrain-29389560
+  namespace: ml
+  ownerReferences:
+    - apiVersion: batch/v1
+      kind: CronJob
+      name: nightly-retrain
+      uid: 3f1c1a7e-9b0e-4a77-8f6e-1f0e2c3d4b5a
+      controller: true
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: retrain
+        image: ghcr.io/acme/retrain:5.1
+        resources:
+          requests:
+            cpu: 8
+            memory: 64Gi

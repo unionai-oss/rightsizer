@@ -1,0 +1,188 @@
+{
+ "generated_by": "rules_parity_gen.py",
+ "cases": [
+  {
+   "name": "k8s cold 1 GiB",
+   "kind": "sized",
+   "platform": "k8s",
+   "overhead_mib": 0.0,
+   "input_bytes": 1073741824,
+   "history": [],
+   "margin": 1.0,
+   "base_mib": 256.0,
+   "slope": 2.0,
+   "cpu_margin": 1.25,
+   "tuner_workload_mib": 2304.0,
+   "tuner_need_mib": 2419.2000000000003,
+   "tuner_mem_cell": 7,
+   "tuner_cpu_cell": 3,
+   "deviation": null
+  },
+  {
+   "name": "flyte cold 3 GiB, base 128 k 4",
+   "kind": "sized",
+   "platform": "flyte",
+   "overhead_mib": 70.0,
+   "input_bytes": 3221225472,
+   "history": [],
+   "margin": 1.0,
+   "base_mib": 128.0,
+   "slope": 4.0,
+   "cpu_margin": 1.25,
+   "tuner_workload_mib": 12416.0,
+   "tuner_need_mib": 13110.300000000001,
+   "tuner_mem_cell": 12,
+   "tuner_cpu_cell": 3,
+   "deviation": null
+  },
+  {
+   "name": "k8s warm exact size",
+   "kind": "sized",
+   "platform": "k8s",
+   "overhead_mib": 0.0,
+   "input_bytes": 2147483648,
+   "history": [
+    {
+     "container_peak_mib": 3000.0,
+     "input_bytes": 2147483648,
+     "mean_cores": 1.5
+    }
+   ],
+   "margin": 1.0,
+   "base_mib": 256.0,
+   "slope": 2.0,
+   "cpu_margin": 1.25,
+   "tuner_workload_mib": 3000.0,
+   "tuner_need_mib": 3150.0,
+   "tuner_mem_cell": 8,
+   "tuner_cpu_cell": 7,
+   "deviation": null
+  },
+  {
+   "name": "k8s warm 2x larger, margin 1.25",
+   "kind": "sized",
+   "platform": "k8s",
+   "overhead_mib": 0.0,
+   "input_bytes": 4294967296,
+   "history": [
+    {
+     "container_peak_mib": 1500.0,
+     "input_bytes": 2147483648,
+     "mean_cores": 0.8
+    }
+   ],
+   "margin": 1.25,
+   "base_mib": 256.0,
+   "slope": 2.0,
+   "cpu_margin": 1.25,
+   "tuner_workload_mib": 3000.0,
+   "tuner_need_mib": 3937.5,
+   "tuner_mem_cell": 8,
+   "tuner_cpu_cell": 3,
+   "deviation": null
+  },
+  {
+   "name": "flyte warm nearest of three",
+   "kind": "sized",
+   "platform": "flyte",
+   "overhead_mib": 70.0,
+   "input_bytes": 6442450944,
+   "history": [
+    {
+     "container_peak_mib": 970.0,
+     "input_bytes": 1073741824,
+     "mean_cores": 0.5
+    },
+    {
+     "container_peak_mib": 4070.0,
+     "input_bytes": 5368709120,
+     "mean_cores": 2.0
+    },
+    {
+     "container_peak_mib": 12070.0,
+     "input_bytes": 21474836480,
+     "mean_cores": 3.0
+    }
+   ],
+   "margin": 1.0,
+   "base_mib": 256.0,
+   "slope": 2.0,
+   "cpu_margin": 1.25,
+   "tuner_workload_mib": 4800.0,
+   "tuner_need_mib": 5113.5,
+   "tuner_mem_cell": 9,
+   "tuner_cpu_cell": 11,
+   "deviation": null
+  },
+  {
+   "name": "flyte warm 1.5x",
+   "kind": "sized",
+   "platform": "flyte",
+   "overhead_mib": 70.0,
+   "input_bytes": 3221225472,
+   "history": [
+    {
+     "container_peak_mib": 2070.0,
+     "input_bytes": 2147483648,
+     "mean_cores": 1.0
+    }
+   ],
+   "margin": 1.0,
+   "base_mib": 256.0,
+   "slope": 2.0,
+   "cpu_margin": 1.25,
+   "tuner_workload_mib": 3000.0,
+   "tuner_need_mib": 3223.5,
+   "tuner_mem_cell": 8,
+   "tuner_cpu_cell": 4,
+   "deviation": null
+  },
+  {
+   "name": "k8s warm smaller invocation (tuner scales down)",
+   "kind": "sized",
+   "platform": "k8s",
+   "overhead_mib": 0.0,
+   "input_bytes": 1073741824,
+   "history": [
+    {
+     "container_peak_mib": 4000.0,
+     "input_bytes": 4294967296,
+     "mean_cores": 1.0
+    }
+   ],
+   "margin": 1.0,
+   "base_mib": 256.0,
+   "slope": 2.0,
+   "cpu_margin": 1.25,
+   "tuner_workload_mib": 1000.0,
+   "tuner_need_mib": 1050.0,
+   "tuner_mem_cell": 5,
+   "tuner_cpu_cell": 4,
+   "deviation": "SPEC \u00a77.4: scale = max(1, b_now / b_hist); the tuner scales the peak down"
+  },
+  {
+   "name": "bench power law parquet",
+   "kind": "power",
+   "format": "parquet",
+   "input_bytes": 3221225472,
+   "a": 3.0,
+   "b": 0.4,
+   "tuner_workload_mib": 50850.87576605854,
+   "tuner_need_mib": 50850.87576605854,
+   "tuner_mem_cell": 16,
+   "deviation": null
+  },
+  {
+   "name": "bench default law (4 GiB flat)",
+   "kind": "power",
+   "format": "csv",
+   "input_bytes": 10737418240,
+   "a": 12.0,
+   "b": 0.0,
+   "tuner_workload_mib": 4096.0,
+   "tuner_need_mib": 4096.0,
+   "tuner_mem_cell": 8,
+   "deviation": null
+  }
+ ]
+}

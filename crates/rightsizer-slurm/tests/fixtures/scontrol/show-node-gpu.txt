@@ -1,0 +1,21 @@
+NodeName=g1 Arch=x86_64 CoresPerSocket=32 
+   CPUAlloc=0 CPUEfctv=64 CPUTot=64 CPULoad=0.10
+   AvailableFeatures=a100,ib
+   ActiveFeatures=a100,ib
+   Gres=gpu:a100:4(S:0-1)
+   NodeAddr=g1 NodeHostName=g1 Version=26.05.5
+   OS=Linux 5.14.0-427.el9.x86_64 #1 SMP PREEMPT_DYNAMIC Fri Apr 26 2026 
+   RealMemory=512000 AllocMem=0 FreeMem=500000 Sockets=2 Boards=1
+   MemSpecLimit=4096
+   State=IDLE ThreadsPerCore=1 TmpDisk=900000 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=gpu 
+   CfgTRES=cpu=64,mem=500G,billing=64,gres/gpu=4
+
+NodeName=g2 Arch=x86_64 CoresPerSocket=48 
+   CPUAlloc=0 CPUEfctv=96 CPUTot=96 CPULoad=0.10
+   AvailableFeatures=h100,ib
+   ActiveFeatures=h100,ib
+   Gres=gpu:h100:8(S:0-1)
+   RealMemory=2048000 AllocMem=0 FreeMem=2000000 Sockets=2 Boards=1
+   State=MIXED ThreadsPerCore=1 TmpDisk=900000 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=gpu 

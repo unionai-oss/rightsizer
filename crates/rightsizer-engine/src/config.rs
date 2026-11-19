@@ -178,11 +178,26 @@ pub struct DecisionConfig {
     pub point_sigma: f64,
     /// Same-key history records in a context (32).
     pub history_limit: usize,
+    /// Distinct decisions computed at once (64); more wait within their budget.
+    pub max_concurrent_decisions: usize,
+    /// Memo entry lifetime (10 min); outcomes for a key invalidate it sooner.
+    #[serde(with = "humantime_serde")]
+    pub memo_ttl: Duration,
+    /// Memo entries kept (10,000).
+    pub memo_capacity: usize,
 }
 
 impl Default for DecisionConfig {
     fn default() -> Self {
-        DecisionConfig { grid: "rs-grid-v1".into(), need_headroom: 1.05, point_sigma: 0.35, history_limit: 32 }
+        DecisionConfig {
+            grid: "rs-grid-v1".into(),
+            need_headroom: 1.05,
+            point_sigma: 0.35,
+            history_limit: 32,
+            max_concurrent_decisions: 64,
+            memo_ttl: Duration::from_secs(600),
+            memo_capacity: 10_000,
+        }
     }
 }
 
@@ -290,6 +305,18 @@ pub struct MemberConfig {
     pub token_file: Option<PathBuf>,
     /// Per-call timeout, ms.
     pub timeout_ms: Option<u64>,
+    /// mTLS client certificate (PEM).
+    pub client_cert: Option<PathBuf>,
+    /// mTLS client key (PEM).
+    pub client_key: Option<PathBuf>,
+    /// Extra CA certificate (PEM).
+    pub ca_cert: Option<PathBuf>,
+    /// Cap on the server's `max_batch`.
+    pub max_batch: Option<u32>,
+    /// Coalescing window, ms (20).
+    pub coalesce_ms: Option<u64>,
+    /// Built-in parameter overrides (`RulesSizedParams`, `HistoryPeakParams`).
+    pub params: Option<serde_json::Value>,
     /// `rightsizer-trees/1` model file (gbt).
     pub path: Option<PathBuf>,
     /// `rightsizer-novelty/1` companion (gbt).

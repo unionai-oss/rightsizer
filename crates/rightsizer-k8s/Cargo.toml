@@ -16,10 +16,8 @@ cluster = ["dep:kube", "dep:k8s-openapi", "dep:tokio", "dep:reqwest"]
 [dependencies]
 rightsizer-core.workspace = true
 rightsizer-plugin.workspace = true
-rightsizer-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_norway.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 futures.workspace = true
@@ -29,6 +27,9 @@ hmac.workspace = true
 sha2.workspace = true
 json-patch.workspace = true
 tracing.workspace = true
+ulid.workspace = true
+# YAML with byte spans for minimal in-place edits (`rsz apply`).
+saphyr-parser = "0.3.4"
 axum = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
@@ -46,3 +47,5 @@ reqwest = { workspace = true, optional = true }
 [dev-dependencies]
 pretty_assertions.workspace = true
 insta.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

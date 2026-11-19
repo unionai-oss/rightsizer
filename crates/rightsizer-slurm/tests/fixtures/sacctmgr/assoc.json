@@ -1,0 +1,714 @@
+{
+  "associations": [
+    {
+      "accounting": [
+      ],
+      "account": "root",
+      "cluster": "rsz-it",
+      "comment": "",
+      "default": {
+        "qos": ""
+      },
+      "flags": [
+      ],
+      "max": {
+        "jobs": {
+          "per": {
+            "count": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "accruing": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "submitted": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          },
+          "active": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "accruing": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "total": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          }
+        },
+        "tres": {
+          "total": [
+          ],
+          "group": {
+            "minutes": [
+            ],
+            "active": [
+            ]
+          },
+          "minutes": {
+            "total": [
+            ],
+            "per": {
+              "job": [
+              ]
+            }
+          },
+          "per": {
+            "job": [
+            ],
+            "node": [
+            ]
+          }
+        },
+        "per": {
+          "account": {
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          }
+        }
+      },
+      "id": 1,
+      "is_default": false,
+      "lineage": "\/",
+      "min": {
+        "priority_threshold": {
+          "set": false,
+          "infinite": true,
+          "number": 0
+        }
+      },
+      "parent_account": "",
+      "partition": "",
+      "priority": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "qos": [
+        "normal"
+      ],
+      "shares_raw": 1,
+      "user": ""
+    },
+    {
+      "accounting": [
+      ],
+      "account": "root",
+      "cluster": "rsz-it",
+      "comment": "",
+      "default": {
+        "qos": ""
+      },
+      "flags": [
+      ],
+      "max": {
+        "jobs": {
+          "per": {
+            "count": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "accruing": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "submitted": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          },
+          "active": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "accruing": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "total": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          }
+        },
+        "tres": {
+          "total": [
+          ],
+          "group": {
+            "minutes": [
+            ],
+            "active": [
+            ]
+          },
+          "minutes": {
+            "total": [
+            ],
+            "per": {
+              "job": [
+              ]
+            }
+          },
+          "per": {
+            "job": [
+            ],
+            "node": [
+            ]
+          }
+        },
+        "per": {
+          "account": {
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          }
+        }
+      },
+      "id": 2,
+      "is_default": true,
+      "lineage": "\/0-root\/",
+      "min": {
+        "priority_threshold": {
+          "set": false,
+          "infinite": true,
+          "number": 0
+        }
+      },
+      "parent_account": "",
+      "partition": "",
+      "priority": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "qos": [
+        "normal"
+      ],
+      "shares_raw": 1,
+      "user": "root"
+    },
+    {
+      "accounting": [
+      ],
+      "account": "mlteam",
+      "cluster": "rsz-it",
+      "comment": "",
+      "default": {
+        "qos": ""
+      },
+      "flags": [
+      ],
+      "max": {
+        "jobs": {
+          "per": {
+            "count": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "accruing": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "submitted": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          },
+          "active": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "accruing": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "total": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          }
+        },
+        "tres": {
+          "total": [
+          ],
+          "group": {
+            "minutes": [
+            ],
+            "active": [
+            ]
+          },
+          "minutes": {
+            "total": [
+            ],
+            "per": {
+              "job": [
+              ]
+            }
+          },
+          "per": {
+            "job": [
+            ],
+            "node": [
+            ]
+          }
+        },
+        "per": {
+          "account": {
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          }
+        }
+      },
+      "id": 3,
+      "is_default": false,
+      "lineage": "\/mlteam\/",
+      "min": {
+        "priority_threshold": {
+          "set": false,
+          "infinite": true,
+          "number": 0
+        }
+      },
+      "parent_account": "root",
+      "partition": "",
+      "priority": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "qos": [
+        "normal"
+      ],
+      "shares_raw": 1,
+      "user": ""
+    },
+    {
+      "accounting": [
+      ],
+      "account": "mlteam",
+      "cluster": "rsz-it",
+      "comment": "",
+      "default": {
+        "qos": ""
+      },
+      "flags": [
+      ],
+      "max": {
+        "jobs": {
+          "per": {
+            "count": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "accruing": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "submitted": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          },
+          "active": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "accruing": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "total": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          }
+        },
+        "tres": {
+          "total": [
+            {
+              "type": "cpu",
+              "name": "",
+              "id": 1,
+              "count": 4
+            },
+            {
+              "type": "mem",
+              "name": "",
+              "id": 2,
+              "count": 4096
+            }
+          ],
+          "group": {
+            "minutes": [
+            ],
+            "active": [
+            ]
+          },
+          "minutes": {
+            "total": [
+            ],
+            "per": {
+              "job": [
+              ]
+            }
+          },
+          "per": {
+            "job": [
+              {
+                "type": "cpu",
+                "name": "",
+                "id": 1,
+                "count": 2
+              },
+              {
+                "type": "mem",
+                "name": "",
+                "id": 2,
+                "count": 2000
+              },
+              {
+                "type": "gres",
+                "name": "gpu",
+                "id": 1001,
+                "count": 2
+              }
+            ],
+            "node": [
+            ]
+          }
+        },
+        "per": {
+          "account": {
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          }
+        }
+      },
+      "id": 5,
+      "is_default": true,
+      "lineage": "\/mlteam\/0-alice\/",
+      "min": {
+        "priority_threshold": {
+          "set": false,
+          "infinite": true,
+          "number": 0
+        }
+      },
+      "parent_account": "",
+      "partition": "",
+      "priority": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "qos": [
+        "normal"
+      ],
+      "shares_raw": 1,
+      "user": "alice"
+    },
+    {
+      "accounting": [
+      ],
+      "account": "vision",
+      "cluster": "rsz-it",
+      "comment": "",
+      "default": {
+        "qos": ""
+      },
+      "flags": [
+      ],
+      "max": {
+        "jobs": {
+          "per": {
+            "count": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "accruing": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "submitted": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          },
+          "active": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "accruing": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "total": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          }
+        },
+        "tres": {
+          "total": [
+          ],
+          "group": {
+            "minutes": [
+            ],
+            "active": [
+            ]
+          },
+          "minutes": {
+            "total": [
+            ],
+            "per": {
+              "job": [
+              ]
+            }
+          },
+          "per": {
+            "job": [
+            ],
+            "node": [
+            ]
+          }
+        },
+        "per": {
+          "account": {
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          }
+        }
+      },
+      "id": 4,
+      "is_default": false,
+      "lineage": "\/vision\/",
+      "min": {
+        "priority_threshold": {
+          "set": false,
+          "infinite": true,
+          "number": 0
+        }
+      },
+      "parent_account": "root",
+      "partition": "",
+      "priority": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "qos": [
+        "normal"
+      ],
+      "shares_raw": 1,
+      "user": ""
+    },
+    {
+      "accounting": [
+      ],
+      "account": "vision",
+      "cluster": "rsz-it",
+      "comment": "",
+      "default": {
+        "qos": ""
+      },
+      "flags": [
+      ],
+      "max": {
+        "jobs": {
+          "per": {
+            "count": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "accruing": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "submitted": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            },
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          },
+          "active": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "accruing": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          },
+          "total": {
+            "set": false,
+            "infinite": true,
+            "number": 0
+          }
+        },
+        "tres": {
+          "total": [
+          ],
+          "group": {
+            "minutes": [
+            ],
+            "active": [
+            ]
+          },
+          "minutes": {
+            "total": [
+            ],
+            "per": {
+              "job": [
+              ]
+            }
+          },
+          "per": {
+            "job": [
+            ],
+            "node": [
+            ]
+          }
+        },
+        "per": {
+          "account": {
+            "wall_clock": {
+              "set": false,
+              "infinite": true,
+              "number": 0
+            }
+          }
+        }
+      },
+      "id": 6,
+      "is_default": false,
+      "lineage": "\/vision\/0-alice\/",
+      "min": {
+        "priority_threshold": {
+          "set": false,
+          "infinite": true,
+          "number": 0
+        }
+      },
+      "parent_account": "",
+      "partition": "",
+      "priority": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "qos": [
+        "normal"
+      ],
+      "shares_raw": 1,
+      "user": "alice"
+    }
+  ],
+  "meta": {
+    "plugin": {
+      "type": "",
+      "name": "",
+      "data_parser": "data_parser\/v0.0.45",
+      "accounting_storage": "accounting_storage\/slurmdbd"
+    },
+    "client": {
+      "source": "",
+      "user": "root",
+      "group": "root"
+    },
+    "command": [
+      "sacctmgr",
+      "--json",
+      "show",
+      "assoc"
+    ],
+    "slurm": {
+      "version": {
+        "major": "26",
+        "micro": "5",
+        "minor": "05"
+      },
+      "release": "26.05.5",
+      "cluster": "rsz-it"
+    }
+  },
+  "errors": [
+  ],
+  "warnings": [
+  ]
+}

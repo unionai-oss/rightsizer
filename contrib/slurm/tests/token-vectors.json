@@ -1,0 +1,286 @@
+{
+  "cases": [
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:verified",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "valid",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:verified",
+      "job_desc": {
+        "cpus_per_task": 4,
+        "default_account": "mlteam",
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "valid_default_account",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:verified",
+      "job_desc": {
+        "account": "MLteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "valid_account_case",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=-\nmem_per_cpu=-\ncpus_per_task=8\ntres_per_node=gres/gpu:a100=2\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=gres/gpu=40960\ntmp_disk=2048",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:verified",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 8,
+        "mem_per_tres": "gres/gpu:40960",
+        "pn_min_tmp_disk": 2048,
+        "script": "#!/bin/sh\n# This script was created by sbatch --wrap.\n\npython3 -c \"print(1)\"\n",
+        "tres_per_node": "gres/gpu:a100:2",
+        "tres_per_task": "cpu=8"
+      },
+      "name": "valid_gpu_fields",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zAMf9Tr1BViqzYU_h7i7G2YUCFuL8HgD4Z8HgLhqT3f9F"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:verified",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "valid_within_skew",
+      "now": 1900000100,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "expired",
+      "now": 1900000121,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "tampered_uid",
+      "now": 1899999940,
+      "submit_uid": 1001,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "vision",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "tampered_account",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\nrm -rf /tmp/x\n"
+      },
+      "name": "tampered_script",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=65536\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 65536,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "tampered_mem",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=-\nmem_per_cpu=24576\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_cpu": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "tampered_mem_form",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=16\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 16,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "tampered_cpus",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zADLeI7Fqf_14qgVVfnZcuxyli3Ge0w7LfgrSmPcvUekN"
+    },
+    {
+      "canonical": "mem_per_node=-\nmem_per_cpu=-\ncpus_per_task=8\ntres_per_node=gres/gpu:a100=4\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=gres/gpu=40960\ntmp_disk=2048",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 8,
+        "mem_per_tres": "gres/gpu:40960",
+        "pn_min_tmp_disk": 2048,
+        "script": "#!/bin/sh\n# This script was created by sbatch --wrap.\n\npython3 -c \"print(1)\"\n",
+        "tres_per_node": "gres/gpu:a100:4",
+        "tres_per_task": "cpu=8"
+      },
+      "name": "tampered_gpus",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zAMf9Tr1BViqzYU_h7i7G2YUCFuL8HgD4Z8HgLhqT3f9F"
+    },
+    {
+      "canonical": "mem_per_node=-\nmem_per_cpu=-\ncpus_per_task=8\ntres_per_node=gres/gpu:a100=2\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=gres/gpu=81920\ntmp_disk=2048",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 8,
+        "mem_per_tres": "gres/gpu:81920",
+        "pn_min_tmp_disk": 2048,
+        "script": "#!/bin/sh\n# This script was created by sbatch --wrap.\n\npython3 -c \"print(1)\"\n",
+        "tres_per_node": "gres/gpu:a100:2",
+        "tres_per_task": "cpu=8"
+      },
+      "name": "tampered_mem_per_gpu",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zAMf9Tr1BViqzYU_h7i7G2YUCFuL8HgD4Z8HgLhqT3f9F"
+    },
+    {
+      "canonical": "mem_per_node=-\nmem_per_cpu=-\ncpus_per_task=8\ntres_per_node=gres/gpu:a100=2\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=gres/gpu=40960\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 8,
+        "mem_per_tres": "gres/gpu:40960",
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/sh\n# This script was created by sbatch --wrap.\n\npython3 -c \"print(1)\"\n",
+        "tres_per_node": "gres/gpu:a100:2",
+        "tres_per_task": "cpu=8"
+      },
+      "name": "tampered_tmp",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zAMf9Tr1BViqzYU_h7i7G2YUCFuL8HgD4Z8HgLhqT3f9F"
+    },
+    {
+      "canonical": "mem_per_node=-\nmem_per_cpu=-\ncpus_per_task=8\ntres_per_node=gres/gpu:a100=2\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=gres/gpu=40960\ntmp_disk=2048",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:verified",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 8,
+        "mem_per_tres": "gres/gpu:40960",
+        "pn_min_tmp_disk": 2048,
+        "script": "#!/bin/sh\n# This script was created by sbatch --wrap.\n\npython3 -c \"print(1)\"\n",
+        "tres_per_node": "gres:gpu:A100:2"
+      },
+      "name": "valid_tres_spelling",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrbmV3MDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zAMf9Tr1BViqzYU_h7i7G2YUCFuL8HgD4Z8HgLhqT3f9F"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer:01JDZ7Q4W8M7C9B5V3N2X1Y0ZA:verified",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "valid_old_key",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "AQRrb2xkMDFKRFo3UTRXOE03QzlCNVYzTjJYMVkwWkEAAAAAcT-zAAfRhmPBpKPXXQjeXW7p6mbCisQjRcrolPJWZgXgJ0iQ"
+    },
+    {
+      "canonical": "mem_per_node=24576\nmem_per_cpu=-\ncpus_per_task=4\ntres_per_node=-\ntres_per_job=-\ntres_per_task=-\ntres_per_socket=-\nmem_per_tres=-\ntmp_disk=-",
+      "expected_admin_comment": "rightsizer::user",
+      "job_desc": {
+        "account": "mlteam",
+        "cpus_per_task": 4,
+        "min_mem_per_node": 24576,
+        "pn_min_tmp_disk": 4294967294,
+        "script": "#!/bin/bash\n#SBATCH --mem=24G\n#SBATCH -c 4\npython train.py\n"
+      },
+      "name": "malformed",
+      "now": 1899999940,
+      "submit_uid": 1000,
+      "token": "not-a-token"
+    }
+  ],
+  "comment": "Generated by crates/rightsizer-slurm/tests/token_vectors.rs; RSZ_REGEN=1 to regenerate.",
+  "keys": "# test keys\nrsz-key-v1 kold verify 1700000000 b2xkLW9sZC1vbGQtb2xkLW9sZC1vbGQtb2xkLW9sZCE\nrsz-key-v1 knew active 1800000000 bmV3LW5ldy1uZXctbmV3LW5ldy1uZXctbmV3LW5ldyE\n",
+  "skew_s": 120
+}

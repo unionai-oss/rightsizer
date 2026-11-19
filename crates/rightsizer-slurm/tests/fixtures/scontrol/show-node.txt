@@ -1,0 +1,32 @@
+NodeName=c1 Arch=aarch64 CoresPerSocket=1 
+   CPUAlloc=0 CPUEfctv=2 CPUTot=2 CPULoad=1.50
+   AvailableFeatures=(null)
+   ActiveFeatures=(null)
+   Gres=(null)
+   NodeAddr=c1 NodeHostName=c1 Port=0 Version=26.05.5
+   OS=Linux 6.12.76-linuxkit #1 SMP Mon Jul 27 16:56:11 UTC 2026 
+   RealMemory=2048 AllocMem=0 FreeMem=307 Sockets=2 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=normal 
+   BootTime=2026-11-18T15:08:31 SlurmdStartTime=2026-11-19T04:51:59
+   LastBusyTime=2026-11-19T04:54:31 ResumeAfterTime=None SuspendTime=INFINITE
+   CfgTRES=cpu=2,mem=2G,billing=2
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+
+NodeName=c2 Arch=aarch64 CoresPerSocket=1 
+   CPUAlloc=0 CPUEfctv=2 CPUTot=2 CPULoad=1.50
+   AvailableFeatures=(null)
+   ActiveFeatures=(null)
+   Gres=(null)
+   NodeAddr=c2 NodeHostName=c2 Version=26.05.5
+   OS=Linux 6.12.76-linuxkit #1 SMP Mon Jul 27 16:56:11 UTC 2026 
+   RealMemory=2048 AllocMem=0 FreeMem=299 Sockets=2 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+   Partitions=normal 
+   BootTime=2026-11-18T15:08:30 SlurmdStartTime=2026-11-19T04:51:59
+   LastBusyTime=2026-11-19T04:54:59 ResumeAfterTime=None SuspendTime=INFINITE
+   CfgTRES=cpu=2,mem=2G,billing=2
+   AllocTRES=
+   CurrentWatts=0 AveWatts=0
+

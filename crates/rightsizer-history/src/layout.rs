@@ -9,6 +9,8 @@
 //! {prefix}/v1/breakers/{scope}/trips/{ulid}.json
 //! {prefix}/v1/control/mode.json
 //! {prefix}/v1/snapshots/{tenant}/{date}.parquet
+//! {prefix}/v1/compaction/lease.json                        singleton compaction lease (addition)
+//! {prefix}/v1/compaction/status.json                       last compaction, for metrics (addition)
 //! ```
 
 use chrono::{DateTime, Utc};
@@ -70,6 +72,16 @@ pub fn control(prefix: &str) -> String {
 /// A daily snapshot.
 pub fn snapshot(prefix: &str, key: &WorkloadKey, day: DateTime<Utc>) -> String {
     join(prefix, &format!("snapshots/{}/{}.parquet", tenant_dir(key), day.format("%Y-%m-%d")))
+}
+
+/// The compaction lease (`If-None-Match: *`, takeover on expiry by ETag).
+pub fn compaction_lease(prefix: &str) -> String {
+    join(prefix, "compaction/lease.json")
+}
+
+/// The last compaction's status.
+pub fn compaction_status(prefix: &str) -> String {
+    join(prefix, "compaction/status.json")
 }
 
 #[cfg(test)]

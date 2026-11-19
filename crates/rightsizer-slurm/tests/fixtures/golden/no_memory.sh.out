@@ -1,0 +1,8 @@
+#!/bin/bash
+# A minimal job relying on partition defaults.
+#SBATCH --time=10
+#SBATCH -c 2
+#SBATCH --mem=3G
+
+echo "running on $(hostname)"
+./simulate --steps 1000

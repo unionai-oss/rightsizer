@@ -11,7 +11,7 @@ publish.workspace = true
 [features]
 default = []
 # Estimator Protocol v1 client (SPEC §6.3).
-remote = ["dep:reqwest"]
+remote = ["dep:reqwest", "tokio/rt"]
 
 [dependencies]
 rightsizer-core.workspace = true
@@ -27,4 +27,8 @@ reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+chrono.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+# In-process mock server for the remote client's tests (dev only: deps-check
+# looks at normal and build edges).
+axum.workspace = true

@@ -781,6 +781,7 @@ impl<'a, 'b> Decider<'a, 'b> {
                     no_gpu_fail_hours: p.no_gpu_fail_hours,
                     min_burn_frac: 0.05,
                     need_headroom: p.need_headroom,
+                    semantics: crate::cost::CostSemantics::Rightsizer,
                 },
             },
             &rec_cands,

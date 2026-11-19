@@ -36,8 +36,14 @@ tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 toml.workspace = true
 humantime-serde.workspace = true
 tracing.workspace = true
+prometheus.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 pretty_assertions.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+criterion.workspace = true
+
+[[bench]]
+name = "engine"
+harness = false

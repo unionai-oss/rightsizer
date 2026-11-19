@@ -1,0 +1,30 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: tune-sweep
+  namespace: ml
+spec:
+  entrypoint: python tune.py
+  backoffLimit: 1
+  rayClusterSpec:
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: rayproject/ray:2.60.0
+              resources:
+                limits: {cpu: "2", memory: 8Gi}
+    workerGroupSpecs:
+      - groupName: gpu
+        replicas: 2
+        rayStartParams:
+          num-gpus: "1"
+        template:
+          spec:
+            containers:
+              - name: ray-worker
+                image: rayproject/ray:2.60.0-gpu
+                resources:
+                  limits: {cpu: "8", memory: 30Gi, nvidia.com/gpu: 1}

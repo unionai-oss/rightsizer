@@ -4,25 +4,35 @@
 //! chain, memo + single-flight + limiter + budget, mode/breaker resolution,
 //! decision logging, outcome ingestion, shadow/audit replay.
 //!
-//! Status: [`config`] is complete; [`Engine`] methods are **stubs** that
-//! keep the prior (S1-inert) until the next round implements them.
+//! Modules: [`config`] (`rightsizer.toml`), [`engine`] (decide, groups,
+//! attempts, outcomes, breakers), [`store`] (caches, availability, buffered
+//! writes), [`memo`] (memo + single-flight), [`context`] (seed → context),
+//! [`chain`] (estimator chain and privacy from config), [`replay`] (shadow / audit),
+//! [`report`] (text / JSON / HTML rendering of replays), [`metrics`],
+//! [`clock`].
 
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
-
-use rightsizer_core::{
-    Constraints, ContextSeed, Decision, DecisionSource, GroupId, Mode, PlatformRef, PlatformState, Prior, PriorReason,
-    RiskProfile, RunRecord, UnitId, WorkloadContext, WorkloadKey,
-};
-use rightsizer_estimators::EstimatorChain;
-use rightsizer_history::HistoryStore;
+use rightsizer_core::{Constraints, ContextSeed, GroupId, Mode, PlatformRef, PlatformState, Prior, RiskProfile, UnitId, WorkloadContext, WorkloadKey};
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
 
+pub mod chain;
+pub mod clock;
 pub mod config;
+pub mod context;
+pub mod engine;
+pub mod memo;
+pub mod metrics;
+pub mod replay;
+pub mod report;
+pub mod store;
 
+pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{Config, ConfigEnv, ConfigError, Loaded};
+pub use engine::{BreakerStatus, Engine, EngineBuilder, OutcomeReport, input_bucket};
+pub use metrics::Metrics;
+pub use replay::{KeyReport, ReplayOptions, ReplayReport, Readiness};
+pub use store::{KeyLister, OpenedStore, SnapshotStore, StoreView, open_store};
 
 /// What the engine decides from (ARCHITECTURE.md §4.1): a full context, or a
 /// seed the engine turns into one (reading input metadata within budget and
@@ -118,105 +128,38 @@ pub enum EngineError {
     /// History store.
     #[error(transparent)]
     Store(#[from] rightsizer_history::StoreError),
-    /// Not implemented yet.
-    #[error("not implemented: {0}")]
-    Unimplemented(&'static str),
+    /// Bad input (CLI exit 3).
+    #[error("invalid input: {0}")]
+    Input(String),
 }
 
-/// The engine: owns the store, the estimator chain, caches and budgets.
-pub struct Engine {
-    config: Config,
-    store: Arc<dyn HistoryStore>,
-    chain: EstimatorChain,
-}
-
-impl Engine {
-    /// Build an engine.
-    pub fn new(config: Config, store: Arc<dyn HistoryStore>, chain: EstimatorChain) -> Self {
-        Engine { config, store, chain }
-    }
-
-    /// The configuration.
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
-    /// The store.
-    pub fn store(&self) -> &Arc<dyn HistoryStore> {
-        &self.store
-    }
-
-    /// The estimator chain.
-    pub fn chain(&self) -> &EstimatorChain {
-        &self.chain
-    }
-
-    /// Decide one unit. Never fails (S1).
-    ///
-    /// **Stub:** keeps the prior with `Prior{reason = internal}`.
-    pub async fn decide(&self, req: DecideRequest) -> Decision {
-        stub_prior_decision(&req)
-    }
-
-    /// Decide a group: one decision from the union of the members' history,
-    /// applied to every member (plugins.md §2).
-    ///
-    /// **Stub:** keeps every prior.
-    pub async fn decide_group(&self, reqs: Vec<DecideRequest>) -> Vec<Decision> {
-        reqs.iter().map(stub_prior_decision).collect()
-    }
-
-    /// Record an outcome (buffered and retried when the store is unreachable, SPEC §8.4).
-    ///
-    /// **Stub:** writes straight through.
-    pub async fn outcome(&self, rec: RunRecord) -> Result<(), EngineError> {
-        self.store.put_run(&rec).await?;
-        Ok(())
+impl ContextInput {
+    /// A full context.
+    pub fn full(context: WorkloadContext) -> Self {
+        ContextInput::Full { context: Box::new(context) }
     }
 }
 
-fn stub_prior_decision(req: &DecideRequest) -> Decision {
-    let (key, unit, group, prior, digest) = match &req.context {
-        ContextInput::Full { context } => (
-            context.key.clone(),
-            context.unit.clone(),
-            None,
-            context.prior.clone(),
-            rightsizer_core::digest::context_digest(context),
-        ),
-        ContextInput::Seed { key, unit, group, prior, .. } => (key.clone(), unit.clone(), group.clone(), prior.clone(), String::new()),
-    };
-    Decision {
-        v: rightsizer_core::WIRE_VERSION,
-        id: Ulid::generate(),
-        key,
-        unit,
-        group,
-        mode: Mode::Recommend,
-        recommended: prior.spec.clone(),
-        applied: prior.spec.clone(),
-        shape: None,
-        prior,
-        held: Vec::new(),
-        source: DecisionSource::Prior { reason: PriorReason::Internal, detail: Some("engine not implemented yet".into()) },
-        estimate: None,
-        propensity: 1.0,
-        expected_cost: None,
-        p_fail: None,
-        advisories: Vec::new(),
-        explanation: vec!["kept the prior: engine not implemented yet".into()],
-        context_digest: digest,
+impl DecideRequest {
+    /// A request for a full context with defaults elsewhere.
+    pub fn for_context(context: WorkloadContext) -> Self {
+        DecideRequest {
+            context: ContextInput::full(context),
+            constraints: Constraints::default(),
+            state: PlatformState::default(),
+            policy: Policy::default(),
+            budget_ms: None,
+            dry_run: false,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rightsizer_history::MemoryStore;
 
-    #[tokio::test]
-    async fn stub_engine_is_inert() {
-        let e = Engine::new(Config::default(), Arc::new(MemoryStore::new()), EstimatorChain::default());
+    #[test]
+    fn request_round_trips() {
         let req = DecideRequest {
             context: ContextInput::Seed {
                 key: WorkloadKey::parse("k8s://c/ns/job/x").unwrap(),
@@ -228,14 +171,12 @@ mod tests {
             },
             constraints: Constraints::default(),
             state: PlatformState::default(),
-            policy: Policy::default(),
+            policy: Policy { mode: Some(Mode::Recommend), ..Default::default() },
             budget_ms: Some(50),
             dry_run: true,
         };
         let j = serde_json::to_string(&req).unwrap();
         let back: DecideRequest = serde_json::from_str(&j).unwrap();
         assert_eq!(back, req);
-        let d = e.decide(req).await;
-        assert_eq!(d.applied, d.prior.spec);
     }
 }

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: embed-batch-x7k2p
+  namespace: ml
+spec:
+  containers:
+    - name: embed
+      image: ghcr.io/acme/embed:0.9
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "4"
+          memory: 16Gi

@@ -1,0 +1,44 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: llm-pretrain
+  namespace: ml
+  labels:
+    kueue.x-k8s.io/queue-name: training
+spec:
+  failurePolicy:
+    maxRestarts: 3
+  replicatedJobs:
+    - name: driver
+      replicas: 1
+      template:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: driver
+                  image: ghcr.io/acme/pretrain:3.2
+                  resources:
+                    requests: {cpu: "2", memory: 8Gi}
+    - name: workers
+      replicas: 4
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-accelerator: nvidia-h100-80gb
+              containers:
+                - name: trainer
+                  image: ghcr.io/acme/pretrain:3.2
+                  command: ["torchrun", "--nproc_per_node=8", "train.py"]
+                  resources:
+                    requests:
+                      cpu: "96"
+                      memory: 1200Gi
+                    limits:
+                      memory: 1200Gi
+                      nvidia.com/gpu: 8

@@ -89,6 +89,31 @@ pub struct CostParams {
     pub min_burn_frac: f64,
     /// Headroom applied to demand + overhead + staged bytes (1.05, SPEC §5.2).
     pub need_headroom: f64,
+    /// Accounting conventions (rightsizer's, or the tuner scorer's for parity).
+    pub semantics: CostSemantics,
+}
+
+/// Accounting conventions of the cost model.
+///
+/// [`CostSemantics::Rightsizer`] is SPEC §7.2. [`CostSemantics::Tuner`]
+/// reproduces the resource tuner's scorer (`tuner:bench_all/scoring.py`) for
+/// the M0 parity test; it differs in three places only:
+///
+/// - `oracle_cost` includes the oracle's own stretch: `oracle_rate × d ×
+///   (oracle_stretch + attempt_overhead)` (the tuner prices the oracle with
+///   the same simulation), instead of `oracle_rate × d × (1 + overhead)`;
+/// - lateness is `delay_penalty × oracle_cost × (stretch − 1)` (throttling
+///   only), instead of `delay_penalty × oracle_rate × (total_hours −
+///   oracle_hours)` (which also charges the hours burnt by failed attempts);
+/// - a run whose ladder is exhausted ends failed: no resubmission at the
+///   prior, and the OOM penalty counts `attempts − 1`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum CostSemantics {
+    /// SPEC §7.2.
+    #[default]
+    Rightsizer,
+    /// The tuner's scorer.
+    Tuner,
 }
 
 impl Default for CostParams {
@@ -99,6 +124,7 @@ impl Default for CostParams {
             no_gpu_fail_hours: 0.05,
             min_burn_frac: 0.05,
             need_headroom: 1.05,
+            semantics: CostSemantics::Rightsizer,
         }
     }
 }
@@ -200,6 +226,7 @@ pub struct CostModel<'a> {
     durations_h: Vec<(f64, f64)>,
     burn_frac: f64,
     oracle_rate: f64,
+    oracle_stretch: f64,
     prior_rate: f64,
     prior_stretch: f64,
     p_need_gpu: f64,
@@ -235,6 +262,7 @@ impl<'a> CostModel<'a> {
             durations_h,
             burn_frac: d.t_peak_frac.max(inp.params.min_burn_frac),
             oracle_rate: 0.0,
+            oracle_stretch: 1.0,
             prior_rate: 0.0,
             prior_stretch: 1.0,
             p_need_gpu,
@@ -245,7 +273,9 @@ impl<'a> CostModel<'a> {
         let pc = m.inp.prior_candidate.clone();
         m.prior_rate = m.rate(&pc);
         m.prior_stretch = m.stretch(pc.cpu);
-        m.oracle_rate = m.find_oracle_rate(oracle_pool);
+        let (rate, stretch) = m.find_oracle(oracle_pool);
+        m.oracle_rate = rate;
+        m.oracle_stretch = stretch;
         m
     }
 
@@ -359,7 +389,8 @@ impl<'a> CostModel<'a> {
         if best_fit.is_finite() { best_fit } else { best_any }
     }
 
-    fn find_oracle_rate(&self, pool: &[Candidate]) -> f64 {
+    /// The oracle's `(rate, stretch)`.
+    fn find_oracle(&self, pool: &[Candidate]) -> (f64, f64) {
         let d = self.inp.demand;
         let h = self.inp.params.need_headroom;
         let need_mem = d.memory.as_ref().map(|m| (m.median() + self.inp.platform.overhead.median_bytes() + self.inp.staged_bytes) * h);
@@ -375,16 +406,19 @@ impl<'a> CostModel<'a> {
                 && need_cpu.is_none_or(|n| c.cpu.is_none_or(|x| x.as_cores() + 1e-9 >= n))
                 && gpu_ok(c)
         };
-        let fitting = pool.iter().filter(|c| ok(c)).map(|c| self.rate(c)).fold(f64::INFINITY, f64::min);
-        if fitting.is_finite() {
-            return fitting.max(1e-9);
+        let fitting = pool
+            .iter()
+            .filter(|c| ok(c))
+            .map(|c| (self.rate(c), c))
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((r, c)) = fitting {
+            return (r.max(1e-9), self.stretch(c.cpu));
         }
         // Nothing fits the median: the largest candidate stands in.
-        pool.iter()
-            .max_by_key(|c| (c.effective_memory, c.cpu))
-            .map(|c| self.rate(c))
-            .unwrap_or(self.prior_rate)
-            .max(1e-9)
+        match pool.iter().max_by_key(|c| (c.effective_memory, c.cpu)) {
+            Some(c) => (self.rate(c).max(1e-9), self.stretch(c.cpu)),
+            None => (self.prior_rate.max(1e-9), self.prior_stretch),
+        }
     }
 
     /// The oracle's $/h.
@@ -457,10 +491,12 @@ impl<'a> CostModel<'a> {
         let p_timeout = self.p_timeout(stretch);
         let (big_m, big_g) = (mem_states.len() - 1, gpu_states.len() - 1);
 
+        let tuner = p.semantics == CostSemantics::Tuner;
         let mut expected = 0.0;
         for &(wd, d) in &self.durations_h {
             let timeout = self.walltime_h.is_some_and(|w| stretch * d > w);
-            let oracle_cost = self.oracle_rate * d * (1.0 + ao);
+            let oracle_cost =
+                if tuner { self.oracle_rate * d * (self.oracle_stretch + ao) } else { self.oracle_rate * d * (1.0 + ao) };
             let oracle_hours = d * (1.0 + ao);
             let mut e_d = 0.0;
             for (km, &pkm) in pm.iter().enumerate() {
@@ -505,6 +541,15 @@ impl<'a> CostModel<'a> {
                             g += 1;
                         }
                     };
+                    if tuner {
+                        // The tuner: an exhausted ladder ends failed; lateness is throttling only.
+                        let retries = if terminal { (fails - 1.0).max(0.0) } else { fails };
+                        let total = cost
+                            + pen.oom_penalty * oracle_cost * retries
+                            + pen.delay_penalty * oracle_cost * (stretch - 1.0).max(0.0);
+                        e_d += prob * total;
+                        continue;
+                    }
                     if terminal {
                         // The author resubmits at the prior.
                         let run = d * (self.prior_stretch + ao);

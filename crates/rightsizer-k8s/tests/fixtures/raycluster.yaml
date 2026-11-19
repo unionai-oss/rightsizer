@@ -1,0 +1,43 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: batch-infer
+  namespace: ml
+spec:
+  rayVersion: "2.60.0"
+  headGroupSpec:
+    rayStartParams:
+      num-cpus: "0"       # keep tasks off the head
+      dashboard-host: "0.0.0.0"
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: rayproject/ray:2.60.0
+            resources:
+              requests:
+                cpu: "4"
+                memory: 16Gi
+              limits:
+                cpu: "4"
+                memory: 16Gi
+  workerGroupSpecs:
+    - groupName: cpu-workers
+      replicas: 4
+      minReplicas: 1
+      maxReplicas: 8
+      rayStartParams:
+        num-cpus: "8"
+        memory: "34359738368"
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: rayproject/ray:2.60.0
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi

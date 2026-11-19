@@ -70,7 +70,7 @@ mod b64 {
 }
 
 /// One resource-bearing thing in a submission (plugins.md §2).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Unit {
     /// Stable within the submission, e.g. `"spec.template.spec.containers[trainer]"`.
@@ -91,6 +91,24 @@ pub struct Unit {
     /// SPEC §5.4: GPU count permanently held.
     #[serde(default)]
     pub distributed: bool,
+    /// The full workload key, when it is not `{adapter kind}://{tenant}/{key_suffix}`
+    /// (e.g. a Flyte task pod sized by the K8s webhook is keyed
+    /// `flyte://{org}/{project}/{domain}/{task}`, kubernetes.md §2). The
+    /// adapter derives it from trusted data only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub key: Option<WorkloadKey>,
+}
+
+impl Unit {
+    /// The unit's workload key: [`Unit::key`] when set, else
+    /// `{kind}://{tenant}/{key_suffix}`.
+    pub fn workload_key(&self, kind: &str, tenant: &Tenant) -> Result<WorkloadKey, rightsizer_core::TypeError> {
+        match &self.key {
+            Some(k) => Ok(k.clone()),
+            None => WorkloadKey::new(kind, tenant.clone(), self.key_suffix.clone()),
+        }
+    }
 }
 
 /// Why a submission is skipped (plugins.md §2). JSON: `{"kind": "already_sized", ...}`.

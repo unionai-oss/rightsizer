@@ -1,0 +1,9 @@
+#!/bin/bash
+#SBATCH --job-name=server-client
+#SBATCH --mem=6G -c 2
+#SBATCH hetjob
+#SBATCH --mem=1536M
+#SBATCH --cpus-per-task=1
+#SBATCH --ntasks=4
+
+srun --het-group=0 ./server : --het-group=1 ./client

@@ -1,0 +1,8 @@
+#!/bin/bash
+#SBATCH --job-name="quoted name"
+#SBATCH --mem=6G  # inline comment --mem=1G
+#SBATCH --comment='a # inside quotes'
+## double-hash comment
+#SBATCH --tmp=20G
+#SLURM --cpus-per-task=2
+python job.py

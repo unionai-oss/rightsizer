@@ -12,7 +12,7 @@ use rightsizer_core::{AttemptRecord, Decision, Lease, RunRecord, RunStatus, Work
 use ulid::Ulid;
 
 use crate::{
-    Backend, CompactOptions, CompactReport, DecisionFilter, HistoryStore, PutOutcome, StoreError, StoreInfo, dedup_key,
+    Backend, CompactOptions, CompactReport, DecisionFilter, HistoryStore, PutOutcome, Role, StoreError, StoreInfo, dedup_key,
 };
 
 #[derive(Default)]
@@ -50,6 +50,14 @@ impl HistoryStore for MemoryStore {
         StoreInfo { backend: Backend::Memory, uri: "memory://".into(), durable_shared: false }
     }
 
+    fn role(&self) -> Role {
+        if self.client_credentials { Role::Client } else { Role::Operator }
+    }
+
+    async fn keys(&self) -> Result<Vec<WorkloadKey>, StoreError> {
+        Ok(self.lock()?.runs.values().filter_map(|v| v.first().map(|r| r.key.clone())).collect())
+    }
+
     async fn put_run(&self, rec: &RunRecord) -> Result<PutOutcome, StoreError> {
         let mut g = self.lock()?;
         if !g.seen.insert(dedup_key(rec)) {
@@ -57,12 +65,15 @@ impl HistoryStore for MemoryStore {
         }
         let v = g.runs.entry(rec.key.to_string()).or_default();
         v.push(rec.clone());
-        v.sort_by(|a, b| b.started_at.cmp(&a.started_at).then(b.attempt.cmp(&a.attempt)));
+        crate::sort_newest_first(v);
         Ok(PutOutcome::Inserted)
     }
 
     async fn put_decision(&self, d: &Decision) -> Result<(), StoreError> {
-        self.lock()?.decisions.push(d.clone());
+        let mut g = self.lock()?;
+        if !g.decisions.iter().any(|x| x.id == d.id) {
+            g.decisions.push(d.clone()); // same id = the same decision (a retry)
+        }
         Ok(())
     }
 

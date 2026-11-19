@@ -118,6 +118,7 @@ tempfile = "3.27.0"
 pretty_assertions = "1.4.1"
 insta = { version = "1.49.0", features = ["json"] }
 jsonschema = { version = "0.61.2", default-features = false }
+assert_cmd = "2.2.2"
 
 [profile.dev]
 debug = "line-tables-only"
