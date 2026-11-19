@@ -315,6 +315,25 @@ impl HistoryStore for SqliteStore {
         .await
     }
 
+    async fn run_marker(&self, key: &WorkloadKey) -> Result<Option<String>, StoreError> {
+        // `rowid_` is AUTOINCREMENT: never reused, so it only moves forward.
+        let k = key.to_string();
+        self.with(move |c| {
+            let m: Option<i64> = c.query_row("SELECT MAX(rowid_) FROM runs WHERE key = ?1", params![k], |r| r.get(0)).map_err(db_err)?;
+            Ok(Some(m.unwrap_or(0).to_string()))
+        })
+        .await
+    }
+
+    async fn runs_changed_since(&self, key: &WorkloadKey, marker: &str) -> Result<bool, StoreError> {
+        let Ok(m) = marker.parse::<i64>() else { return Ok(true) };
+        let k = key.to_string();
+        self.with(move |c| {
+            c.query_row("SELECT EXISTS (SELECT 1 FROM runs WHERE key = ?1 AND rowid_ > ?2)", params![k, m], |r| r.get::<_, bool>(0)).map_err(db_err)
+        })
+        .await
+    }
+
     async fn runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError> {
         let k = key.to_string();
         let lim = limit.min(i64::MAX as usize) as i64;

@@ -233,7 +233,8 @@ impl Daemon {
             rec.trust = Trust::Authenticated;
         }
         let r = self.engine.outcome(rec).await.map_err(|e| app(ErrorCode::Internal, e.to_string(), true))?;
-        Ok(serde_json::to_value(OutcomeResult { accepted: true, duplicate: false }).unwrap_or_default()).map(|mut v| {
+        // A duplicate (a shim's retry) was already processed: nothing ran again.
+        Ok(serde_json::to_value(OutcomeResult { accepted: true, duplicate: r.duplicate }).unwrap_or_default()).map(|mut v| {
             v["written"] = Value::Bool(r.written);
             v["attribution"] = serde_json::to_value(&r.attribution).unwrap_or_default();
             v["lease_closed"] = Value::Bool(r.lease_closed);
@@ -387,7 +388,8 @@ fn parse_mode(s: Option<&str>) -> u32 {
 
 /// Build the daemon's handler from config.
 pub async fn build(cfg: &Config) -> Result<Arc<Daemon>, Fail> {
-    let engine = Engine::builder(cfg.clone()).role(Role::Client).build().await.map_err(Fail::config)?;
+    // A server: input readers open no local path unless `[features] local_paths` allows it.
+    let engine = Engine::builder(cfg.clone()).role(Role::Client).server(true).build().await.map_err(Fail::config)?;
     if let Some(err) = engine.config_error() {
         tracing::warn!("{err}; decisions keep the prior (S1)");
     }

@@ -137,6 +137,10 @@ macro_rules! conformance {
             async fn keys_and_export() {
                 cases::keys_and_export(MAKE).await
             }
+            #[tokio::test]
+            async fn run_markers_move_on_writes() {
+                cases::run_markers_move_on_writes(MAKE).await
+            }
         }
     };
 }
@@ -180,6 +184,32 @@ mod cases {
         assert_eq!(s.runs(&k, 2).await.unwrap().len(), 2);
         assert!(s.runs(&k, 0).await.unwrap().is_empty());
         assert!(s.runs(&k2(), 10).await.unwrap().is_empty());
+    }
+
+    /// Refinement round (item 3): the per-key change marker moves on every
+    /// new run (another process's write included), not on duplicates or on
+    /// other keys' writes, and `runs_marked` takes it before the read.
+    pub async fn run_markers_move_on_writes(make: Make) {
+        let Some(f) = fx(make, Role::Operator).await else { return };
+        let s = &f.store;
+        let (a, b) = (k1(), k2());
+        let m0 = s.run_marker(&a).await.unwrap().expect("every built-in backend has markers");
+        s.put_run(&rec(&a, "a", 1, t(0))).await.unwrap();
+        assert!(s.runs_changed_since(&a, &m0).await.unwrap(), "first write");
+        let (v, m1) = s.runs_marked(&a, 10).await.unwrap();
+        let m1 = m1.unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(s.run_marker(&a).await.unwrap().as_deref(), Some(m1.as_str()));
+        assert!(!s.runs_changed_since(&a, &m1).await.unwrap(), "nothing new");
+        s.put_run(&rec(&a, "a", 1, t(0))).await.unwrap(); // duplicate
+        s.put_run(&rec(&b, "z", 1, t(0))).await.unwrap(); // another key
+        assert!(!s.runs_changed_since(&a, &m1).await.unwrap(), "duplicates and other keys do not move it");
+        // A record started earlier than everything cached still counts (written later).
+        s.put_run(&rec(&a, "old", 1, t(-1000))).await.unwrap();
+        assert!(s.runs_changed_since(&a, &m1).await.unwrap(), "a newly written record, whatever its start time");
+        let m2 = s.run_marker(&a).await.unwrap().unwrap();
+        assert_ne!(m1, m2);
+        assert!(!s.runs_changed_since(&a, &m2).await.unwrap());
     }
 
     pub async fn keys_isolated(make: Make) {

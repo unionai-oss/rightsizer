@@ -440,3 +440,21 @@ async fn coalesced_batch_does_not_inherit_the_shortest_deadline() {
     assert!(matches!(ra, Err(EstimateError::Timeout(_))), "{ra:?}");
     assert!(rb.is_ok(), "the 3 s caller got the 100 ms caller's timeout: {rb:?}");
 }
+
+/// Refinement round (item 7): a response body over the cap is a protocol
+/// error (counted by the breaker), never buffered without bound.
+#[tokio::test]
+async fn oversized_bodies_are_refused() {
+    let (mock, addr) = serve(1).await;
+    let mut c = cfg(addr);
+    c.max_body_bytes = 4096;
+    let r = RemoteEstimator::connect(c).await.unwrap();
+    assert_eq!(r.info().id, "mock", "a small /v1/info body is fine");
+    let big = "x".repeat(64 * 1024);
+    mock.script.lock().unwrap().push_back((200, json!({"estimate": {"v": 1, "kind": "demand", "provenance": {"estimator": big, "version": "3", "grid": "rs-grid-v1"}}})));
+    let e = r.estimate(&ctx(7)).await.unwrap_err();
+    assert!(matches!(&e, EstimateError::Protocol(m) if m.contains("cap")), "{e:?}");
+    // Under the cap: fine.
+    assert!(r.estimate(&ctx(8)).await.is_ok());
+    assert_eq!(RemoteConfig::new("http://x").max_body_bytes, MAX_BODY_BYTES);
+}

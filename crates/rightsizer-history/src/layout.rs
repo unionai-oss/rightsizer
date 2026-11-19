@@ -5,8 +5,8 @@
 //! {prefix}/v1/decisions/{tenant}/{date}/{ulid}.json
 //! {prefix}/v1/attempts/{tenant}/{key-hash}/{invocation-hash}.json
 //! {prefix}/v1/latest/{tenant}/{key-hash}.json             pointer: last K records inline + watermark ULID
-//! {prefix}/v1/breakers/{scope}.json
-//! {prefix}/v1/breakers/{scope}/trips/{ulid}.json
+//! {prefix}/v1/breakers/{scope}.json                       resets: operator-written
+//! {prefix}/v1/breakers-trips/{scope}/{ulid}.json           trips: client-creatable (N-1: breakers/{scope}/trips/{ulid}.json, still read)
 //! {prefix}/v1/control/mode.json
 //! {prefix}/v1/snapshots/{tenant}/{date}.parquet
 //! {prefix}/v1/compaction/lease.json                        singleton compaction lease (addition)
@@ -56,12 +56,12 @@ pub fn latest(prefix: &str, key: &WorkloadKey) -> String {
 
 /// A breaker's reset object.
 pub fn breaker(prefix: &str, scope: &BreakerScope) -> String {
-    join(prefix, &format!("breakers/{}.json", scope.path()))
+    join(prefix, &scope.reset_object())
 }
 
 /// A breaker trip object (`If-None-Match: *`).
 pub fn breaker_trip(prefix: &str, scope: &BreakerScope, id: Ulid) -> String {
-    join(prefix, &format!("breakers/{}/trips/{id}.json", scope.path()))
+    join(prefix, &scope.trip_object(id))
 }
 
 /// The control object.
@@ -98,5 +98,6 @@ mod tests {
         assert_eq!(control(""), "v1/control/mode.json");
         assert!(attempt("p", &k, "inv-1").starts_with("p/v1/attempts/k8s/prod/ml/"));
         assert_eq!(breaker("p", &BreakerScope::Fleet), "p/v1/breakers/fleet.json");
+        assert_eq!(breaker_trip("p", &BreakerScope::Fleet, id), format!("p/v1/breakers-trips/fleet/{id}.json"));
     }
 }

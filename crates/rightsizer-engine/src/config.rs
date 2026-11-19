@@ -245,6 +245,24 @@ pub struct HistoryConfig {
     /// Treat the store as shared by every writer (overrides detection; a
     /// local store is shared when one host runs every surface). `None` = detect.
     pub shared: Option<bool>,
+    /// The highest trust `Engine::outcome` stores (SPEC §8.2): a record
+    /// claiming more is written at this level. `None` = by role: `authenticated`
+    /// for client engines, `verified` for operator engines and the engines of
+    /// trusted importers (the K8s watcher, `rsz history import slurm`), which
+    /// set it explicitly (`EngineBuilder::max_ingest_trust`).
+    pub max_ingest_trust: Option<rightsizer_core::Trust>,
+    /// Revalidate a cached key's history against the store when its last
+    /// check is older than this many seconds (30; 0 = never: only
+    /// `cache_ttl` refreshes). A check is one LIST / one indexed query and
+    /// never holds a decision past its budget.
+    pub revalidate_s: u64,
+    /// Object-store options for `s3://`, `gs://`, `az://` stores
+    /// (`[history.storage_options]`: credentials, endpoint, region, …; SPEC
+    /// §10.3). Integrations pass the options they resolved instead of
+    /// exporting environment variables. Redacted when the config is printed
+    /// or serialized.
+    #[serde(default, skip_serializing_if = "rightsizer_history::factory::StoreOptions::is_empty")]
+    pub storage_options: rightsizer_history::factory::StoreOptions,
 }
 
 impl Default for HistoryConfig {
@@ -262,6 +280,9 @@ impl Default for HistoryConfig {
             buffer: 10_000,
             durable: None,
             shared: None,
+            max_ingest_trust: None,
+            revalidate_s: 30,
+            storage_options: Default::default(),
         }
     }
 }
@@ -323,6 +344,8 @@ pub struct MemberConfig {
     pub max_batch: Option<u32>,
     /// Coalescing window, ms (20).
     pub coalesce_ms: Option<u64>,
+    /// Largest response body accepted from a remote estimator, bytes (8 MiB).
+    pub max_body_bytes: Option<u64>,
     /// Built-in parameter overrides (`RulesSizedParams`, `HistoryPeakParams`).
     pub params: Option<serde_json::Value>,
     /// `rightsizer-trees/1` model file (gbt).
@@ -419,11 +442,17 @@ pub struct FeaturesConfig {
     pub max_input_bytes: u64,
     /// Hosts HTTP(S) readers may reach despite private addresses.
     pub allow_hosts: Vec<String>,
+    /// Local paths (bare paths and `file://` URIs) input readers may open,
+    /// as directory prefixes. Local inputs are read with the reading
+    /// process's own credentials, so a server must not open whatever a
+    /// submitter names. `None` (default): any path for in-process use (CLI,
+    /// Python), none for servers (webhook, daemon). `[]`: none.
+    pub local_paths: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Default for FeaturesConfig {
     fn default() -> Self {
-        FeaturesConfig { budget_ms: 1000, max_input_bytes: 1 << 20, allow_hosts: Vec::new() }
+        FeaturesConfig { budget_ms: 1000, max_input_bytes: 1 << 20, allow_hosts: Vec::new(), local_paths: None }
     }
 }
 

@@ -160,12 +160,18 @@ pub fn memory_demand_obs(r: &RunRecord, overhead_median: f64, staged_fallback: f
 
 /// GPU memory demand (busiest device × nothing: the record holds the busiest
 /// device; total = busiest × count is the adapter's job). `GpuOom` is a lower
-/// bound.
+/// bound; a `GpuOom` without a sampled GPU peak is `AtLeast` the usable
+/// memory of one device of the requested shape, when the accelerator is
+/// known (`RunRecord::gpu_oom_bound`; SPEC §5.7: an OOM records
+/// `AtLeast(limit)`, and a device's memory is its limit).
 pub fn gpu_obs(r: &RunRecord) -> Option<Obs> {
     if !learnable(r) {
         return None;
     }
-    let m = r.gpu_memory_peak.filter(finite_pos)?;
+    let m = match r.gpu_memory_peak.filter(finite_pos) {
+        Some(m) => m,
+        None => Measurement { value: r.gpu_oom_bound()?, censor: Censor::AtLeast, resolution_s: None },
+    };
     let censor = if r.status == RunStatus::GpuOom { Censor::AtLeast } else { m.censor };
     let devices = r.requested.as_ref().and_then(|s| s.requests.gpu).map(|g| g.count.max(1)).unwrap_or(1) as f64;
     Some(Obs { value: (m.value * devices).max(MIN_MEMORY_DEMAND), censor })
@@ -315,6 +321,30 @@ mod tests {
             AxisEstimate::Cells { probs, .. } => probs.iter().sum(),
             _ => panic!(),
         }
+    }
+
+    /// Refinement round (item 7): a GPU OOM without a sampled GPU peak is a
+    /// lower bound at the requested device's memory, when the shape is known.
+    #[test]
+    fn gpu_oom_without_peak_is_at_least_the_device() {
+        use rightsizer_core::{AcceleratorId, GpuShape, Requests, ResourceSpec};
+        let mut r = crate::test_util::record("g", RunStatus::GpuOom, None, None);
+        assert_eq!(gpu_obs(&r), None, "no shape: nothing known");
+        r.requested = Some(ResourceSpec {
+            requests: Requests { gpu: Some(GpuShape { accel: AcceleratorId::L4_24G, count: 2 }), ..Default::default() },
+            ..Default::default()
+        });
+        let o = gpu_obs(&r).unwrap();
+        assert_eq!(o.censor, Censor::AtLeast);
+        // Per-device usable memory (22 GiB) × 2 devices.
+        assert!((o.value - 2.0 * 22.0 * Bytes::GIB as f64).abs() < 1.0, "{}", o.value);
+        // A sampled peak wins.
+        r.gpu_memory_peak = Some(Measurement::exact(5.0 * Bytes::GIB as f64));
+        assert!((gpu_obs(&r).unwrap().value - 10.0 * Bytes::GIB as f64).abs() < 1.0);
+        // A success without a peak stays unknown.
+        r.status = RunStatus::Succeeded;
+        r.gpu_memory_peak = None;
+        assert_eq!(gpu_obs(&r), None);
     }
 
     #[test]

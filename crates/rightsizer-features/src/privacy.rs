@@ -133,13 +133,31 @@ impl Privacy {
 /// Salted URI hash: `sha256:` + hex(SHA-256(`"rightsizer-uri/1\0"` + salt +
 /// `"\0"` + uri)). Deterministic per salt; the URI itself never leaves the
 /// process.
+///
+/// HTTP(S) URIs are hashed **without their query string and fragment**
+/// ([`identity_uri`]): a presigned URL's query carries a signature and an
+/// expiry that change on every presign, so the same object keeps one hash
+/// (and one input identity), and the signature never feeds a hash. The read
+/// itself uses the full URI.
 pub fn uri_hash(uri: &str, salt: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"rightsizer-uri/1\0");
     h.update(salt.as_bytes());
     h.update(b"\0");
-    h.update(uri.as_bytes());
+    h.update(identity_uri(uri).as_bytes());
     format!("sha256:{}", hex::encode(h.finalize()))
+}
+
+/// The part of a URI that identifies the object: HTTP(S) URIs lose their
+/// `?query` and `#fragment`; other schemes are kept as they are (an `s3://`
+/// key may legitimately contain `?`).
+pub fn identity_uri(uri: &str) -> &str {
+    let lower = uri.get(..8).unwrap_or(uri).to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        uri.split(['?', '#']).next().unwrap_or(uri)
+    } else {
+        uri
+    }
 }
 
 /// The context a remote estimator receives (SPEC §11): source dropped unless
@@ -170,6 +188,18 @@ pub fn redact_for_remote(ctx: &WorkloadContext, privacy: &Privacy) -> WorkloadCo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_query_is_not_part_of_the_hash() {
+        let a = uri_hash("https://bucket.s3.amazonaws.com/x.parquet?X-Amz-Signature=aa&X-Amz-Expires=60", "s");
+        let b = uri_hash("https://bucket.s3.amazonaws.com/x.parquet?X-Amz-Signature=bb&X-Amz-Expires=600", "s");
+        assert_eq!(a, b);
+        assert_eq!(a, uri_hash("https://bucket.s3.amazonaws.com/x.parquet", "s"));
+        assert_eq!(a, uri_hash("https://bucket.s3.amazonaws.com/x.parquet#frag", "s"));
+        assert_ne!(a, uri_hash("https://bucket.s3.amazonaws.com/y.parquet?X-Amz-Signature=aa", "s"));
+        // Other schemes keep `?` (it can be part of an object key).
+        assert_ne!(uri_hash("s3://b/k?v=1", "s"), uri_hash("s3://b/k", "s"));
+    }
 
     #[test]
     fn uri_hash_is_salted_and_stable() {

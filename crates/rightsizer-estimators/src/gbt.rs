@@ -84,7 +84,16 @@ impl Gbt {
     pub fn load(trees: &Path, novelty: Option<&Path>) -> Result<Self, ModelError> {
         let m = TreeModel::load(trees)?;
         let n = novelty.map(NoveltyModel::load).transpose()?;
-        Ok(Self::new(m, n))
+        Self::try_new(m, n)
+    }
+
+    /// [`Gbt::new`], refusing a novelty companion whose feature schema is
+    /// not the trees file's ([`NoveltyModel::check_against`]).
+    pub fn try_new(model: TreeModel, novelty: Option<NoveltyModel>) -> Result<Self, ModelError> {
+        if let Some(n) = &novelty {
+            n.check_against(&model.features)?;
+        }
+        Ok(Self::new(model, novelty))
     }
 
     /// The same estimator under another id (a renamed chain member).
@@ -182,6 +191,33 @@ mod tests {
                                 "quantiles": [q(0.1, 9.0), q(0.5, 10.0), q(0.9, 11.0)]}}
         })
         .to_string()
+    }
+
+    /// Refinement round (item 7): a novelty companion built on another
+    /// feature schema is refused at load (it would gate on distances in
+    /// another feature space).
+    #[test]
+    fn novelty_schema_must_match_the_trees() {
+        let nov = |features: &str| {
+            crate::novelty::NoveltyModel::from_json(&format!(
+                r#"{{"format":"rightsizer-novelty/1","features":"{features}","feature_names":["inputs.log2_bytes_total"],"mean":[0],"scale":[1],
+                    "reference":[[0]],"k":1,"ecdf":[0.5],"needs_code":false}}"#
+            ))
+            .unwrap()
+        };
+        let m = || TreeModel::from_json(&model_json()).unwrap();
+        assert!(Gbt::try_new(m(), Some(nov("features-v1"))).is_ok());
+        assert!(Gbt::try_new(m(), Some(nov(""))).is_ok(), "unlabeled = features-v1");
+        let e = Gbt::try_new(m(), Some(nov("features-v2"))).err().expect("schema mismatch refused");
+        assert!(e.to_string().contains("features-v2"), "{e}");
+        // Through files too (the chain builder's path).
+        let d = std::env::temp_dir().join(format!("rsz-gbt-novelty-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (t, n) = (d.join("t.json"), d.join("n.json"));
+        std::fs::write(&t, model_json()).unwrap();
+        std::fs::write(&n, r#"{"format":"rightsizer-novelty/1","features":"features-v2","feature_names":["a"],"mean":[0],"scale":[1],"reference":[[0]],"k":1,"ecdf":[0.5]}"#).unwrap();
+        assert!(Gbt::load(&t, Some(&n)).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[tokio::test]

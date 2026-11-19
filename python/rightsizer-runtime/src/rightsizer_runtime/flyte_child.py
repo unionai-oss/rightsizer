@@ -129,7 +129,10 @@ async def write_records(uri: str, records: Iterable[Tuple[RunRecord, Optional[st
         if not written and not slow:
             try:
                 if fallback is None:
-                    fallback = RunRecordWriter(uri)
+                    from .storage import flyte_storage_options
+
+                    # Flyte's own store settings, passed explicitly (never exported).
+                    fallback = RunRecordWriter(uri, storage_options=flyte_storage_options())
                 written = fallback.write(rec, tenant=tenant)
             except Exception as e:
                 log.warning("rightsizer: RunRecord not written: %s", e)

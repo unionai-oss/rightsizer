@@ -31,7 +31,11 @@
 //! [`SsrfGuard`] first.
 //!
 //! Results are cached process-wide, keyed by (URI digest, ETag — or size and
-//! modification time), LRU-bounded at [`METADATA_CACHE_CAPACITY`] entries.
+//! modification time), LRU-bounded at [`METADATA_CACHE_CAPACITY`] entries;
+//! `hf://` refs by (URI digest, endpoint, credential identity) with a 1 h
+//! maximum age ([`HF_METADATA_TTL`]). HTTP(S) inputs are fetched with their
+//! full URI (a presigned URL's query is kept) but hashed and cached without
+//! the query ([`crate::privacy::identity_uri`]).
 
 mod arrow;
 mod cache;
@@ -50,7 +54,7 @@ use rightsizer_core::{ColumnsInfo, InputFormat, InputMeta, InputRef, ScalarValue
 pub use crate::store::{DefaultResolver, StoreResolver};
 use crate::ssrf::SsrfGuard;
 use crate::{FeatureError, ReadBudget};
-pub use cache::{METADATA_CACHE_CAPACITY, clear_metadata_cache, metadata_cache_len};
+pub use cache::{HF_METADATA_TTL, METADATA_CACHE_CAPACITY, clear_metadata_cache, metadata_cache_len};
 
 /// Options for [`read_inputs_with`].
 #[derive(Clone, Debug)]
@@ -348,12 +352,15 @@ async fn read_one(
     let trailing_slash = uri.ends_with('/');
 
     if format == Some(InputFormat::ModelRef) {
-        let key = cache::key(uri, "hf");
+        // No content validator for a model ref: key by (endpoint, credential
+        // identity) — another endpoint or token may see another repo (or none:
+        // a gated one) — and expire after `HF_METADATA_TTL` (`main` moves).
+        let key = cache::key(uri, &format!("hf:{}#{}", crate::store::hf_endpoint(), crate::store::hf_identity()));
         if mode == Mode::SizeOnly && lock(slot).bytes.is_some() {
             return Ok(());
         }
         if opts.use_cache
-            && let Some(x) = cache::get(&key)
+            && let Some(x) = cache::get_fresh(&key, Some(cache::HF_METADATA_TTL))
         {
             x.apply(&mut lock(slot));
             return Ok(());

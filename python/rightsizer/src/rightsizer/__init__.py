@@ -43,7 +43,7 @@ from ._engine import (
 )
 from ._errors import Insufficient, Rejection, RightsizerError
 from ._estimator import Estimator, clear_estimators, register_estimator, registered_estimators, unregister_estimator
-from ._storage import apply_storage_options
+from ._storage import object_store_options
 from .types import Code, Context, Decision, Estimate, Hold, Input, OutcomeReport, Prior, Resources, Source
 
 __version__ = "0.1.0.dev0"
@@ -92,7 +92,6 @@ __all__ = [
     "RunStatus",
     "Source",
     "aoutcome",
-    "apply_storage_options",
     "arecommend",
     "attempt_context",
     "build_record",
@@ -103,6 +102,7 @@ __all__ = [
     "decide_group",
     "default_engine",
     "flush",
+    "object_store_options",
     "outcome",
     "policy",
     "recommend",

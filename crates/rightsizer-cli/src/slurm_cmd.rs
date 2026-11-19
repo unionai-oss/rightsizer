@@ -429,7 +429,8 @@ pub async fn import(cfg: &Config, args: Vec<String>, out: Format) -> Result<(), 
     let since = opt(&args, "--since").unwrap_or_else(|| "30d".into());
     let window = humantime::parse_duration(&since).map_err(|e| Fail::parse(format!("--since {since:?}: {e}")))?;
     let dry = flag(&args, "--dry-run");
-    let e = Engine::builder(cfg.clone()).role(Role::Client).build().await.map_err(Fail::config)?;
+    // `sacct` is platform accounting: a trusted importer (SPEC §8.2).
+    let e = Engine::builder(cfg.clone()).role(Role::Client).max_ingest_trust(rightsizer_core::Trust::Verified).build().await.map_err(Fail::config)?;
     let cluster = opt(&args, "--cluster").or_else(|| cfg.slurm.cluster.clone()).or_else(|| cfg.history.cluster.clone()).unwrap_or_else(|| "default".into());
     let settings: rightsizer_slurm::SlurmSettings = serde_json::to_value(&cfg.slurm).ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     let resolution = match cfg.slurm.job_acct_gather_frequency {
@@ -497,6 +498,9 @@ pub async fn import(cfg: &Config, args: Vec<String>, out: Format) -> Result<(), 
     let mut fresh = Vec::new();
     if !dry {
         let mut imp = rightsizer_history::Importer::new();
+        for r in recs.iter_mut() {
+            e.cap_trust(r);
+        }
         for r in &recs {
             match imp.put_run(e.store().as_ref(), r).await.map_err(Fail::other)? {
                 rightsizer_history::PutOutcome::Inserted => {
@@ -512,8 +516,10 @@ pub async fn import(cfg: &Config, args: Vec<String>, out: Format) -> Result<(), 
     let mut tripped = Vec::new();
     let mut attributions: BTreeMap<String, usize> = BTreeMap::new();
     let mut leases_closed = 0;
+    // `prewritten`: these were just inserted above; duplicates (records an
+    // earlier import already processed) never reach `outcome` again.
     for r in fresh {
-        if let Ok(rep) = e.outcome(r).await {
+        if let Ok(rep) = e.outcome_with(r, rightsizer_engine::OutcomeOptions { prewritten: true }).await {
             if let Some(a) = rep.attribution {
                 *attributions.entry(a).or_default() += 1;
             }

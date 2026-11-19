@@ -22,8 +22,17 @@ not need Flyte. Concretely:
 - **Python adapters** live in the `rightsizer` wheel as subpackages
   (`rightsizer.flyte`, `rightsizer.ray`) that import their platform lazily.
   `import rightsizer` imports neither Flyte nor Ray; each platform is an
-  extra (`rightsizer[flyte]`, `rightsizer[ray]`). A test imports every
-  subpackage in an environment without the others installed.
+  extra (`rightsizer[flyte]`, `rightsizer[ray]`). Model tooling follows the
+  same rule: `rightsizer.models` / `rightsizer.serve` need `rightsizer[serve]`
+  (NumPy, no torch; `[torch]` for the reference backend), `rightsizer.export`
+  needs `rightsizer[export]`. A test
+  (`python/rightsizer/tests/isolation`) imports every subpackage in an
+  environment without the others installed.
+- **Store credentials are passed, never exported.** Every surface hands the
+  history store its object-store options explicitly (`[history.storage_options]`,
+  `_core.Engine(storage_options=…)`, `RunRecordWriter(storage_options=…)`);
+  nothing writes `AWS_*`/`GOOGLE_*`/`AZURE_*` into the process environment,
+  where the user's own clients would pick them up (SPEC §10.3).
 - **Anything else** is an out-of-process plugin (`rsz-plugin-<kind>`, JSON-RPC
   `rightsizer-plugin/1` over stdio) or a shim that calls the daemon
   (`rsz serve`), so new platforms never touch the core.
@@ -35,44 +44,59 @@ not need Flyte. Concretely:
 ## 2. Repository layout
 
 ```
-Cargo.toml                     workspace; shared dependency versions
+Cargo.toml                     workspace; shared dependency versions; incremental = false
 rust-toolchain.toml            1.99
 crates/
-  rightsizer-core/             pure, sync, no I/O: data model, units, grids, normalization,
-                               cost model, constraints, decision rule, breaker/mode logic, policy
-  rightsizer-features/         input metadata readers (bounded range reads), code tokens, digest,
-                               feature bucket; I/O via `object_store` (features: s3, gcs, azure, http)
+  rightsizer-core/             pure, sync, no I/O: data model (types/), units, grids, normalization,
+                               cost model, constraints, decision rule (decide.rs, decide/), safety (S1–S5),
+                               breaker/mode logic, policy, stats
+  rightsizer-features/         input metadata readers (readers/: parquet, arrow IPC, safetensors, HF, …;
+                               bounded range reads), code tokens, digest, context building, privacy,
+                               SSRF guard; I/O via `object_store` (features: s3, gcs, azure, http)
   rightsizer-estimators/       Estimator trait, rules-sized, history-peak, prior, gbt (trees/1),
-                               remote client (Estimator Protocol v1, feature `remote`), chain
-  rightsizer-history/          HistoryStore trait; object-store (local FS, S3), sqlite, postgres
-                               (feature `postgres`); compaction, pointers, breakers, control, attempts
-  rightsizer-engine/           orchestration: config, context building from a ContextSeed, chain,
-                               memo + single-flight + limiter + budget, mode/breaker resolution,
-                               decision logging, outcome ingestion, shadow/audit replay
+                               novelty, features-v1, memo, chain + build-from-config,
+                               remote client (Estimator Protocol v1, feature `remote`)
+  rightsizer-history/          HistoryStore trait; object store (local FS, S3, GCS, Azure), sqlite,
+                               postgres (feature `postgres`), memory; cache, buffer, Importer (bulk
+                               dedup), factory (URI + StoreOptions → backend), compaction, export
+  rightsizer-engine/           orchestration: config (one `Config` for every surface), store view,
+                               chain, memo + single-flight + limiter + budget, mode/breaker
+                               resolution, decision logging, outcome ingestion, sweep, replay, report
   rightsizer-plugin/           Adapter / PlatformModel / OutcomeSource traits, Native, Unit, Patch,
                                rightsizer-plugin/1 protocol types, stdio plugin client, conformance suite
-  rightsizer-k8s/              K8s adapter (manifest extract/render/validate; pure);
-                               features `webhook` (axum + rustls), `cluster` (kube-rs watcher,
-                               restore, Prometheus importer)
+  rightsizer-k8s/              K8s adapter (extract/render/validate/edit: pure); feature `webhook`
+                               (admit.rs, webhook.rs: axum + rustls, 16 MiB review limit), feature
+                               `cluster` (cluster/: kube view, watcher, leader election, Prometheus
+                               importer, node agent with bearer auth, prefetch), restore
   rightsizer-slurm/            Slurm adapter (sbatch parsing, #SBATCH text edits, option tables),
-                               HMAC tokens, sacct importer, sbatch wrapper
-  rightsizer-cli/              `rsz`: CLI, daemon (`serve`), plugin discovery
+                               platform model, HMAC tokens, sacct importer, sbatch wrapper, service
+  rightsizer-cli/              `rsz`: main.rs (recommend/apply/explain/shadow/history/outcome/breaker/
+                               control/config), daemon.rs (`rsz serve`), k8s.rs (`webhook`, `watcher`,
+                               `node-agent`, `k8s restore`, `history import k8s`), slurm_cmd.rs
+                               (`slurm …`, `history import slurm`), flyte.rs / ray.rs (delegate to
+                               Python), plugin_cmd.rs, adapters.rs, output.rs
   rightsizer-py/               PyO3 module `rightsizer._core` (core + features + estimators +
-                               history[object-store, sqlite] + engine); no kube-rs, no postgres
+                               history[object-store, sqlite] + engine; features clouds, http, remote);
+                               no kube-rs, no postgres
 python/
-  rightsizer-runtime/          pure Python: policy model, measurement (cgroup v1/v2, rusage, NVML),
-                               RunRecord writer (fsspec / local), Flyte and Ray child-side code
-  rightsizer/                  maturin project: `rightsizer._core`, `rightsizer.flyte`,
-                               `rightsizer.ray`, `rightsizer.plugin`, `rightsizer.serve`,
-                               `rightsizer.export`
+  rightsizer-runtime/          pure Python, stdlib only: wire types, policy model, measurement
+                               (cgroup v1/v2, rusage, NVML), RunRecord writer (local / fsspec),
+                               store options (storage.py), Flyte and Ray child-side code
+  rightsizer/                  maturin project: `rightsizer._core` + typed API (`rightsizer`),
+                               `rightsizer.flyte` [flyte], `rightsizer.ray` [ray],
+                               `rightsizer.models` + `rightsizer.serve` [serve] (models.md),
+                               `rightsizer.export` [export] (trees exporter), `rightsizer.plugin`
 contrib/slurm/                 cli_filter.lua, job_submit.lua, vendored sha256/hmac/json Lua
-deploy/helm/rightsizer/        Helm chart (webhook + watcher), PrometheusRule, dashboard
+deploy/helm/rightsizer/        Helm chart (webhook + watcher, optional node agent + NetworkPolicy),
+                               PrometheusRule, dashboard
+examples/plugins/              rsz-plugin-nomad-demo (an out-of-process plugin + fixtures)
 schemas/                       generated JSON Schemas (normative wire formats)
 tests/
+  fixtures/wire/               cross-language JSON fixtures
   infra/                       scripts that bring up local test platforms (k3d/K3s, Flyte devbox,
-                               Slurm in Docker, Ray) and tear them down
-  integration/                 per-platform integration suites that use tests/infra
-xtask/                         deps-check, schema generation, benches orchestration
+                               Slurm in Docker, Ray) and tear them down; Linux builds
+  integration/                 per-platform integration suites (k8s, slurm, flyte, ray, plugin)
+xtask/                         deps-check, schema generation
 ```
 
 **Deviation:** the spec lists no `rightsizer-engine`. The decision *rule* stays
@@ -85,18 +109,42 @@ make the Python module duplicate it. Hence a separate crate.
 ## 3. Dependency rules
 
 ```
-core  ←  features  ←  estimators  ←  engine  ←  plugin  ←  {k8s, slurm}  ←  cli
-  ↑         ↑            ↑            ↑                                     
-  └──────── history ─────┴────────────┘            py ← engine (+ history[object-store, sqlite])
+                         ┌──────────── history ◄─────────────┐
+                         ▼                ▲                  │
+core ◄── features ◄── estimators ◄── engine ◄── plugin ◄── {k8s, slurm} ◄── cli
+                                        ▲          (plugin → history too; k8s → features too)
+                                        └── py  (+ history[object-store, sqlite], features, estimators)
 ```
+
+Edges as in the `Cargo.toml`s (every crate also depends on `core`):
+
+| crate | depends on (workspace) |
+|---|---|
+| core | — |
+| features | core |
+| estimators | core, features |
+| history | core |
+| engine | core, features, estimators, history |
+| plugin | core, engine, history |
+| k8s | core, plugin, engine†, history†, features‡ |
+| slurm | core, plugin, engine, history |
+| cli | core, engine, estimators, history, plugin, k8s (feature `k8s`), slurm (feature `slurm`) |
+| py | core, features, estimators, history, engine |
+
+† feature `engine` (on with `webhook` / `cluster`); ‡ feature `cluster`.
 
 - `core` depends only on `serde`, `serde_json`, `ulid`, `chrono`, `sha2`,
   `thiserror`, `enumflags2`, `schemars` (optional). No tokio, no I/O.
-- `plugin` depends on `core` and `engine` (the conformance suite drives the
-  engine); adapter crates depend on `plugin`.
+- `plugin` depends on `core`, `engine` (the conformance suite drives the
+  engine) and `history` (importers write through `HistoryStore`); adapter
+  crates depend on `plugin`.
 - Nothing in the core set depends on `kube`, `k8s-openapi`, `axum`, `pyo3`,
-  `sqlx`/`tokio-postgres`, or an adapter crate. `xtask deps-check` enforces it
+  `tokio-postgres`, or an adapter crate. `cargo xtask deps-check` enforces it
   with `cargo tree`.
+- Cloud object stores are cargo features end to end: `history`/`features`
+  (`s3`, `gcs`, `azure`) ← `engine` ← `cli` (`s3`) / `py` (`clouds`, on by
+  default in the wheel). The default `rsz` build has local FS, sqlite and
+  postgres stores; `cargo build -p rightsizer-cli --features s3` adds S3.
 
 ## 4. Wire contracts
 
@@ -165,6 +213,35 @@ resolution through `_core`.
 Integration environments are **isolated from anything already on the
 machine**: they use their own cluster names (`rsz-it-*`), their own
 kubeconfig files, and never touch existing contexts or containers.
+
+### Testing: commands
+
+Run from the repository root. Python commands use the repo venv (`.venv`,
+created by `tests/infra/python-env.sh`). Suites behind an environment gate
+skip (or print `skipped`) without it.
+
+| suite | command | gate / needs |
+|---|---|---|
+| Rust unit + crate integration tests | `cargo test --workspace --exclude rightsizer-py --no-fail-fast` | none (postgres / S3 conformance cases skip silently) |
+| object-store option mapping (S3/GCS/Azure builders, no network) | `cargo test -p rightsizer-history --features s3,gcs,azure --lib factory` | none |
+| `_core` Rust tests | `cargo test -p rightsizer-py` | a Python 3.10+ to link against |
+| lints | `cargo clippy --workspace --exclude rightsizer-py --all-targets -- -D warnings` and `cargo clippy -p rightsizer-py -- -D warnings` | none |
+| dependency isolation | `cargo xtask deps-check` | none |
+| schemas up to date | `cargo xtask schemas` (then `git diff --exit-code schemas/`) | none |
+| build the Python extension | `cd python/rightsizer && ../../.venv/bin/maturin develop` | maturin in `.venv` |
+| Python unit (runtime) | `.venv/bin/python -m pytest -q python/rightsizer-runtime/tests` | none (stdlib; fsspec tests skip without it) |
+| Python unit (typed API, Flyte/Ray/models/serve/export units) | `.venv/bin/python -m pytest -q python/rightsizer/tests` | the extension built; Flyte/Ray/torch/skops/huggingface_hub-dependent tests skip when missing; `RIGHTSIZER_RUST_PARITY=1` adds the Rust evaluator parity check. Run the two roots separately: both have `test_wire.py` / `test_child.py`, which collide in one pytest session |
+| Python import isolation | `RIGHTSIZER_ISOLATION_WHEEL=… .venv/bin/python -m pytest -q python/rightsizer/tests/isolation` | a built wheel and `uv` (throwaway venvs per extra) |
+| Helm chart | `helm lint deploy/helm/rightsizer --set cluster=c` and `tests/integration/k8s/helm_test.sh` | `helm`; `pyyaml` in `.venv` |
+| postgres backend | `RSZ_IT_POSTGRES_URL=postgres://… cargo test -p rightsizer-history --features postgres` | a postgres |
+| S3 / MinIO backend | `RSZ_IT_S3_URL=s3://bucket/prefix?endpoint=… cargo test -p rightsizer-history --features s3 --test conformance` | an S3-compatible store |
+| network readers (HF, HTTP, S3) | `cargo test -p rightsizer-features --features http,s3 -- --ignored` | network |
+| plugin + daemon end to end | `tests/integration/plugin/run.sh` | host only (builds `target/debug/rsz`) |
+| Kubernetes (k3d) | `RSZ_IT_K8S=1 tests/integration/k8s/run.sh setup all` | Docker, k3d, kubectl, helm |
+| Slurm (Docker cluster) | `tests/infra/slurm.sh up && tests/infra/build-linux.sh -- -p rightsizer-cli && RSZ_IT_SLURM=1 tests/integration/slurm/run.sh`; Rust side: `RSZ_IT_SLURM=1 cargo test -p rightsizer-slurm --test e2e_slurm_cluster -- --nocapture` | Docker |
+| Flyte (devbox) | `RSZ_IT_FLYTE=1 tests/integration/flyte/run.sh` | Docker (devbox image, Linux wheels) |
+| Ray (local head) | `tests/infra/ray.sh up && RSZ_IT_RAY=1 .venv/bin/python -m pytest tests/integration/ray -v -s` | Ray in `.venv` |
+| infra status / teardown | `tests/infra/all.sh status` / `tests/infra/all.sh down` | see `tests/infra/README.md` |
 
 ## 7. Milestone map
 

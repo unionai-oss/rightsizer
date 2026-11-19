@@ -84,26 +84,26 @@ async fn audit_equals_shadow_on_the_same_snapshot() {
 async fn would_fail_is_censoring_aware_and_trips_the_simulated_breaker() {
     let e = engine(Arc::new(Fixed::new(1.0, 1.0))).await;
     let mut runs: Vec<RunRecord> = (0..5).map(|i| run(&format!("ok{i}"), i * 7200, 3600.0, 0.9)).collect();
+    // A censored success: AtLeast 0.5 GiB fits nothing for sure.
+    let mut cens = run("cens", 5 * 7200, 3600.0, 0.5);
+    cens.memory_peak = Some(Measurement { value: 0.5 * Bytes::GIB as f64, censor: Censor::AtLeast, resolution_s: None });
+    runs.push(cens);
     // An OOM at the prior: the peak is only known to be ≥ 8 GiB... but 8 GiB exceeds any reduction: fail.
-    let mut oom = run("oom", 5 * 7200, 600.0, 8.0);
+    let mut oom = run("oom", 6 * 7200, 600.0, 8.0);
     oom.status = RunStatus::OomKilled;
     oom.memory_peak = Some(Measurement { value: 8.0 * Bytes::GIB as f64, censor: Censor::AtLeast, resolution_s: None });
     runs.push(oom);
-    // A censored success: AtLeast 0.5 GiB fits nothing for sure.
-    let mut cens = run("cens", 6 * 7200, 3600.0, 0.5);
-    cens.memory_peak = Some(Measurement { value: 0.5 * Bytes::GIB as f64, censor: Censor::AtLeast, resolution_s: None });
-    runs.push(cens);
     runs.push(run("after", 7 * 7200, 3600.0, 0.9));
     let rep = e.replay(runs, &ReplayOptions { per_run: true, ..Default::default() }).await;
     let k = &rep.keys[0];
     let fits: Vec<Fit> = k.per_run.iter().map(|r| r.fit).collect();
-    assert_eq!(fits[5], Fit::Fail);
-    assert_eq!(fits[6], Fit::Unknown, "AtLeast below the decision is unknown, not fit");
+    assert_eq!(fits[5], Fit::Unknown, "AtLeast below the decision is unknown, not fit");
+    assert_eq!(fits[6], Fit::Fail);
     assert_eq!(k.would_fail, 1);
     assert_eq!(k.unknown, 1);
     assert!(k.per_run[7].breaker_open, "the would-fail run stops later would-saves");
     assert_eq!(k.per_run[7].saved_gib_h, 0.0);
-    assert!(k.per_run[5].saved_dollars < 0.0, "a failure without a ladder costs the burnt attempt");
+    assert!(k.per_run[6].saved_dollars < 0.0, "a failure without a ladder costs the burnt attempt");
     let text = report::text(&rep);
     assert!(text.contains("1 / 8 (?)"), "{text}");
 }

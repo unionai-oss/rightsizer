@@ -51,6 +51,22 @@ credentials through `history.env`. The schema is migrated by an operator
 command once (`rsz control mode-ceiling enforce` with operator credentials).
 Enforce needs a durable, shared store.
 
+## Node agent (optional, kubernetes.md §6.2)
+
+`--set nodeAgent.enabled=true` adds a DaemonSet that reads cgroup v2
+`memory.peak` / `cpu.stat` of sized containers every second and serves them
+to the watcher. Those samples are other pods' usage, so:
+
+- `/v1/*` requires `Authorization: Bearer <token>` (401 otherwise, constant-time
+  compare). The token is `<release>-node-agent-token` (key `token`; generated
+  once and kept on upgrade, or `nodeAgent.token.existingSecret`), mounted into
+  the agents (`--token-file`) and the watcher (`--node-agent-token-file`).
+  Rotate by replacing the Secret and restarting both.
+- A NetworkPolicy (`nodeAgent.networkPolicy.enabled`, default on) admits only
+  this release's webhook/watcher pods to the agents' port; add peers (e.g. a
+  Prometheus namespace for `/metrics`) with `nodeAgent.networkPolicy.extraFrom`.
+  `/healthz` and `/metrics` carry no per-pod data and need no token.
+
 ## RBAC (least privilege, kubernetes.md §7)
 
 get/list/watch on pods, namespaces, nodes, LimitRanges, ResourceQuotas,

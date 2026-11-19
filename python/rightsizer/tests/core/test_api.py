@@ -321,3 +321,12 @@ def test_decision_marker(engine):
     d = engine.decide(rs.Context(key="m", prior=rs.Resources(cpu=1, memory="1Gi")))
     env = d.marker(measured=True)
     assert env.decision_id == d.id and env.key == d.key and env.measured
+
+
+def test_invalidate_never_raises_and_refreshes(engine):
+    ctx = rs.Context(key="inv", prior=rs.Resources(cpu=2, memory="8Gi"))
+    d1 = engine.decide(ctx)
+    engine.invalidate(d1.key)            # a valid key
+    engine.invalidate("not a key ::: at all")  # S1: logged, never raised
+    d2 = engine.decide(ctx)
+    assert d2.prior.spec.requests.memory == d1.prior.spec.requests.memory

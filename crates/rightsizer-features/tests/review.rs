@@ -261,3 +261,20 @@ async fn build_context_keeps_env_salt() {
     let direct = read_inputs_with(&seed.inputs, &r, &ReadOptions::default()).await;
     assert_eq!(direct[0].uri_hash, ctx.inputs[0].uri_hash);
 }
+
+/// Refinement round (item 7): `hf://` metadata is cached per credential
+/// identity (a hash of `HF_TOKEN`, never the token itself).
+#[test]
+fn hf_identity_tracks_the_token() {
+    use rightsizer_features::store::hf_identity;
+    // SAFETY: no other test in this binary reads HF_TOKEN.
+    unsafe { std::env::remove_var("HF_TOKEN") };
+    assert_eq!(hf_identity(), "");
+    unsafe { std::env::set_var("HF_TOKEN", "hf_a") };
+    let a = hf_identity();
+    unsafe { std::env::set_var("HF_TOKEN", "hf_b") };
+    let b = hf_identity();
+    unsafe { std::env::remove_var("HF_TOKEN") };
+    assert!(!a.is_empty() && a != b && !a.contains("hf_a"));
+    assert_eq!(a.len(), 16);
+}

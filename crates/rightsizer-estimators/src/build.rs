@@ -78,6 +78,8 @@ pub struct MemberSpec {
     pub max_batch: Option<u32>,
     /// Coalescing window, ms (20).
     pub coalesce_ms: Option<u64>,
+    /// Largest response body accepted from a remote estimator, bytes (8 MiB).
+    pub max_body_bytes: Option<u64>,
     /// `rightsizer-trees/1` file (gbt).
     #[serde(alias = "model_path")]
     pub path: Option<PathBuf>,

@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rightsizer_engine::Engine;
-use rightsizer_features::{DefaultResolver, ReadBudget, ReadOptions, SsrfGuard};
 
 use crate::admit::{InputCache, PrefetchJob};
 
@@ -21,17 +20,22 @@ pub fn allowed(allow: &BTreeMap<String, Vec<String>>, namespace: &str, uri: &str
     [namespace, "*"].iter().filter_map(|k| allow.get(*k)).flatten().any(|p| !p.is_empty() && uri.starts_with(p.as_str()))
 }
 
-/// Run the prefetcher until the channel closes.
-pub async fn run(mut rx: tokio::sync::mpsc::Receiver<PrefetchJob>, cache: Arc<InputCache>, engine: Engine, allow: BTreeMap<String, Vec<String>>, allow_hosts: Vec<String>) {
-    let resolver = DefaultResolver::new(SsrfGuard::new(&allow_hosts));
+/// Run the prefetcher until the channel closes. Reads use the engine's
+/// resolver and read options (SSRF guard `[features] allow_hosts`, local
+/// path policy, and the engine's URI salt), so the `uri_hash`es it caches
+/// are the ones the engine computes (SPEC §11).
+pub async fn run(mut rx: tokio::sync::mpsc::Receiver<PrefetchJob>, cache: Arc<InputCache>, engine: Engine, allow: BTreeMap<String, Vec<String>>) {
+    let resolver = engine.resolver().clone();
     while let Some(job) = rx.recv().await {
         let refs: Vec<_> = job.refs.iter().filter(|r| r.uri.as_deref().is_some_and(|u| allowed(&allow, &job.namespace, u) && cache.get(u).is_none())).cloned().collect();
         if refs.is_empty() {
             continue;
         }
-        let mut opts = ReadOptions::new(ReadBudget::default());
-        opts.guard = Arc::new(SsrfGuard::new(&allow_hosts));
-        let metas = rightsizer_features::read_inputs_with(&refs, &resolver, &opts).await;
+        let mut opts = engine.read_options().clone();
+        // Off the request path: the default per-context budget, not the engine's.
+        opts.budget.per_context = rightsizer_features::ReadBudget::default().per_context;
+        opts.hash_only = false;
+        let metas = rightsizer_features::read_inputs_with(&refs, resolver.as_ref(), &opts).await;
         let mut filled = 0;
         for (r, m) in refs.iter().zip(metas) {
             if let Some(u) = &r.uri

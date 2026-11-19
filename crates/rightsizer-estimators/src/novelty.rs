@@ -65,6 +65,8 @@ pub struct NoveltyFile {
 /// A validated novelty model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoveltyModel {
+    /// Feature schema version (`""` = unlabeled, read as the trees file's).
+    pub features: String,
     /// Feature names.
     pub feature_names: Vec<String>,
     mean: Vec<f64>,
@@ -112,6 +114,7 @@ impl NoveltyModel {
         let mut ecdf = f.ecdf;
         ecdf.sort_by(|a, b| a.total_cmp(b));
         Ok(NoveltyModel {
+            features: f.features,
             feature_names: f.feature_names,
             mean: f.mean,
             scale: f.scale,
@@ -121,6 +124,23 @@ impl NoveltyModel {
             ecdf,
             needs_code: f.needs_code,
         })
+    }
+
+    /// Check this companion against its trees file (SPEC §9): the same
+    /// feature schema version (an unlabeled file is read as `features-v1`,
+    /// like trees), so the novelty signal is computed on the features the
+    /// model was trained on. A mismatch is a configuration error: the gate
+    /// would otherwise compare distances in another feature space.
+    pub fn check_against(&self, trees_features: &str) -> Result<(), ModelError> {
+        let norm = |s: &str| if s.is_empty() { rightsizer_features::FEATURES_VERSION.to_string() } else { s.to_string() };
+        let (n, t) = (norm(&self.features), norm(trees_features));
+        if n != t {
+            return Err(ModelError::Invalid(format!("novelty: feature schema {n:?} does not match the trees file's {t:?}")));
+        }
+        if self.feature_names.is_empty() {
+            return Err(ModelError::Invalid("novelty: no feature names".into()));
+        }
+        Ok(())
     }
 
     /// Mean distance to the `k` nearest reference rows for a raw vector

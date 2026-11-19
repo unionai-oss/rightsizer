@@ -19,9 +19,10 @@ use rightsizer_core::safety::{self, Attribution, AttributionContext};
 use rightsizer_core::{
     Advisory, AttemptContext, AttemptRecord, Axis, Bytes, Censor, Confidence, Decision, DecisionInput, DecisionParams, DecisionSource,
     Grid, Hold, HoldReason, Ladder, LadderDriver, Lease, Mode, PlatformRef, Prior, PriorReason, Requests, ResourceSpec,
-    RunRecord, RunStatus, UnitId, WorkloadContext, WorkloadKey,
+    RunRecord, RunStatus, Trust, UnitId, WorkloadContext, WorkloadKey,
 };
 use rightsizer_estimators::EstimatorChain;
+use rightsizer_features::store::LocalPaths;
 use rightsizer_features::{DefaultResolver, ReadBudget, ReadOptions, SsrfGuard};
 use rightsizer_history::{DecisionFilter, HistoryStore};
 use tokio::sync::Semaphore;
@@ -32,7 +33,7 @@ use crate::clock::{Clock, SystemClock, since};
 use crate::config::{Config, ConfigError};
 use crate::memo::{ChainResult, Memo, MemoKey};
 use crate::metrics::Metrics;
-use crate::store::{KeyLister, OpenedStore, Pending, StoreView, open_store};
+use crate::store::{KeyLister, OpenedStore, Pending, PutResult, StoreView, open_store};
 use crate::{ContextInput, DecideRequest, EngineError};
 
 /// Builds an [`Engine`].
@@ -43,9 +44,25 @@ pub struct EngineBuilder {
     clock: Arc<dyn Clock>,
     metrics: Option<Metrics>,
     role: crate::store::Role,
+    max_ingest_trust: Option<Trust>,
+    server: bool,
 }
 
 impl EngineBuilder {
+    /// The highest trust [`Engine::outcome`] stores (overrides
+    /// `history.max_ingest_trust`). Trusted importers whose records come
+    /// from platform accounting (the K8s watcher, `sacct`, `flyte.remote`)
+    /// pass `Verified`; the default is `Authenticated` for client engines.
+    pub fn max_ingest_trust(mut self, t: Trust) -> Self {
+        self.max_ingest_trust = Some(t);
+        self
+    }
+    /// A server surface (webhook, daemon): with `[features] local_paths`
+    /// unset, input readers open no local path (SPEC §14 item 2).
+    pub fn server(mut self, yes: bool) -> Self {
+        self.server = yes;
+        self
+    }
     /// Credentials role for opening `history.uri` (operators reset breakers and write control).
     pub fn role(mut self, role: crate::store::Role) -> Self {
         self.role = role;
@@ -87,6 +104,16 @@ impl EngineBuilder {
         if let Err(e) = config.validate() {
             errors.push(e.to_string());
         }
+        // An empty salt variable: a configuration error under `strict`,
+        // else a warning (the next salt source is used).
+        if let (_, Some(w)) = crate::chain::resolve_salt(&config.privacy) {
+            if config.strict {
+                errors.push(w);
+            } else {
+                tracing::warn!(warning = %w, "URI salt");
+                metrics.error("config", "empty_salt");
+            }
+        }
         let grid = Grid::by_id(&config.decision.grid).unwrap_or_else(Grid::rs_grid_v1);
         let opened = match self.store {
             Some(s) => s,
@@ -115,9 +142,31 @@ impl EngineBuilder {
             }
         }
         let view = StoreView::with_clock(opened.store, config.history.clone(), config.breaker.cache_ttl, metrics.clone(), self.clock.clone());
-        let memo = Memo::with_clock(grid.clone(), config.decision.memo_ttl, config.decision.memo_capacity, self.clock.clone()).with_point_sigma(config.decision.point_sigma);
+        let memo = Arc::new(
+            Memo::with_clock(grid.clone(), config.decision.memo_ttl, config.decision.memo_capacity, self.clock.clone()).with_point_sigma(config.decision.point_sigma),
+        );
+        {
+            // Revalidation found runs another process wrote: drop the key's memo entries too.
+            let m = Arc::downgrade(&memo);
+            let revalidated = metrics.clone();
+            view.cached().set_on_change(Arc::new(move |k: &WorkloadKey| {
+                if let Some(m) = m.upgrade() {
+                    m.invalidate_workload(&k.to_string());
+                }
+                revalidated.error("history", "revalidated");
+            }));
+        }
         let limiter = Semaphore::new(config.decision.max_concurrent_decisions.max(1));
-        let resolver = Arc::new(DefaultResolver::new(SsrfGuard::new(&config.features.allow_hosts)));
+        let local = match &config.features.local_paths {
+            Some(v) => LocalPaths::under(v),
+            None if self.server => LocalPaths::none(),
+            None => LocalPaths::Any,
+        };
+        let resolver = Arc::new(DefaultResolver::new(SsrfGuard::new(&config.features.allow_hosts)).with_local_paths(local));
+        let ingest_ceiling = self.max_ingest_trust.or(config.history.max_ingest_trust).unwrap_or(match self.role {
+            crate::store::Role::Operator => Trust::Verified,
+            crate::store::Role::Client => Trust::Authenticated,
+        });
         let privacy = crate::chain::privacy(&config.privacy);
         let read_opts = ReadOptions::new(ReadBudget {
             per_input_bytes: config.features.max_input_bytes,
@@ -144,6 +193,7 @@ impl EngineBuilder {
                 metrics,
                 window: Mutex::new(Vec::new()),
                 recent: Mutex::new(RecentDecisions::default()),
+                ingest_ceiling,
             }),
         })
     }
@@ -163,7 +213,7 @@ struct Inner {
     keys: Option<Arc<dyn KeyLister>>,
     chain: EstimatorChain,
     grid: Grid,
-    memo: Memo,
+    memo: Arc<Memo>,
     limiter: Semaphore,
     clock: Arc<dyn Clock>,
     metrics: Metrics,
@@ -172,6 +222,8 @@ struct Inner {
     /// Decisions this engine recorded recently, by id: `outcome` joins to them
     /// without `HistoryStore::decision` (which lists the decision log).
     recent: Mutex<RecentDecisions>,
+    /// The highest trust `outcome` stores (SPEC §8.2).
+    ingest_ceiling: Trust,
 }
 
 /// A bounded id → decision map (oldest evicted first).
@@ -233,6 +285,23 @@ pub struct OutcomeReport {
     pub tripped: Vec<BreakerScope>,
     /// A ladder lease was closed.
     pub lease_closed: bool,
+    /// The store already held this record (same `(key, invocation_id,
+    /// attempt, source)`): nothing was re-attributed, tripped, closed or
+    /// invalidated (a retried or replayed outcome is idempotent).
+    pub duplicate: bool,
+    /// The record named a `decision_id` whose decision belongs to another
+    /// key: the join was refused.
+    pub join_refused: bool,
+}
+
+/// Options of [`Engine::outcome_with`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OutcomeOptions {
+    /// The caller already inserted the record itself (an importer that
+    /// writes a batch first, so attribution sees every attempt, then reports
+    /// each **inserted** record): skip the write and process it. Never set
+    /// it for a record the store reported as a duplicate.
+    pub prewritten: bool,
 }
 
 /// What [`Engine::sweep`] found and did.
@@ -341,7 +410,16 @@ fn ulid_at(now: DateTime<Utc>) -> Ulid {
 impl Engine {
     /// A builder over `config`.
     pub fn builder(config: Config) -> EngineBuilder {
-        EngineBuilder { config, store: None, chain: None, clock: Arc::new(SystemClock), metrics: None, role: crate::store::Role::Client }
+        EngineBuilder {
+            config,
+            store: None,
+            chain: None,
+            clock: Arc::new(SystemClock),
+            metrics: None,
+            role: crate::store::Role::Client,
+            max_ingest_trust: None,
+            server: false,
+        }
     }
 
     /// Build from `config` alone: store from `history.uri`, chain from `[estimator]`.
@@ -399,6 +477,46 @@ impl Engine {
     /// The memo.
     pub fn memo(&self) -> &Memo {
         &self.inner.memo
+    }
+
+    /// Forget what this process cached about `key`: its memo entries, and
+    /// its history (marked stale: the next decision refreshes it, waiting at
+    /// most what its budget allows). For callers that know another process
+    /// wrote runs for `key` (a Flyte parent after its children, a Ray driver
+    /// after its workers).
+    pub fn invalidate(&self, key: &WorkloadKey) {
+        self.inner.memo.invalidate_workload(&key.to_string());
+        self.inner.view.invalidate(key);
+    }
+
+    /// The input readers' options: budgets, SSRF guard and the URI salt
+    /// (SPEC §11), as every context this engine builds uses them. Other
+    /// readers in the process (the K8s prefetcher) use these so their
+    /// `uri_hash`es equal the engine's.
+    pub fn read_options(&self) -> &ReadOptions {
+        &self.inner.read_opts
+    }
+
+    /// The input resolver (SSRF guard, `[features] local_paths`).
+    pub fn resolver(&self) -> &Arc<DefaultResolver> {
+        &self.inner.resolver
+    }
+
+    /// The highest trust [`outcome`](Self::outcome) stores.
+    pub fn max_ingest_trust(&self) -> Trust {
+        self.inner.ingest_ceiling
+    }
+
+    /// Cap a record's claimed trust at what this engine ingests and what its
+    /// source can carry (SPEC §8.2). [`outcome`](Self::outcome) does this;
+    /// callers that write through `HistoryStore` directly (importers) call it
+    /// first.
+    pub fn cap_trust(&self, rec: &mut RunRecord) {
+        let cap = self.inner.ingest_ceiling.min(rec.source.max_trust());
+        if rec.trust > cap {
+            tracing::debug!(key = %rec.key, claimed = ?rec.trust, stored = ?cap, "record trust capped at ingestion");
+            rec.trust = cap;
+        }
     }
 
     /// Metrics.
@@ -495,7 +613,14 @@ impl Engine {
                 let (history, available) = match &opts.history {
                     Some(h) => (h.clone(), true),
                     None => {
-                        let r = self.inner.view.history(key, cfg.decision.history_limit, now).await;
+                        // A refresh or a due revalidation may wait up to a
+                        // quarter of what is left of the budget (≤ 25 ms);
+                        // past it the cached history answers (S1).
+                        let mut wait = rightsizer_history::cache::REFRESH_WAIT;
+                        if let Some(d) = deadline {
+                            wait = wait.min(d.saturating_duration_since(Instant::now()) / 4);
+                        }
+                        let r = self.inner.view.history_within(key, cfg.decision.history_limit, wait, now).await;
                         (r.runs, r.available)
                     }
                 };
@@ -713,6 +838,7 @@ impl Engine {
                 ..ConstraintParams::default()
             },
             min_history: cfg.policy.min_history,
+            history_limit: cfg.decision.history_limit,
             need_headroom: cfg.decision.need_headroom,
             point_sigma: cfg.decision.point_sigma,
             can_classify: pol.can_classify.unwrap_or(true),
@@ -1079,10 +1205,39 @@ impl Engine {
     /// Record an outcome: buffered write; join to its decision; attribution;
     /// breaker trips for rightsizer-caused failures that escalation did not
     /// recover; lease close on classification; memo invalidation.
+    ///
+    /// - The record's `trust` is capped ([`cap_trust`](Self::cap_trust)) at
+    ///   `history.max_ingest_trust` and at what its source can carry.
+    /// - A record the store already holds (`PutOutcome::Duplicate`) is a
+    ///   retry or replay: nothing else runs (`report.duplicate`).
+    /// - A `decision_id` joins only a decision of the record's own key (and
+    ///   so tenant); otherwise the record is treated as unjoined.
+    ///
+    /// A record that could not be written now (buffered) is still processed:
+    /// whether it duplicates a stored one is unknown until the retry.
     pub async fn outcome(&self, rec: RunRecord) -> Result<OutcomeReport, EngineError> {
+        self.outcome_with(rec, OutcomeOptions::default()).await
+    }
+
+    /// [`outcome`](Self::outcome) with options.
+    pub async fn outcome_with(&self, mut rec: RunRecord, opts: OutcomeOptions) -> Result<OutcomeReport, EngineError> {
         let cfg = &self.inner.config;
         let now = self.now();
-        let mut report = OutcomeReport { written: self.inner.view.put(Pending::Run(Box::new(rec.clone()))).await, ..Default::default() };
+        self.cap_trust(&mut rec);
+        let mut report = OutcomeReport::default();
+        if opts.prewritten {
+            report.written = true;
+        } else {
+            match self.inner.view.put_run(rec.clone()).await {
+                PutResult::Inserted => report.written = true,
+                PutResult::Duplicate => {
+                    tracing::debug!(key = %rec.key, invocation = %rec.invocation_id, attempt = rec.attempt, "duplicate outcome: already processed");
+                    report.duplicate = true;
+                    return Ok(report);
+                }
+                PutResult::Buffered | PutResult::Dropped => {}
+            }
+        }
         let key_s = rec.key.to_string();
         self.inner.memo.invalidate_workload(&key_s);
         self.inner.view.invalidate(&rec.key);
@@ -1094,6 +1249,18 @@ impl Engine {
                 None => self.store().decision(id).await.ok().flatten(),
             },
             None => None,
+        };
+        // A decision of another key (or tenant) is not this run's: joining it
+        // would let a record borrow another workload's prior, mode and
+        // estimator (attribution, saved hours, estimator breakers).
+        let decision = match decision {
+            Some(d) if d.key != rec.key => {
+                tracing::warn!(key = %rec.key, decision_key = %d.key, decision = %d.id, "outcome names a decision of another key: not joined");
+                self.inner.metrics.error("outcome", "join_key_mismatch");
+                report.join_refused = true;
+                None
+            }
+            d => d,
         };
         if decision.is_some() {
             report.joined = true;

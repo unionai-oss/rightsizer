@@ -37,7 +37,7 @@ from rightsizer_runtime.wire import (
 from . import _units
 from ._errors import CONTROL_FLOW, RightsizerError
 from ._native import core
-from ._storage import apply_storage_options
+from ._storage import object_store_options
 from .types import AXES, Code, Context, Decision, OutcomeReport, Resources, _axes
 
 log = logging.getLogger("rightsizer")
@@ -289,20 +289,21 @@ class Engine:
     ``config``: ``None`` (resolved like ``rsz``: ``RIGHTSIZER_CONFIG``,
     ``./rightsizer.toml``, XDG, ``/etc``, then ``RIGHTSIZER__*``), a path,
     a TOML document, or a dict. ``store`` overrides ``history.uri``;
-    ``storage_options`` (fsspec-style) are exported for Rust's store
-    clients (:mod:`rightsizer._storage`). Raises :class:`RightsizerError`
+    ``storage_options`` (``object_store`` keys or fsspec spellings:
+    credentials, endpoint, region, …) are passed to Rust's store client
+    explicitly — never through ``os.environ`` (:mod:`rightsizer._storage`). Raises :class:`RightsizerError`
     on a configuration error under ``strict`` or an unreadable config.
     """
 
     def __init__(self, config: ConfigArg = None, *, store: Optional[str] = None, role: Optional[str] = None,
                  env_overrides: bool = True, storage_options: Optional[Mapping[str, Any]] = None):
-        if storage_options:
-            apply_storage_options(store, storage_options)
         try:
             c = core()
         except ImportError as e:
             raise RightsizerError(str(e)) from e
-        self._core = c.Engine(_config_text(config), store=store, role=role, env_overrides=env_overrides)
+        opts = object_store_options(store, storage_options) if storage_options else None
+        self._core = c.Engine(_config_text(config), store=store, role=role, env_overrides=env_overrides,
+                              storage_options=opts or None)
 
     @property
     def native(self) -> Any:
@@ -392,6 +393,27 @@ class Engine:
 
     def flush(self) -> int:
         return int(self._core.flush())
+
+    def import_runs(self, records: Iterable[Union[RunRecord, Mapping[str, Any]]]) -> Dict[str, Any]:
+        """Bulk import (backfills): each record is deduplicated against its
+        key's whole stored history (``rightsizer_history::Importer``), so
+        re-importing an overlapping window inserts nothing; attribution,
+        breakers and lease closing run only for inserted records. Returns
+        ``{read, inserted, duplicates, joined, attributions, tripped,
+        leases_closed}``. Raises :class:`RightsizerError` on a store error."""
+        recs = [r.to_dict() if isinstance(r, RunRecord) else dict(r) for r in records]
+        return json.loads(self._core.import_runs(json.dumps(recs)))
+
+    def invalidate(self, key: str) -> None:
+        """Drop cached history and memoized estimates for ``key`` in this
+        process, so the next decision re-reads the store (e.g. after another
+        process wrote outcomes). Never raises."""
+        try:
+            self._core.invalidate(key)
+        except BaseException as e:  # noqa: BLE001 - S1
+            if isinstance(e, CONTROL_FLOW):
+                raise
+            log.warning("rightsizer: invalidate(%s) failed: %s", key, e)
 
     def breaker_status(self) -> List[Dict[str, Any]]:
         return json.loads(self._core.breaker_status())

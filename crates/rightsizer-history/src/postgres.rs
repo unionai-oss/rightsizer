@@ -441,6 +441,18 @@ impl HistoryStore for PostgresStore {
         Ok(())
     }
 
+    async fn run_marker(&self, key: &WorkloadKey) -> Result<Option<String>, StoreError> {
+        // `max(id):count`: a BIGSERIAL id can become visible out of order (a
+        // transaction holding a lower id commits later), which the count
+        // catches; compaction deletes only move the marker (one extra refresh).
+        let c = self.client().await?;
+        let row = c
+            .query_one(&format!("SELECT COALESCE(MAX(id), 0), COUNT(*) FROM {} WHERE key = $1", self.t("runs")), &[&key.to_string()])
+            .await
+            .map_err(pg_err)?;
+        Ok(Some(format!("{}:{}", row.get::<_, i64>(0), row.get::<_, i64>(1))))
+    }
+
     async fn runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError> {
         let lim = limit.min(i64::MAX as usize) as i64;
         let rows = self

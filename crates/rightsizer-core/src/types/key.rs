@@ -11,7 +11,9 @@ use super::TypeError;
 /// from authenticated data (SPEC §4): a `/`-separated path of segments, e.g.
 /// `"prod-us/ml-team"` (K8s `{cluster}/{namespace}`).
 ///
-/// Segments are non-empty and use `[A-Za-z0-9._@+=,-]`.
+/// Segments are non-empty, use `[A-Za-z0-9._@+=,-]`, and are never `.` or
+/// `..` (tenants become store path segments, SPEC §8.1: a dot segment
+/// would let one tenant's paths alias another's or escape its prefix).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
@@ -50,6 +52,8 @@ impl fmt::Display for Tenant {
 
 fn valid_segment(seg: &str) -> bool {
     !seg.is_empty()
+        && seg != "."
+        && seg != ".."
         && seg.len() <= 128
         && seg.bytes().all(|b| b.is_ascii_alphanumeric() || b"._@+=,-".contains(&b))
 }
@@ -68,6 +72,7 @@ fn valid_suffix(s: &str) -> bool {
         && !s.starts_with('/')
         && !s.ends_with('/')
         && !s.contains("//")
+        && s.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
         && s.chars().all(|c| !c.is_control() && !c.is_whitespace())
 }
 
@@ -113,7 +118,7 @@ impl WorkloadKey {
         if !valid_suffix(&suffix) {
             return Err(TypeError::InvalidKey {
                 key: suffix,
-                reason: "suffix must be non-empty, without whitespace, '//' or leading/trailing '/'",
+                reason: "suffix must be non-empty, without whitespace, '//', '.' or '..' segments, or leading/trailing '/'",
             });
         }
         Ok(WorkloadKey { platform, tenant, suffix })
@@ -259,6 +264,34 @@ mod tests {
         ] {
             assert!(WorkloadKey::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    /// Refinement round (item 4): `.` / `..` / empty segments never reach a
+    /// store path, in tenants or suffixes; dots inside a segment are fine.
+    #[test]
+    fn rejects_dot_and_empty_segments() {
+        for t in [".", "..", "a/.", "a/..", "../a", "a//b", "a/", "/a"] {
+            assert!(Tenant::new(t).is_err(), "tenant {t:?}");
+        }
+        for k in [
+            "k8s://../ns/job/x",
+            "k8s://c/../job/x",
+            "k8s://c/./job/x",
+            "k8s://c/ns/job/..",
+            "k8s://c/ns/../x",
+            "k8s://c/ns/./x",
+            "flyte://a/b/c/..",
+            "nomad://dc1/..//job",
+            "nomad://dc1/ns//../job",
+            "nomad://dc1/ns//job/.",
+        ] {
+            assert!(WorkloadKey::parse(k).is_err(), "key {k:?}");
+        }
+        let t = Tenant::new("a.b/..c/d..").unwrap();
+        assert_eq!(t.segments(), 3);
+        assert!(WorkloadKey::new("k8s", Tenant::new("c/ns").unwrap(), "pod/x..y/.hidden").is_ok());
+        assert!(WorkloadKey::new("k8s", Tenant::new("c/ns").unwrap(), "pod/../x").is_err());
+        assert!(serde_json::from_str::<Tenant>("\"a/..\"").is_err());
     }
 
     #[test]

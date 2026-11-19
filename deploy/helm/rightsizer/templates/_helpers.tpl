@@ -23,3 +23,4 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "rightsizer.tlsSecret" -}}{{ include "rightsizer.fullname" . }}-tls{{- end -}}
 {{- define "rightsizer.keySecret" -}}{{ .Values.signingKey.existingSecret | default (printf "%s-signing-key" (include "rightsizer.fullname" .)) }}{{- end -}}
 {{- define "rightsizer.historySecret" -}}{{ .Values.history.postgres.existingSecret | default (printf "%s-history" (include "rightsizer.fullname" .)) }}{{- end -}}
+{{- define "rightsizer.nodeAgentTokenSecret" -}}{{ .Values.nodeAgent.token.existingSecret | default (printf "%s-node-agent-token" (include "rightsizer.fullname" .)) }}{{- end -}}

@@ -29,10 +29,10 @@ pub mod store;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{Config, ConfigEnv, ConfigError, Loaded};
-pub use engine::{BreakerStatus, Engine, EngineBuilder, OutcomeReport, SweepReport, input_bucket};
+pub use engine::{BreakerStatus, Engine, EngineBuilder, OutcomeOptions, OutcomeReport, SweepReport, input_bucket};
 pub use metrics::Metrics;
 pub use replay::{KeyReport, ReplayOptions, ReplayReport, Readiness};
-pub use store::{KeyLister, OpenedStore, StoreView, open_store};
+pub use store::{KeyLister, OpenedStore, PutResult, StoreView, open_store};
 
 /// What the engine decides from (ARCHITECTURE.md §4.1): a full context, or a
 /// seed the engine turns into one (reading input metadata within budget and

@@ -23,6 +23,8 @@ struct Inner {
     breakers: BTreeMap<BreakerScope, BreakerObjects>,
     control: Option<Control>,
     attempts: BTreeMap<(String, String), AttemptRecord>,
+    /// Runs written per key, ever (the run marker; compaction never lowers it).
+    writes: BTreeMap<String, u64>,
 }
 
 /// An in-memory store.
@@ -63,6 +65,7 @@ impl HistoryStore for MemoryStore {
         if !g.seen.insert(dedup_key(rec)) {
             return Ok(PutOutcome::Duplicate);
         }
+        *g.writes.entry(rec.key.to_string()).or_default() += 1;
         let v = g.runs.entry(rec.key.to_string()).or_default();
         v.push(rec.clone());
         crate::sort_newest_first(v);
@@ -75,6 +78,10 @@ impl HistoryStore for MemoryStore {
             g.decisions.push(d.clone()); // same id = the same decision (a retry)
         }
         Ok(())
+    }
+
+    async fn run_marker(&self, key: &WorkloadKey) -> Result<Option<String>, StoreError> {
+        Ok(Some(self.lock()?.writes.get(&key.to_string()).copied().unwrap_or(0).to_string()))
     }
 
     async fn runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError> {

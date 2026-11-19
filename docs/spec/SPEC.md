@@ -141,7 +141,13 @@ plugins.md §5.
     Peaks with `resolution_s ≥ 10` (dstack every 10 s; CloudWatch, Cloud
     Monitoring, Azure Monitor and system tables every 60 s) are **coarse**:
     headroom 1.5, or 1.75 with another digest, and S3(b) needs
-    `2 × min_history` of them.
+    `2 × min_history` of them. **Vetoes:** among the key's newest K runs
+    (K = `history_limit`), no measured success may need more than the
+    proposal (its peak × `scale` × headroom), and no OOM-class run may prove
+    more (its `AtLeast` bound — the peak, else the limit it was killed at;
+    for GPU memory, the device's memory — × `scale`). Vetoes ignore trust.
+    GPU-memory reductions (a smaller device) follow the same rule on
+    `gpu_memory_peak`.
 
   Where memory is **not enforced** by the platform (Ray's logical resources;
   Slurm without `ConstrainRAMSpace`; a Kubernetes container with a memory
@@ -955,7 +961,8 @@ Off by default. With `exploration = ε` (≤ 0.05), incompressible axes go one c
 {prefix}/v1/decisions/{tenant}/{date}/{ulid}.json
 {prefix}/v1/attempts/{tenant}/{key-hash}/{invocation-hash}.json   attempt records and ladder leases (§7.2); expire after 7 d
 {prefix}/v1/latest/{tenant}/{key-hash}.json             pointer: last K records inline + watermark ULID
-{prefix}/v1/breakers/{scope}.json
+{prefix}/v1/breakers/{scope}.json                       resets (operator-written)
+{prefix}/v1/breakers-trips/{scope}/{ulid}.json           trips (client-creatable)
 {prefix}/v1/control/mode.json
 {prefix}/v1/snapshots/{tenant}/{date}.parquet           compacted, for analytics and export
 ```
@@ -987,11 +994,18 @@ the full key string.
 
 **Control objects are operator-written.** `control/` and breaker *resets*
 require operator credentials (a separate prefix policy or postgres role).
-Clients can only create **trip** objects (`breakers/{scope}/trips/{ulid}.json`,
+Clients can only create **trip** objects (`breakers-trips/{scope}/{ulid}.json`,
 `If-None-Match: *`); a breaker is open while any trip is newer than its latest
 operator-written reset. A tenant with shared credentials can therefore trip a
 breaker (which only makes rightsizer more conservative) but never reset one or
-raise `mode_ceiling`.
+raise `mode_ceiling`. The IAM policy is by top-level prefix: clients get
+`PutObject` (create-only) on `{prefix}/v1/breakers-trips/*` and read on
+`{prefix}/v1/breakers/*` and `{prefix}/v1/control/*`; only operators write
+under `breakers/` and `control/`. Trips have their own prefix so no
+tenant-chosen path segment can make a reset path match a client grant.
+`{scope}` is injective (tenants and suffixes have no empty, `.` or `..`
+segments; free-form segments are escaped). Readers also read the N-1 trip
+layout `breakers/{scope}/trips/{ulid}.json`.
 
 **Enforce needs a durable, shared store.** A store that is local to an ephemeral
 or per-host location demotes enforce to recommend, with a warning.
@@ -1003,6 +1017,13 @@ or per-host location demotes enforce to recommend, with a warning.
 | `Verified` | written by a trusted component: the watcher, an importer reading platform accounting (`sacct`, Prometheus, `flyte.remote`), **when the record's tenant comes from the platform's authenticated identity** (namespace, `submit_uid`, CloudTrail `userIdentity`, Modal workspace) | everything |
 | `Authenticated` | written with credentials whose write access is limited to that tenant's prefix (per-tenant IAM on the object-store prefix, or a per-tenant postgres role) | everything |
 | `Unverified` | anything else: self-reports with shared credentials | stored and shown; excluded from floors, trust-region anchors and S3(b), unless the operator sets `history.allow_unverified_for_reductions = true` |
+
+Trust is capped twice. At ingestion, `outcome` stores at most
+`history.max_ingest_trust` (`authenticated` for client engines; `verified`
+for operators and trusted importers: the watcher, `sacct`, `flyte.remote`).
+At read time, a record counts at most at what its `source` can carry:
+`self_report`, `cgroup` and `ray_state` are written with the workload's own
+credentials and count as `authenticated` at most, whatever they claim.
 
 An importer that can attribute a record to a tenant only through
 caller-chosen data (job names, tags, an account-wide default) writes it as

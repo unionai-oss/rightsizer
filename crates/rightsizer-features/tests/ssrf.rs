@@ -125,3 +125,62 @@ async fn http_client_enforces_the_guard() {
     let res = store.get_range(&object_store::path::Path::from("redirect"), 0..4).await;
     assert!(res.is_err());
 }
+
+/// Refinement round (item 7): a presigned HTTP(S) URL is fetched with its
+/// query string (the signature), while its `uri_hash` ignores the query, so
+/// re-signing the same object keeps its identity.
+#[cfg(feature = "http")]
+#[tokio::test]
+async fn presigned_urls_keep_their_query_for_the_fetch_only() {
+    use std::sync::{Arc, Mutex};
+
+    use rightsizer_features::DefaultResolver;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen2 = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else { return };
+            let seen = seen2.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let line = req.lines().next().unwrap_or_default().to_string();
+                seen.lock().unwrap().push(line.clone());
+                let body = b"a,b,c\n1,2,3\n";
+                let signed = line.contains("?X-Amz-Signature=");
+                let resp = if !signed {
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".to_string()
+                } else if req.starts_with("HEAD") {
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nLast-Modified: Wed, 01 Jan 2025 00:00:00 GMT\r\n\r\n", body.len())
+                } else {
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-{}/{}\r\n\r\n{}",
+                        body.len(),
+                        body.len() - 1,
+                        body.len(),
+                        String::from_utf8_lossy(body)
+                    )
+                };
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    let base = format!("http://localhost:{port}/data/x.csv");
+    let url = format!("{base}?X-Amz-Signature=abc&X-Amz-Expires=60");
+    let g = SsrfGuard::new(&["127.0.0.0/8", "::1"]);
+    let r = DefaultResolver::new(g.clone());
+    let o = ReadOptions { use_cache: false, ..ReadOptions::default() }.with_guard(g).with_salt(Some("s".into()));
+    let out = read_inputs_with(&[input(&url)], &r, &o).await;
+    assert_eq!(out[0].bytes, Some(12), "the signed URL was fetched: {:?}", seen.lock().unwrap());
+    assert_eq!(out[0].columns.as_ref().map(|c| c.total), Some(3));
+    assert!(seen.lock().unwrap().iter().all(|l| l.contains("/data/x.csv?X-Amz-Signature=abc&X-Amz-Expires=60 ")), "{:?}", seen.lock().unwrap());
+    // The hash ignores the query: a re-signed URL is the same input.
+    assert_eq!(out[0].uri_hash.as_deref(), Some(rightsizer_features::uri_hash(&base, "s").as_str()));
+    let resigned = format!("{base}?X-Amz-Signature=zzz&X-Amz-Expires=600");
+    assert_eq!(rightsizer_features::uri_hash(&resigned, "s"), rightsizer_features::uri_hash(&url, "s"));
+}

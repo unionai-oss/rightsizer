@@ -514,18 +514,30 @@ impl ObjectHistoryStore {
     /// uncompacted key costs at most that many GETs per read instead of one per
     /// shard. A large `limit` reads every shard above the watermark.
     async fn newest_runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError> {
+        Ok(self.newest_runs_marked(key, limit).await?.0)
+    }
+
+    /// [`Self::newest_runs`] plus the run marker from the same pointer GET
+    /// and LIST: the newest shard's ULID, else the pointer watermark, else
+    /// `""` (no runs).
+    async fn newest_runs_marked(&self, key: &WorkloadKey, limit: usize) -> Result<(Vec<RunRecord>, Option<String>), StoreError> {
         let ptr = self.read_pointer(key).await?;
         let (mut records, watermark) = match &ptr {
             Some((p, _)) => (self.pointer_records(p, &self.rel(&latest_rel(key))), p.watermark),
             None => (Vec::new(), None),
         };
         let shards = self.shard_list(key, watermark).await?;
+        let marker = shards.last().map(|(id, _)| *id).or(watermark).map(|u| u.to_string()).unwrap_or_default();
         let window = limit.saturating_add(limit / 4);
         let skip = shards.len().saturating_sub(window);
         let paths: Vec<String> = shards.into_iter().skip(skip).map(|(_, p)| p).collect();
-        let got: Vec<(String, RunRecord)> = self.get_many_with(paths, HISTORY_READ_CONCURRENCY.max(self.opts.concurrency)).await?;
+        let got: Vec<(String, RunRecord)> = if paths.is_empty() {
+            Vec::new()
+        } else {
+            self.get_many_with(paths, HISTORY_READ_CONCURRENCY.max(self.opts.concurrency)).await?
+        };
         records.extend(got.into_iter().map(|(_, r)| r).filter(|r| &r.key == key));
-        Ok(merge_runs(records, limit))
+        Ok((merge_runs(records, limit), Some(marker)))
     }
 
     // ── compaction lease ────────────────────────────────────────────────
@@ -983,6 +995,41 @@ impl HistoryStore for ObjectHistoryStore {
         self.newest_runs(key, limit).await
     }
 
+    async fn runs_marked(&self, key: &WorkloadKey, limit: usize) -> Result<(Vec<RunRecord>, Option<String>), StoreError> {
+        self.newest_runs_marked(key, limit).await
+    }
+
+    async fn run_marker(&self, key: &WorkloadKey) -> Result<Option<String>, StoreError> {
+        Ok(self.newest_runs_marked(key, 0).await?.1)
+    }
+
+    /// One LIST `start-after` the marker shard (shard ULIDs follow write
+    /// time): any direct child shard newer than it is a change. A writer
+    /// whose clock runs behind the marker's can be missed until the cache
+    /// TTL, as with the pointer watermark (SPEC §8.1).
+    async fn runs_changed_since(&self, key: &WorkloadKey, marker: &str) -> Result<bool, StoreError> {
+        let dir = self.rel(&run_dir_rel(key));
+        let after = if marker.is_empty() { None } else { Some(Ulid::from_string(marker).map_err(|e| StoreError::Other(format!("run marker {marker:?}: {e}")))?) };
+        let offset = after.map(|w| format!("{dir}{w}.json"));
+        let p = Path::from(dir.trim_end_matches('/'));
+        let mut stream = match &offset {
+            Some(o) => self.store.list_with_offset(Some(&p), &Path::from(o.as_str())),
+            None => self.store.list(Some(&p)),
+        };
+        while let Some(m) = stream.next().await {
+            let m = match m {
+                Ok(m) => m,
+                Err(object_store::Error::NotFound { .. }) => return Ok(false),
+                Err(e) => return Err(map_err(&dir, e)),
+            };
+            let loc = m.location.to_string();
+            if loc.len() == dir.len() + 31 && shard_ulid(&loc).is_some_and(|id| after.is_none_or(|w| id > w)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<Decision>, StoreError> {
         let paths = self.decision_paths(filter).await?;
         let limit = filter.limit.unwrap_or(usize::MAX);
@@ -1028,10 +1075,13 @@ impl HistoryStore for ObjectHistoryStore {
         // platform segment); trips are deduplicated by id.
         let mut trips: Vec<Trip> = Vec::new();
         let mut resets: Vec<Reset> = Vec::new();
-        for seg in scope.read_paths() {
-            let base = self.rel(&format!("breakers/{seg}"));
-            resets.extend(self.read_reset(&format!("{base}.json")).await?);
-            let trip_dir = format!("{base}/trips/");
+        for obj in scope.reset_objects() {
+            resets.extend(self.read_reset(&self.rel(&obj)).await?);
+        }
+        // Trips: `breakers-trips/{scope}/` (current), then the N-1
+        // `breakers/{scope}/trips/` directories.
+        for dir in scope.trip_dirs() {
+            let trip_dir = self.rel(&dir);
             let paths: Vec<String> = self
                 .list(&trip_dir, None)
                 .await?
@@ -1053,13 +1103,30 @@ impl HistoryStore for ObjectHistoryStore {
     }
 
     async fn breaker_list(&self) -> Result<Vec<(BreakerScope, BreakerObjects)>, StoreError> {
-        let root = self.rel("breakers/");
+        let root = self.rel(&format!("{}/", rightsizer_core::breaker::RESETS_ROOT));
         let metas = self.list(&root, None).await?;
-        let (trip_paths, reset_paths): (Vec<String>, Vec<String>) =
-            metas.into_iter().map(|m| m.location.to_string()).filter(|p| p.ends_with(".json")).partition(|p| p.contains("/trips/"));
+        // N-1 trips sit under `breakers/{scope}/trips/`; current ones under `breakers-trips/`.
+        // A path is an N-1 trip only if it is `…/trips/{ulid}.json`; one that
+        // looks so but does not decode as a trip (a tenant segment named
+        // `trips`) is read as a reset.
+        let is_trip = |p: &str| shard_ulid(p).is_some() && p.rsplit('/').nth(1) == Some("trips");
+        let (legacy_trips, mut reset_paths): (Vec<String>, Vec<String>) =
+            metas.into_iter().map(|m| m.location.to_string()).filter(|p| p.ends_with(".json")).partition(|p| is_trip(p));
+        let troot = self.rel(&format!("{}/", rightsizer_core::breaker::TRIPS_ROOT));
+        let mut trip_paths: Vec<String> = self.list(&troot, None).await?.into_iter().map(|m| m.location.to_string()).filter(|p| p.ends_with(".json")).collect();
+        trip_paths.extend(legacy_trips.iter().cloned());
+        let got = self.get_many::<Trip>(trip_paths).await?;
+        let decoded: std::collections::HashSet<&str> = got.iter().map(|(p, _)| p.as_str()).collect();
+        reset_paths.extend(legacy_trips.iter().filter(|p| !decoded.contains(p.as_str())).cloned());
         let mut by: BTreeMap<BreakerScope, BreakerObjects> = BTreeMap::new();
-        for (_, t) in self.get_many::<Trip>(trip_paths).await? {
-            by.entry(t.scope.clone()).or_default().trips.push(t);
+        for (_, t) in got {
+            let o = by.entry(t.scope.clone()).or_default();
+            if !o.trips.iter().any(|x| x.id == t.id) {
+                o.trips.push(t);
+            }
+        }
+        for o in by.values_mut() {
+            o.trips.sort_by_key(|t| t.id);
         }
         for p in reset_paths {
             for r in self.read_reset(&p).await? {
@@ -1075,13 +1142,13 @@ impl HistoryStore for ObjectHistoryStore {
         let mut t = trip.clone();
         t.v = self.opts.write_version;
         let data = serde_json::to_vec(&t).map_err(|e| StoreError::Other(e.to_string()))?;
-        let path = self.rel(&format!("breakers/{}/trips/{}.json", trip.scope.path(), trip.id));
+        let path = self.rel(&trip.scope.trip_object(trip.id));
         self.put(&path, data, Mode::Create).await.map(|_| ())
     }
 
     async fn breaker_reset(&self, reset: &Reset) -> Result<(), StoreError> {
         self.opts.role.require_operator("a breaker reset")?;
-        let path = self.rel(&format!("breakers/{}.json", reset.scope.path()));
+        let path = self.rel(&reset.scope.reset_object());
         // Keep the newest reset if an operator replays an older one.
         let existing = self.read_reset(&path).await?;
         if existing.iter().any(|r| r.at > reset.at) {

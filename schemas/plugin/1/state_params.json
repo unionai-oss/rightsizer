@@ -72,7 +72,7 @@
       }
     },
     "Tenant": {
-      "description": "The security principal that owns workloads, derived by the integration\nfrom authenticated data (SPEC §4): a `/`-separated path of segments, e.g.\n`\"prod-us/ml-team\"` (K8s `{cluster}/{namespace}`).\n\nSegments are non-empty and use `[A-Za-z0-9._@+=,-]`.",
+      "description": "The security principal that owns workloads, derived by the integration\nfrom authenticated data (SPEC §4): a `/`-separated path of segments, e.g.\n`\"prod-us/ml-team\"` (K8s `{cluster}/{namespace}`).\n\nSegments are non-empty, use `[A-Za-z0-9._@+=,-]`, and are never `.` or\n`..` (tenants become store path segments, SPEC §8.1: a dot segment\nwould let one tenant's paths alias another's or escape its prefix).",
       "type": "string"
     }
   }

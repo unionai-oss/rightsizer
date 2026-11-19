@@ -224,6 +224,30 @@ pub struct RemoteConfig {
     pub policy_hash: String,
     /// A preconfigured HTTP client (overrides the TLS settings).
     pub client: Option<reqwest::Client>,
+    /// Largest response body read from the server, bytes ([`MAX_BODY_BYTES`]);
+    /// a larger one is a protocol error (a broken or hostile server must not
+    /// make the client buffer without bound).
+    pub max_body_bytes: usize,
+}
+
+/// Default cap on a response body (8 MiB): a batch of `max_batch` estimates
+/// is a few hundred KiB.
+pub const MAX_BODY_BYTES: usize = 8 << 20;
+
+/// Read a response body, refusing more than `max` bytes (checked against
+/// `Content-Length` first, then while streaming).
+async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        return Err(format!("response body of {} bytes exceeds the {max}-byte cap", resp.content_length().unwrap_or(0)));
+    }
+    let mut out: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("reading body: {e}"))? {
+        if out.len() + chunk.len() > max {
+            return Err(format!("response body exceeds the {max}-byte cap"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 impl RemoteConfig {
@@ -249,6 +273,7 @@ impl RemoteConfig {
             memo: None,
             policy_hash: String::new(),
             client: None,
+            max_body_bytes: MAX_BODY_BYTES,
         }
     }
 
@@ -273,6 +298,9 @@ impl RemoteConfig {
         c.max_batch = m.max_batch;
         if let Some(ms) = m.coalesce_ms {
             c.coalesce_window = Duration::from_millis(ms);
+        }
+        if let Some(b) = m.max_body_bytes {
+            c.max_body_bytes = usize::try_from(b).unwrap_or(usize::MAX).max(1024);
         }
         if c.client_cert.is_some() != c.client_key.is_some() {
             return Err("mTLS needs both `client_cert` and `client_key`".into());
@@ -481,7 +509,7 @@ impl RemoteEstimator {
             req = req.bearer_auth(t);
         }
         let info = match req.send().await {
-            Ok(r) if r.status().is_success() => match r.json::<InfoResponse>().await {
+            Ok(r) if r.status().is_success() => match read_capped(r, cfg.max_body_bytes).await.and_then(|b| serde_json::from_slice::<InfoResponse>(&b).map_err(|e| e.to_string())) {
                 Ok(i) => {
                     if i.protocol != PROTOCOL {
                         tracing::warn!(url = %url, protocol = %i.protocol, "remote estimator speaks another protocol");
@@ -756,8 +784,12 @@ impl Inner {
                 }
             })?;
             let status = resp.status().as_u16();
-            let bytes = resp.bytes().await.map_err(|e| {
-                CallError::new(EstimateError::Failed { message: format!("reading body: {e}"), retryable: true }, true, true)
+            let bytes = read_capped(resp, this.cfg.max_body_bytes).await.map_err(|e| {
+                if e.contains("cap") {
+                    CallError::new(EstimateError::Protocol(e), false, true)
+                } else {
+                    CallError::new(EstimateError::Failed { message: e, retryable: true }, true, true)
+                }
             })?;
             if !(200..300).contains(&status) {
                 let detail = serde_json::from_slice::<ErrorBody>(&bytes).ok().map(|b| b.error);

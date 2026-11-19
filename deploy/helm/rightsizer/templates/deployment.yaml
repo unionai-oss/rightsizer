@@ -60,6 +60,7 @@ spec:
             - --node-agent-namespace={{ .Release.Namespace }}
             - --node-agent-port={{ .Values.nodeAgent.port }}
             - --node-agent-selector=app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=node-agent
+            - --node-agent-token-file=/etc/rightsizer/node-agent/token
             {{- end }}
           env:
             - {name: RIGHTSIZER_CONFIG, value: /etc/rightsizer/config/rightsizer.toml}
@@ -92,6 +93,9 @@ spec:
             - {name: config, mountPath: /etc/rightsizer/config, readOnly: true}
             - {name: tls, mountPath: /etc/rightsizer/tls, readOnly: true}
             - {name: keys, mountPath: /etc/rightsizer/keys, readOnly: true}
+            {{- if .Values.nodeAgent.enabled }}
+            - {name: node-agent-token, mountPath: /etc/rightsizer/node-agent, readOnly: true}
+            {{- end }}
       volumes:
         - name: config
           configMap: {name: {{ include "rightsizer.fullname" . }}}
@@ -99,3 +103,7 @@ spec:
           secret: {secretName: {{ include "rightsizer.tlsSecret" . }}}
         - name: keys
           secret: {secretName: {{ include "rightsizer.keySecret" . }}}
+        {{- if .Values.nodeAgent.enabled }}
+        - name: node-agent-token
+          secret: {secretName: {{ include "rightsizer.nodeAgentTokenSecret" . }}, items: [{key: token, path: token}]}
+        {{- end }}

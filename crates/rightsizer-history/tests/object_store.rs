@@ -53,7 +53,7 @@ async fn layout_matches_spec() {
     assert!(f.iter().any(|p| p.starts_with(&format!("v1/runs/flyte/acme/proj/dev/{hash}/")) && p.ends_with(".json")), "{f:?}");
     assert!(f.contains(&format!("v1/decisions/flyte/acme/proj/dev/2023-11-14/{}.json", dec.id)), "{f:?}");
     assert!(f.iter().any(|p| p.starts_with(&format!("v1/attempts/flyte/acme/proj/dev/{hash}/"))));
-    assert!(f.iter().any(|p| p.starts_with("v1/breakers/fleet/trips/")));
+    assert!(f.iter().any(|p| p.starts_with("v1/breakers-trips/fleet/")), "trips under their own top-level prefix");
     assert!(f.contains(&"v1/control/mode.json".to_string()));
     assert!(!f.iter().any(|p| p.ends_with(".lock")), "no lock files left behind");
 }
@@ -360,7 +360,7 @@ async fn breaker_paths_carry_the_platform_and_read_the_legacy_layout() {
     s.breaker_trip(&new).await.unwrap();
     let f = files(d.path());
     let hash = k.hash();
-    assert!(f.contains(&format!("v1/breakers/workload/flyte/acme/proj/dev/{hash}/trips/{}.json", new.id)), "{f:?}");
+    assert!(f.contains(&format!("v1/breakers-trips/workload/flyte/acme/proj/dev/{hash}/{}.json", new.id)), "{f:?}");
     let o = s.breaker_get(&scope).await.unwrap();
     assert_eq!(o.trips.iter().map(|t| t.id).collect::<Vec<_>>(), vec![old.id, new.id], "both layouts read");
     // A reset at the new path closes both.
@@ -592,4 +592,44 @@ async fn breaking_a_stale_lock_admits_one_writer() {
         }
         assert_eq!(wins.len(), 1, "round {round}: winners {wins:?}");
     }
+}
+
+/// Refinement round (item 4): trips are written under `breakers-trips/`,
+/// resets under `breakers/`; trips in the N-1 layout
+/// (`breakers/{scope}/trips/{ulid}.json`) are still read, and a reset whose
+/// path has a `trips` tenant segment is not mistaken for a trip.
+#[tokio::test]
+async fn breaker_trips_layout_and_n_minus_1() {
+    use rightsizer_core::breaker::{BreakerScope, Trip, TripReason};
+    let d = tempfile::tempdir().unwrap();
+    let s = ObjectHistoryStore::local(d.path(), op()).unwrap();
+    let k = rightsizer_core::WorkloadKey::parse("k8s://c1/trips/job/x").unwrap();
+    let w = BreakerScope::Workload { key: k.clone() };
+    let mk = |secs: i64| Trip {
+        v: 1,
+        id: Ulid::from_parts((1_700_000_000_000 + secs * 1000) as u64, secs as u128),
+        scope: w.clone(),
+        at: chrono::DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap(),
+        reason: TripReason::Manual,
+        detail: None,
+    };
+    let t1 = mk(10);
+    s.breaker_trip(&t1).await.unwrap();
+    let new_path = d.path().join(format!("v1/{}", w.trip_object(t1.id)));
+    assert!(new_path.exists(), "{}", new_path.display());
+    assert!(new_path.to_string_lossy().contains("/v1/breakers-trips/"));
+    // An N-1 trip written by an older build.
+    let t0 = mk(5);
+    let old = d.path().join(format!("v1/breakers/{}/trips/{}.json", w.path(), t0.id));
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, serde_json::to_vec(&t0).unwrap()).unwrap();
+    let objs = s.breaker_get(&w).await.unwrap();
+    assert_eq!(objs.trips.iter().map(|t| t.id).collect::<Vec<_>>(), vec![t0.id, t1.id]);
+    // Reset (operator) closes both; the listing sees one scope with both trips and the reset.
+    s.breaker_reset(&rightsizer_core::breaker::Reset { v: 1, scope: w.clone(), at: chrono::DateTime::from_timestamp(1_700_000_100, 0).unwrap(), by: None }).await.unwrap();
+    assert!(!s.breaker_get(&w).await.unwrap().is_open());
+    let list = s.breaker_list().await.unwrap();
+    let (_, o) = list.iter().find(|(sc, _)| sc == &w).unwrap();
+    assert_eq!(o.trips.len(), 2);
+    assert_eq!(o.resets.len(), 1, "the reset under a `trips` tenant segment is read as a reset");
 }

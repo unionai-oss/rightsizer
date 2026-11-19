@@ -155,6 +155,13 @@ async fn mutate(State(s): State<AppState>, name: &'static str, body: axum::body:
     axum::Json(s.admitter.review(name, &review).await)
 }
 
+/// Request body limit of the admission routes. axum's default (2 MB) would
+/// turn the AdmissionReview of a large object (big ConfigMap-like pod specs,
+/// many-container TrainJobs: the API server allows ~3 MiB objects and the
+/// review carries `object` and `oldObject`) into a 413, i.e. a webhook call
+/// failure instead of an admission.
+pub const MAX_REVIEW_BYTES: usize = 16 * 1024 * 1024;
+
 /// The webhook router (without TLS).
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -170,6 +177,7 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route("/metrics", get(|State(s): State<AppState>| async move { ([("content-type", "text/plain; version=0.0.4")], s.admitter.engine().metrics().render()) }))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_REVIEW_BYTES))
         .with_state(state)
 }
 

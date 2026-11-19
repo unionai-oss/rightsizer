@@ -568,6 +568,10 @@ async fn history(cfg: &Config, action: HistoryCmd, out: Format) -> Res {
             let e = engine(cfg, Role::Client).await?;
             let (mut inserted, mut dup) = (0, 0);
             let mut imp = rightsizer_history::Importer::new();
+            // A file can claim any trust: cap it like `outcome` does (SPEC §8.2).
+            for r in recs.iter_mut() {
+                e.cap_trust(r);
+            }
             for r in &recs {
                 match imp.put_run(e.store().as_ref(), r).await.map_err(Fail::other)? {
                     rightsizer_history::PutOutcome::Inserted => inserted += 1,

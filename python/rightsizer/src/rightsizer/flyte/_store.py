@@ -3,9 +3,10 @@ of the Flyte integration that run outside the engine: deploy-time sizing
 (recent input sizes), ``reconcile`` (its singleton lease and deploy
 records) and test tooling.
 
-Uses ``obstore`` (a Flyte dependency) with the same credentials Rust's object
-store reads (``AWS_*``; ``FLYTE_AWS_*`` in task pods via
-:func:`._engine.export_flyte_storage_env`). Local paths and ``file://`` use
+Uses ``obstore`` (a Flyte dependency) with the same explicit store options
+the engine gets (``FLYTE_AWS_*`` in task pods via
+:func:`._engine.flyte_storage_options`, then the ambient ``AWS_*``); nothing
+is written to the environment. Local paths and ``file://`` use
 the filesystem. Layout: SPEC §8.1 (``v1/runs/{platform}/{tenant}/{key-hash}/{ulid}.json``).
 """
 
@@ -20,13 +21,13 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from rightsizer_runtime.record import key_hash, split_key, tenant_path
 from rightsizer_runtime.wire import RunRecord
 
-from ._engine import export_flyte_storage_env
+from ._engine import flyte_storage_options
 
 
 class Store:
     """A store prefix (``s3://bucket/prefix``, ``file:///dir`` or a path)."""
 
-    def __init__(self, uri: str):
+    def __init__(self, uri: str, storage_options: Optional[Dict[str, str]] = None):
         self.uri = uri.rstrip("/")
         p = urllib.parse.urlparse(self.uri)
         self.local: Optional[pathlib.Path] = None
@@ -35,7 +36,6 @@ class Store:
             self.prefix = ""
             self._store = None
             return
-        export_flyte_storage_env()
         from obstore.store import from_url
 
         self.prefix = p.path.strip("/")
@@ -48,7 +48,13 @@ class Store:
                          ("secret_access_key", "AWS_SECRET_ACCESS_KEY"), ("session_token", "AWS_SESSION_TOKEN")):
                 if env.get(e):
                     cfg[k] = env[e]
-            cfg["region"] = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1"
+            explicit = flyte_storage_options() if storage_options is None else dict(storage_options)
+            if explicit.get("allow_http") in ("true", True):
+                client["allow_http"] = True
+            for k, v in explicit.items():
+                if k in ("endpoint", "access_key_id", "secret_access_key", "session_token", "region"):
+                    cfg[k] = v
+            cfg.setdefault("region", env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1")
             if cfg.get("endpoint"):
                 cfg["virtual_hosted_style_request"] = False
                 if str(cfg["endpoint"]).startswith("http://"):

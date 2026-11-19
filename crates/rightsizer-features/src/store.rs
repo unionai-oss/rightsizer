@@ -16,6 +16,46 @@ pub trait StoreResolver: Send + Sync {
     fn resolve(&self, uri: &str) -> Option<(Arc<dyn ObjectStore>, Path)>;
 }
 
+/// Which local paths (bare paths, `file://` URIs) the resolver opens.
+///
+/// Local inputs are read with the reading process's own credentials: a
+/// server (webhook, daemon) that opened whatever path a submitter names
+/// would read its own secrets' metadata on their behalf (a confused deputy,
+/// SPEC §14 item 2). Servers therefore allow none unless configured.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum LocalPaths {
+    /// Any existing path (in-process use: CLI, Python).
+    #[default]
+    Any,
+    /// Only paths under these directories (after resolving symlinks and
+    /// `..`); empty = none.
+    Under(Vec<std::path::PathBuf>),
+}
+
+impl LocalPaths {
+    /// Under `prefixes` (canonicalized when they exist).
+    pub fn under(prefixes: &[std::path::PathBuf]) -> Self {
+        LocalPaths::Under(prefixes.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect())
+    }
+
+    /// No local path.
+    pub fn none() -> Self {
+        LocalPaths::Under(Vec::new())
+    }
+
+    /// Whether `path` may be opened: it must exist, and its canonical form
+    /// (symlinks and `..` resolved) must lie under an allowed directory.
+    pub fn allows(&self, path: &std::path::Path) -> bool {
+        match self {
+            LocalPaths::Any => true,
+            LocalPaths::Under(v) => {
+                let Ok(real) = std::fs::canonicalize(path) else { return false };
+                v.iter().any(|p| real.starts_with(p))
+            }
+        }
+    }
+}
+
 /// Default Hugging Face endpoint; `HF_ENDPOINT` overrides it.
 pub const HF_ENDPOINT: &str = "https://huggingface.co";
 
@@ -61,11 +101,11 @@ impl HfRef {
 ///
 /// | URI | store |
 /// |---|---|
-/// | bare path, `file://` | local filesystem (the path must exist) |
+/// | bare path, `file://` | local filesystem (the path must exist and pass [`LocalPaths`]) |
 /// | `s3://bucket/key` (feature `s3`) | `AmazonS3Builder::from_env()` (`AWS_*`) |
 /// | `gs://bucket/key` (feature `gcs`) | `GoogleCloudStorageBuilder::from_env()` (`GOOGLE_*`) |
 /// | `az://container/key`, `abfs[s]://container@account.dfs.core.windows.net/key` (feature `azure`) | `MicrosoftAzureBuilder::from_env()` (`AZURE_*`) |
-/// | `http(s)://host/path` (feature `http`) | HTTP store whose client enforces the [`SsrfGuard`] |
+/// | `http(s)://host/path` (feature `http`) | HTTP store whose client enforces the [`SsrfGuard`]; a query string (presigned URLs) is kept for the requests |
 /// | `hf://org/model[@rev]` (feature `http`) | HTTP store on `HF_ENDPOINT` (default `https://huggingface.co`), `HF_TOKEN` as a bearer token; path `{org}/{model}/resolve/{rev}` |
 ///
 /// Anything else, or a scheme whose feature is off, resolves to `None`
@@ -74,12 +114,24 @@ impl HfRef {
 pub struct DefaultResolver {
     guard: Arc<SsrfGuard>,
     stores: Mutex<HashMap<String, Arc<dyn ObjectStore>>>,
+    local: LocalPaths,
 }
 
 impl DefaultResolver {
     /// A resolver whose HTTP clients use `guard`.
     pub fn new(guard: SsrfGuard) -> Self {
-        DefaultResolver { guard: Arc::new(guard), stores: Mutex::new(HashMap::new()) }
+        DefaultResolver { guard: Arc::new(guard), stores: Mutex::new(HashMap::new()), local: LocalPaths::Any }
+    }
+
+    /// With a local-path policy (default [`LocalPaths::Any`]).
+    pub fn with_local_paths(mut self, local: LocalPaths) -> Self {
+        self.local = local;
+        self
+    }
+
+    /// The local-path policy.
+    pub fn local_paths(&self) -> &LocalPaths {
+        &self.local
     }
 
     /// The guard HTTP(S) stores enforce.
@@ -98,6 +150,10 @@ impl DefaultResolver {
     }
 
     fn local(&self, fs_path: &std::path::Path) -> Option<(Arc<dyn ObjectStore>, Path)> {
+        if !self.local.allows(fs_path) {
+            tracing::debug!(path = %fs_path.display(), "local input path not allowed ([features] local_paths)");
+            return None;
+        }
         let path = Path::from_filesystem_path(fs_path).ok()?;
         let store = self.cached("file", || Some(Arc::new(LocalFileSystem::new()) as Arc<dyn ObjectStore>))?;
         Some((store, path))
@@ -105,21 +161,10 @@ impl DefaultResolver {
 
     #[cfg(feature = "http")]
     fn http_store(&self, origin: &str, bearer: Option<String>) -> Option<Arc<dyn ObjectStore>> {
+        // Keyed by the bearer too (a different token is another identity).
+        let who = bearer.as_deref().map(|t| rightsizer_core::digest::sha256_hex(t.as_bytes())[..16].to_string()).unwrap_or_default();
         let guard = Arc::clone(&self.guard);
-        self.cached(&format!("http:{origin}"), move || {
-            let mut headers = reqwest::header::HeaderMap::new();
-            if let Some(tok) = bearer
-                && let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {tok}"))
-            {
-                headers.insert(reqwest::header::AUTHORIZATION, v);
-            }
-            let store = object_store::http::HttpBuilder::new()
-                .with_url(origin)
-                .with_http_connector(crate::ssrf::client::GuardedConnector { guard, headers })
-                .build()
-                .ok()?;
-            Some(Arc::new(store) as Arc<dyn ObjectStore>)
-        })
+        self.cached(&format!("http:{origin}#{who}"), move || build_http(origin, bearer, guard))
     }
 }
 
@@ -168,7 +213,15 @@ impl StoreResolver for DefaultResolver {
             }
             #[cfg(feature = "http")]
             "http" | "https" => {
-                let url = url::Url::parse(uri).ok()?;
+                let mut url = url::Url::parse(uri).ok()?;
+                url.set_fragment(None);
+                if url.query().is_some() {
+                    // A presigned URL: the signature lives in the query, which
+                    // the HTTP store keeps only on its base URL. One store per
+                    // URL (not cached: each signature is single-use in spirit).
+                    let store = build_http(url.as_str(), None, Arc::clone(&self.guard))?;
+                    return Some((store, Path::default()));
+                }
                 let origin = url[..url::Position::BeforePath].to_string();
                 let path = Path::from_url_path(url.path()).ok()?;
                 Some((self.http_store(&origin, None)?, path))
@@ -183,6 +236,29 @@ impl StoreResolver for DefaultResolver {
             _ => None,
         }
     }
+}
+
+#[cfg(feature = "http")]
+fn build_http(base: &str, bearer: Option<String>, guard: Arc<SsrfGuard>) -> Option<Arc<dyn ObjectStore>> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(tok) = bearer
+        && let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {tok}"))
+    {
+        headers.insert(reqwest::header::AUTHORIZATION, v);
+    }
+    let store = object_store::http::HttpBuilder::new()
+        .with_url(base)
+        .with_http_connector(crate::ssrf::client::GuardedConnector { guard, headers })
+        .build()
+        .ok()?;
+    Some(Arc::new(store) as Arc<dyn ObjectStore>)
+}
+
+/// A short hash of the credential identity `hf://` reads use (`HF_TOKEN`),
+/// `""` when anonymous: part of the metadata cache key, so one identity's
+/// view of a gated repo is never served to another.
+pub fn hf_identity() -> String {
+    std::env::var("HF_TOKEN").ok().filter(|t| !t.is_empty()).map(|t| rightsizer_core::digest::sha256_hex(t.as_bytes())[..16].to_string()).unwrap_or_default()
 }
 
 /// The Hugging Face endpoint (`HF_ENDPOINT` or [`HF_ENDPOINT`]).
@@ -203,6 +279,44 @@ mod tests {
         assert!(HfRef::parse("hf://org/../x").is_none());
         assert!(HfRef::parse("hf://a/b/c").is_none());
         assert!(HfRef::parse("s3://a/b").is_none());
+    }
+
+    /// Refinement round (item 8): servers open no local path unless
+    /// allowlisted; allowlists are directory prefixes after resolving `..`
+    /// and symlinks.
+    #[test]
+    fn local_path_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("data");
+        let secret = dir.path().join("secret");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&secret).unwrap();
+        let ok = allowed.join("x.parquet");
+        let no = secret.join("key.pem");
+        std::fs::write(&ok, b"PAR1").unwrap();
+        std::fs::write(&no, b"-----").unwrap();
+        let any = DefaultResolver::default();
+        assert!(any.resolve(no.to_str().unwrap()).is_some(), "in-process default: any path");
+        let none = DefaultResolver::default().with_local_paths(LocalPaths::none());
+        assert!(none.resolve(ok.to_str().unwrap()).is_none());
+        assert!(none.resolve(url::Url::from_file_path(&ok).unwrap().as_str()).is_none(), "file:// too");
+        let under = DefaultResolver::default().with_local_paths(LocalPaths::under(std::slice::from_ref(&allowed)));
+        assert!(under.resolve(ok.to_str().unwrap()).is_some());
+        assert!(under.resolve(url::Url::from_file_path(&ok).unwrap().as_str()).is_some());
+        assert!(under.resolve(no.to_str().unwrap()).is_none());
+        let escape = allowed.join("../secret/key.pem");
+        assert!(under.resolve(escape.to_str().unwrap()).is_none(), "`..` escapes are resolved first");
+        #[cfg(unix)]
+        {
+            let link = allowed.join("link.pem");
+            std::os::unix::fs::symlink(&no, &link).unwrap();
+            assert!(under.resolve(link.to_str().unwrap()).is_none(), "a symlink out of the allowlist is refused");
+        }
+        // A sibling directory sharing a string prefix is not under it.
+        let sib = dir.path().join("data-other");
+        std::fs::create_dir_all(&sib).unwrap();
+        std::fs::write(sib.join("y"), b"x").unwrap();
+        assert!(under.resolve(sib.join("y").to_str().unwrap()).is_none());
     }
 
     #[test]

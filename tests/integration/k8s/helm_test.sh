@@ -14,11 +14,12 @@ ko() { echo "FAIL $*"; fails=$((fails + 1)); }
 
 helm lint "$CHART" --set cluster=c >/dev/null && ok "helm lint" || ko "helm lint"
 helm template rs "$CHART" -n rightsizer >/dev/null 2>&1 && ko "cluster is required" || ok "cluster is required"
-for variant in default certmanager full; do
+for variant in default certmanager full agent-existing-secret; do
   case "$variant" in
     default) args=() ;;
     certmanager) args=(--set tls.certManager.enabled=true) ;;
     full) args=(--set nodeAgent.enabled=true --set prometheusRule.enabled=true --set grafanaDashboard.enabled=true --set serviceMonitor.enabled=true --set history.postgres.url=postgres://u:p@db/rsz) ;;
+    agent-existing-secret) args=(--set nodeAgent.enabled=true --set nodeAgent.token.existingSecret=my-agent-token --set nodeAgent.networkPolicy.enabled=false) ;;
   esac
   helm template rs "$CHART" -n rightsizer --set cluster=c "${args[@]}" >"$TMP/$variant.yaml" || { ko "template $variant"; continue; }
   if "$PY" -I - "$TMP/$variant.yaml" "$variant" "$TMP" <<'PYEOF'
@@ -61,6 +62,37 @@ if variant == "full":
     assert ds["containers"][0]["resources"]["requests"] == {"cpu": "10m", "memory": "40Mi"}
     assert ds["hostPID"] is False and ds["volumes"][0]["hostPath"]["path"] == "/sys/fs/cgroup"
     json.loads([c for c in by("ConfigMap") if "rightsizer.json" in c["data"]][0]["data"]["rightsizer.json"])
+if variant in ("full", "agent-existing-secret"):
+    # Node agent auth (kubernetes.md §6.2): a bearer token Secret mounted into
+    # the agents and the watcher; a NetworkPolicy fences the agents' port.
+    secret = "rs-rightsizer-node-agent-token" if variant == "full" else "my-agent-token"
+    ds = by("DaemonSet")[0]["spec"]["template"]["spec"]
+    agent = ds["containers"][0]
+    assert "--token-file=/etc/rightsizer/node-agent/token" in agent["args"], agent["args"]
+    assert not any("allow-unauthenticated" in a for a in agent["args"])
+    vol = [v for v in ds["volumes"] if v["name"] == "node-agent-token"][0]
+    assert vol["secret"]["secretName"] == secret
+    assert {"name": "node-agent-token", "mountPath": "/etc/rightsizer/node-agent", "readOnly": True} in agent["volumeMounts"]
+    pod = dep["spec"]["template"]["spec"]
+    rsz = pod["containers"][0]
+    assert "--node-agent-token-file=/etc/rightsizer/node-agent/token" in rsz["args"], rsz["args"]
+    assert [v for v in pod["volumes"] if v["name"] == "node-agent-token"][0]["secret"]["secretName"] == secret
+    secrets = {s["metadata"]["name"]: s for s in by("Secret")}
+    nps = by("NetworkPolicy")
+    if variant == "full":
+        assert len(secrets[secret]["data"]["token"]) >= 48, "generated token"
+        np = nps[0]["spec"]
+        assert np["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "node-agent"
+        assert np["policyTypes"] == ["Ingress"]
+        (rule,) = np["ingress"]
+        assert rule["ports"] == [{"protocol": "TCP", "port": 9102}]
+        assert rule["from"] == [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "rightsizer", "app.kubernetes.io/instance": "rs",
+                                                                 "app.kubernetes.io/component": "webhook"}}}], rule["from"]
+    else:
+        assert secret not in secrets and not nps, "existing secret: none generated; network policy off"
+elif variant in ("default", "certmanager"):
+    assert not by("NetworkPolicy") and not by("DaemonSet")
+    assert not any(v["name"] == "node-agent-token" for v in dep["spec"]["template"]["spec"]["volumes"])
 cfg = [c for c in by("ConfigMap") if "rightsizer.toml" in c["data"]][0]["data"]["rightsizer.toml"]
 open(f"{tmp}/{variant}.toml", "w").write(cfg)
 print(f"{variant}: {len(docs)} objects")

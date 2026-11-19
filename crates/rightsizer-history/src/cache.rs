@@ -35,6 +35,20 @@
 //!   refresh fills the cache in the background. A fan-out whose outcomes keep
 //!   invalidating a key therefore never waits on a full history read.
 //!
+//! - **Revalidation (cross-process freshness):** history written by another
+//!   process is otherwise invisible until the TTL. With
+//!   [`CacheOptions::revalidate`] set (the engine's `history.revalidate_s`,
+//!   30 s), a hit whose last check is older than that asks the store whether
+//!   the key changed since the entry's run marker
+//!   ([`HistoryStore::runs_changed_since`]: one LIST `start-after` on object
+//!   stores, one indexed query on databases). The check runs as its own task
+//!   (one per key per interval); the reader waits for it, and for the refresh
+//!   it triggers, at most its `wait` ([`CachedStore::history_within`]) and
+//!   otherwise answers from the cached entry. A detected change marks the
+//!   entry stale and calls the [`CachedStore::set_on_change`] hook (the
+//!   engine drops the key's memo entries). A hit with no check due costs a
+//!   clock read.
+//!
 //! [`CachedStore`] also implements [`HistoryStore`] (reads go through the
 //! cache; an unavailable read is `StoreError::Unreachable`), so it can be
 //! used wherever a store is.
@@ -126,11 +140,21 @@ pub struct CacheOptions {
     pub depth: usize,
     /// Cluster scope.
     pub scope: ClusterScope,
+    /// Check a cached key for runs written elsewhere when its last check is
+    /// older than this (`None`: never; only the TTL refreshes).
+    pub revalidate: Option<Duration>,
 }
 
 impl Default for CacheOptions {
     fn default() -> Self {
-        CacheOptions { history_ttl: Duration::from_secs(600), control_ttl: Duration::from_secs(60), capacity: 10_000, depth: 64, scope: ClusterScope::default() }
+        CacheOptions {
+            history_ttl: Duration::from_secs(600),
+            control_ttl: Duration::from_secs(60),
+            capacity: 10_000,
+            depth: 64,
+            scope: ClusterScope::default(),
+            revalidate: None,
+        }
     }
 }
 
@@ -242,8 +266,24 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
     }
 }
 
+/// One key's cached history.
+#[derive(Clone)]
+struct CachedRuns {
+    /// Records, newest first.
+    records: Vec<RunRecord>,
+    /// How many were asked for.
+    fetched: usize,
+    /// The store's run marker taken before the read (`None`: no revalidation).
+    marker: Option<String>,
+    /// Last revalidation (or the fill).
+    checked: Stamp,
+}
+
+/// Called with a key whose history changed in the store (revalidation).
+pub type ChangeHook = Arc<dyn Fn(&WorkloadKey) + Send + Sync>;
+
 /// A caching wrapper around any store.
-type RunsCache = Arc<Mutex<Lru<String, (Vec<RunRecord>, usize)>>>;
+type RunsCache = Arc<Mutex<Lru<String, CachedRuns>>>;
 type HistoryFlight = futures::future::Shared<futures::future::BoxFuture<'static, Result<Arc<Vec<RunRecord>>, String>>>;
 
 pub struct CachedStore {
@@ -259,6 +299,8 @@ pub struct CachedStore {
     stale: Arc<Mutex<std::collections::HashSet<String>>>,
     breakers: Mutex<HashMap<BreakerScope, (BreakerObjects, Stamp)>>,
     control: Mutex<Option<(Option<Control>, Stamp)>>,
+    /// Revalidation hook.
+    on_change: Arc<std::sync::OnceLock<ChangeHook>>,
 }
 
 impl CachedStore {
@@ -279,7 +321,14 @@ impl CachedStore {
             clock,
             breakers: Mutex::new(HashMap::new()),
             control: Mutex::new(None),
+            on_change: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Set the hook called when revalidation finds a key changed in the
+    /// store (once; later calls are ignored).
+    pub fn set_on_change(&self, hook: ChangeHook) {
+        let _ = self.on_change.set(hook);
     }
 
     /// The wrapped store.
@@ -295,12 +344,7 @@ impl CachedStore {
     /// Mark one key's cached history stale: the next read refreshes it (an
     /// in-flight read started before this no longer fills the cache).
     pub fn invalidate_key(&self, key: &WorkloadKey) {
-        let k = key.to_string();
-        self.bump_generation(&k);
-        let present = self.runs.lock().map(|g| g.contains(&k)).unwrap_or(false);
-        if present && let Ok(mut st) = self.stale.lock() {
-            st.insert(k);
-        }
+        mark_stale(&self.generations, &self.inflight, &self.runs, &self.stale, &key.to_string());
     }
 
     /// Drop one key's cached history entirely.
@@ -316,12 +360,7 @@ impl CachedStore {
     }
 
     fn bump_generation(&self, k: &str) {
-        if let Ok(mut g) = self.generations.lock() {
-            *g.entry(k.to_string()).or_insert(0) += 1;
-        }
-        if let Ok(mut g) = self.inflight.lock() {
-            g.remove(k);
-        }
+        bump(&self.generations, &self.inflight, k);
     }
 
     fn generation(gens: &Mutex<HashMap<String, u64>>, k: &str) -> u64 {
@@ -358,18 +397,19 @@ impl CachedStore {
             // key that joins it) forever: past the deadline it is an error, so
             // readers fall back to the cache within its TTL or demote.
             let r = if in_runtime {
-                match tokio::time::timeout(HISTORY_READ_TIMEOUT, inner.runs(&key2, depth)).await {
+                match tokio::time::timeout(HISTORY_READ_TIMEOUT, inner.runs_marked(&key2, depth)).await {
                     Ok(r) => r,
                     Err(_) => Err(StoreError::Unreachable(format!("history read of {key2} timed out after {HISTORY_READ_TIMEOUT:?}"))),
                 }
             } else {
-                inner.runs(&key2, depth).await
+                inner.runs_marked(&key2, depth).await
             };
-            if let Ok(v) = &r
+            if let Ok((v, marker)) = &r
                 && Self::generation(&gens, &k2) == generation
                 && let Ok(mut c) = runs.lock()
             {
-                c.put(k2.clone(), (v.clone(), depth), clock.now());
+                let now = clock.now();
+                c.put(k2.clone(), CachedRuns { records: v.clone(), fetched: depth, marker: marker.clone(), checked: now }, now);
                 if let Ok(mut st) = stale.lock() {
                     st.remove(&k2);
                 }
@@ -379,7 +419,7 @@ impl CachedStore {
             {
                 m.remove(&k2);
             }
-            r.map(Arc::new).map_err(|e| e.to_string())
+            r.map(|(v, _)| Arc::new(v)).map_err(|e| e.to_string())
         };
         let flight: HistoryFlight = match tokio::runtime::Handle::try_current() {
             Ok(h) => {
@@ -437,42 +477,113 @@ impl CachedStore {
         v.iter().filter(|r| self.opts.scope.admits(r.cluster.as_deref())).take(limit).cloned().collect()
     }
 
-    /// History of `key` under the SPEC §8.4 rules.
+    /// History of `key` under the SPEC §8.4 rules (waits up to
+    /// [`REFRESH_WAIT`] for a refresh or revalidation).
     pub async fn history(&self, key: &WorkloadKey, limit: usize) -> HistoryRead {
+        self.history_within(key, limit, REFRESH_WAIT).await
+    }
+
+    /// [`history`](Self::history), waiting at most `wait` for a refresh of
+    /// an invalidated entry or for a due revalidation (callers pass what
+    /// their decision budget allows); past it the cached entry answers and
+    /// the refresh completes in the background. A miss still waits for the
+    /// read (bounded by [`HISTORY_READ_TIMEOUT`] and the caller's own budget).
+    pub async fn history_within(&self, key: &WorkloadKey, limit: usize, wait: Duration) -> HistoryRead {
         let k = key.to_string();
         let cached = self.runs.lock().ok().and_then(|mut g| g.get(&k));
         let now = self.clock.now();
         // A cached entry answers `limit` if it holds that many records, or
         // if its fetch returned fewer than it asked for (nothing more exists).
-        if let Some(((v, fetched), at)) = &cached
+        if let Some((e, at)) = &cached
             && elapsed(now, *at) < self.opts.history_ttl
-            && (v.len() >= limit || v.len() < *fetched)
+            && (e.records.len() >= limit || e.records.len() < e.fetched)
         {
+            let age = elapsed(now, *at);
             let stale = self.stale.lock().map(|st| st.contains(&k)).unwrap_or(false);
             if !stale {
-                return HistoryRead::Cached { records: self.scoped(v, limit), age: elapsed(now, *at) };
+                if let Some(check) = self.revalidation_due(key, &k, e, now) {
+                    // Wait for the check and the refresh it triggers, within `wait`.
+                    let depth = self.opts.depth.max(limit);
+                    let fresh = tokio::time::timeout(wait, async {
+                        match check.await {
+                            Ok(Ok(true)) => self.history_flight(key, &k, depth).await.ok(),
+                            _ => None,
+                        }
+                    })
+                    .await;
+                    if let Ok(Some(v)) = fresh {
+                        return HistoryRead::Fresh(self.scoped(&v, limit));
+                    }
+                }
+                return HistoryRead::Cached { records: self.scoped(&e.records, limit), age };
             }
             // Invalidated: refresh, but answer from the stale entry if the store is slow.
             let depth = self.opts.depth.max(limit);
             let flight = self.history_flight(key, &k, depth);
-            if let Ok(Ok(fresh)) = tokio::time::timeout(REFRESH_WAIT, flight).await {
+            if let Ok(Ok(fresh)) = tokio::time::timeout(wait, flight).await {
                 return HistoryRead::Fresh(self.scoped(&fresh, limit));
             }
-            return HistoryRead::Cached { records: self.scoped(v, limit), age: elapsed(now, *at) };
+            return HistoryRead::Cached { records: self.scoped(&e.records, limit), age };
         }
         let depth = self.opts.depth.max(limit);
         match self.history_flight(key, &k, depth).await {
             Ok(v) => HistoryRead::Fresh(self.scoped(&v, limit)),
-            Err(e) => {
-                tracing::warn!(error = %e, key = %key, "history read failed");
+            Err(err) => {
+                tracing::warn!(error = %err, key = %key, "history read failed");
                 match cached {
-                    Some(((v, _), at)) if elapsed(now, at) < self.opts.history_ttl => {
-                        HistoryRead::Cached { records: self.scoped(&v, limit), age: elapsed(now, at) }
+                    Some((e, at)) if elapsed(now, at) < self.opts.history_ttl => {
+                        HistoryRead::Cached { records: self.scoped(&e.records, limit), age: elapsed(now, at) }
                     }
                     _ => HistoryRead::Unavailable,
                 }
             }
         }
+    }
+
+    /// Start a revalidation of `key` when one is due: claim it (so one check
+    /// runs per key per interval) and spawn the store check as its own task.
+    /// The task marks the entry stale and calls the change hook when the
+    /// store moved past the entry's marker, whether or not anyone waits.
+    fn revalidation_due(&self, key: &WorkloadKey, k: &str, e: &CachedRuns, now: Stamp) -> Option<tokio::task::JoinHandle<Result<bool, StoreError>>> {
+        let every = self.opts.revalidate?;
+        let marker = e.marker.clone()?;
+        if elapsed(now, e.checked) < every {
+            return None;
+        }
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        {
+            let mut g = self.runs.lock().ok()?;
+            let mut claimed = false;
+            g.update(&k.to_string(), |c| {
+                if elapsed(now, c.checked) >= every {
+                    c.checked = now;
+                    claimed = true;
+                }
+            });
+            if !claimed {
+                return None;
+            }
+        }
+        let (inner, gens, inflight, runs, stale, hook) =
+            (self.inner.clone(), self.generations.clone(), self.inflight.clone(), self.runs.clone(), self.stale.clone(), self.on_change.clone());
+        let (key, k) = (key.clone(), k.to_string());
+        Some(handle.spawn(async move {
+            let changed = match tokio::time::timeout(HISTORY_READ_TIMEOUT, inner.runs_changed_since(&key, &marker)).await {
+                Ok(r) => r,
+                Err(_) => Err(StoreError::Unreachable(format!("revalidation of {key} timed out"))),
+            };
+            match &changed {
+                Ok(true) => {
+                    mark_stale(&gens, &inflight, &runs, &stale, &k);
+                    if let Some(h) = hook.get() {
+                        h(&key);
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => tracing::debug!(error = %err, key = %key, "history revalidation failed; the cached entry stands (TTL)"),
+            }
+            changed
+        }))
     }
 
     /// Breaker state, cached 60 s; `Unknown` (treat as open) when unreadable past that.
@@ -551,12 +662,12 @@ impl HistoryStore for CachedStore {
         {
             // Our own writes are visible to our own reads.
             let depth = self.opts.depth;
-            g.update(&rec.key.to_string(), |(v, fetched)| {
-                let mut all = std::mem::take(v);
+            g.update(&rec.key.to_string(), |e| {
+                let mut all = std::mem::take(&mut e.records);
                 all.push(rec.clone());
-                let cap = depth.max(*fetched);
-                *v = merge_runs(all, cap);
-                *fetched = cap;
+                let cap = depth.max(e.fetched);
+                e.records = merge_runs(all, cap);
+                e.fetched = cap;
             });
         }
         Ok(r)
@@ -633,6 +744,30 @@ impl HistoryStore for CachedStore {
     }
     async fn stats(&self) -> Result<StoreStats, StoreError> {
         self.inner.stats().await
+    }
+}
+
+fn bump(gens: &Mutex<HashMap<String, u64>>, inflight: &Mutex<HashMap<String, (u64, HistoryFlight)>>, k: &str) {
+    if let Ok(mut g) = gens.lock() {
+        *g.entry(k.to_string()).or_insert(0) += 1;
+    }
+    if let Ok(mut g) = inflight.lock() {
+        g.remove(k);
+    }
+}
+
+/// Bump `k`'s generation and mark its cached entry stale (if any).
+fn mark_stale(
+    gens: &Mutex<HashMap<String, u64>>,
+    inflight: &Mutex<HashMap<String, (u64, HistoryFlight)>>,
+    runs: &Mutex<Lru<String, CachedRuns>>,
+    stale: &Mutex<std::collections::HashSet<String>>,
+    k: &str,
+) {
+    bump(gens, inflight, k);
+    let present = runs.lock().map(|g| g.contains(&k.to_string())).unwrap_or(false);
+    if present && let Ok(mut st) = stale.lock() {
+        st.insert(k.to_string());
     }
 }
 

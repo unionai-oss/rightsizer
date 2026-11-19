@@ -1,5 +1,7 @@
 //! Process-wide metadata cache: (URI digest, validator) → extracted
 //! metadata, LRU-bounded. Keys hold a SHA-256 of the URI, not the URI.
+//! Entries without a content validator (`hf://` refs, keyed by endpoint and
+//! credential identity) are read with a maximum age ([`HF_METADATA_TTL`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, OnceLock};
@@ -11,12 +13,16 @@ use super::Extracted;
 /// Entries kept before the least recently used is evicted.
 pub const METADATA_CACHE_CAPACITY: usize = 4096;
 
+/// Maximum age of an `hf://` entry (1 h): a revision such as `main` moves,
+/// and access to a gated repo can be revoked.
+pub const HF_METADATA_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 pub(crate) type Key = (String, String);
 
 #[derive(Default)]
 struct Lru {
     tick: u64,
-    map: HashMap<Key, (u64, Extracted)>,
+    map: HashMap<Key, (u64, Extracted, std::time::Instant)>,
     order: BTreeMap<u64, Key>,
 }
 
@@ -29,13 +35,28 @@ fn lock() -> std::sync::MutexGuard<'static, Lru> {
     cache().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Cache key for `uri` at `validator` (ETag, or `size:mtime`).
+/// Cache key for `uri` at `validator` (ETag, or `size:mtime`). HTTP(S)
+/// URIs are keyed without their query ([`crate::privacy::identity_uri`]):
+/// a re-signed presigned URL is the same object.
 pub(crate) fn key(uri: &str, validator: &str) -> Key {
-    (hex::encode(Sha256::digest(uri.as_bytes())), validator.to_string())
+    (hex::encode(Sha256::digest(crate::privacy::identity_uri(uri).as_bytes())), validator.to_string())
 }
 
 pub(crate) fn get(k: &Key) -> Option<Extracted> {
+    get_fresh(k, None)
+}
+
+/// An entry no older than `max_age` (expired entries are dropped).
+pub(crate) fn get_fresh(k: &Key, max_age: Option<std::time::Duration>) -> Option<Extracted> {
     let mut c = lock();
+    if let Some(age) = max_age
+        && c.map.get(k).is_some_and(|e| e.2.elapsed() > age)
+    {
+        if let Some((old, ..)) = c.map.remove(k) {
+            c.order.remove(&old);
+        }
+        return None;
+    }
     c.tick += 1;
     let t = c.tick;
     let (old, value) = {
@@ -53,7 +74,7 @@ pub(crate) fn put(k: Key, v: Extracted) {
     let mut c = lock();
     c.tick += 1;
     let t = c.tick;
-    if let Some((old, _)) = c.map.insert(k.clone(), (t, v)) {
+    if let Some((old, ..)) = c.map.insert(k.clone(), (t, v, std::time::Instant::now())) {
         c.order.remove(&old);
     }
     c.order.insert(t, k);
@@ -94,5 +115,21 @@ mod tests {
         assert!(get(&k0).is_some());
         assert!(get(&key("lru-test://1", "v")).is_none());
         assert!(get(&key("lru-test://0", "other")).is_none());
+    }
+
+    #[test]
+    fn max_age_expires_entries() {
+        let k = key("ttl-test://0", "v");
+        put(k.clone(), Extracted::default());
+        assert!(get_fresh(&k, Some(std::time::Duration::from_secs(60))).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(get_fresh(&k, Some(std::time::Duration::from_millis(5))).is_none(), "expired");
+        assert!(get(&k).is_none(), "and dropped");
+    }
+
+    #[test]
+    fn http_query_is_not_part_of_the_key() {
+        assert_eq!(key("https://h/x.parquet?sig=1", "e"), key("https://h/x.parquet?sig=2", "e"));
+        assert_ne!(key("s3://b/x?1", "e"), key("s3://b/x?2", "e"));
     }
 }

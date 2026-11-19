@@ -1,5 +1,108 @@
 # Implementation notes
 
+This file is the implementation decision log. Each agent appended a section
+for its crate or round as it worked, so the body is grouped by crate and
+round. It is not ordered by date, newest first or otherwise, and later rounds
+sometimes correct earlier sections in place. The two summary sections below,
+**Deviations from the spec** and **Known limitations / open items**, give the
+current state as of 2026-11-19, after the adversarial review round (commit
+`6b831e5`). In the body, items that have since been fixed are struck through
+and marked **resolved**, with the place of the fix. Items tagged "(in
+progress, 2026-11-19)" are being fixed by concurrent work.
+
+## Deviations from the spec
+
+- **Extra crate `rightsizer-engine`.** The spec lists no engine crate. The async orchestration (store, estimator chain, memo, single-flight, budgets) is a separate crate. This keeps `rightsizer-core` sync and free of I/O, and the CLI, daemon, webhook and Python module all share it. [SPEC §10.1](spec/SPEC.md#101-crates), [ARCHITECTURE §2](ARCHITECTURE.md#2-repository-layout); notes: [rightsizer-engine / rsz](#rightsizer-engine--rsz).
+- **Store paths carry the platform.** The tenant path segment is the qualified tenant (`flyte/acme/proj/dev`), and breaker scopes are `workload/{platform}/{tenant}/{hash}` (the legacy path is still read). The key hash is the first 32 hex characters of the SHA-256. [SPEC §8.1](spec/SPEC.md#81-stores); notes: [object-store layout](#object-store-layout-contract-for-rightsizer-history), [history API additions](#api-additions-all-additive-the-engine-can-keep-coding-against-the-existing-trait).
+- **Local-filesystem conditional updates are emulated** with create-only `.lock` objects, because `LocalFileSystem` has no `PutMode::Update`. The emulation is exact among rightsizer processes, but it does not stop outside writers. [SPEC §8.1](spec/SPEC.md#81-stores); notes: [Object store behaviour](#object-store-behaviour).
+- **No code tokens in the export or the snapshots**: no stored artifact carries them. [SPEC §14.1](spec/SPEC.md#141-data-for-the-model-factory); notes: [history deviations](#deviations-and-decisions).
+- **Additive wire extensions** to the §5 types: `Decision.shape`, `RunRecord.origin_prior`, `RunRecord.staged_bytes`, `Constraints.ceiling_reason` and `PlatformState.cpu_granularity`. Holds are `Vec<Hold {axis, reason, detail?}>`. [SPEC §5](spec/SPEC.md#5-data-model-rightsizer-core); notes: [rightsizer-core](#rightsizer-core), [estimators](#rightsizer-estimators), [Ray Rust changes](#rust-changes-additive).
+- **Python wire readers are stricter than serde.** They reject unknown keys unless `allow_unknown=True` (environment payloads pass it), and they check ranges and finiteness. Rust's env-override parser also reads a bare comma list as an array of strings. [SPEC §13.2](spec/SPEC.md#132-versions-and-upgrades); notes: [runtime open items](#open-items-to-reconcile-with-rust).
+- ~~**Python storage credentials reach Rust through environment variables.** `storage_options` are exported to the `AWS_*` variables instead of being passed into Rust.~~ — **resolved**: options are passed explicitly (`StoreOptions`, `[history.storage_options]`, `_core.Engine(storage_options=…)`); nothing is exported. [SPEC §10.3](spec/SPEC.md#103-python-runtime-details); notes: [Round 4 fixes](#round-4-store-options-node-agent-auth-flyte-backfill-dedupe-2026-11-19).
+- **Ray in-task measurement.** The decision travels in a keyword-only `_rightsizer` argument, not a per-task `runtime_env`, which would get its own worker pool. Peaks on reused workers are re-based on the lowest start RSS the worker has seen. They are `AtMost`, not `Exact`, when the task started more than 16 MiB above that RSS. [ray.md §6](spec/ray.md#6-outcomes); notes: [Ray mechanism](#mechanism-ray-2600-as-installed).
+- **The K8s node agent is pulled, not pushed.** The watcher leader sends `GET /v1/containers/{pod_uid}/{container}` to the agent on the node, so the agent holds no store credentials. [kubernetes.md §6.2](spec/kubernetes.md#62-node-agent-optional-m3); notes: [Cluster components](#cluster-components-m2-m3-k8s-parts).
+- **The K8s webhook decides dry-run and logs the decision itself**, so the validation result is in the logged decision. Cross-replica quota reservations ride on decision explanations (`reservation:{json}`), because the store has no key-value API. [kubernetes.md §3.4](spec/kubernetes.md#34-validation-before-emitting-a-patch-s2); notes: [Cluster components](#cluster-components-m2-m3-k8s-parts).
+- **`rightsizer-plugin/1` extensions:** `initialize.protocols`; `initialize` is optional for shims; `status` extras; `DecideParams.{attempt, watch, dry_run}`; the daemon-only methods `lease` and `sign`; error codes `-32003` (forbidden) and `-32004` (no common version). [plugins.md §3.1](spec/plugins.md#31-protocol-rightsizer-plugin1); notes: [`rightsizer-plugin/1` as implemented](#rightsizer-plugin1-as-implemented).
+- **The pointer model's memory basis defaults to `demand`.** The tuner's need cells are converted to demand (÷ 1.05, minus the runtime overhead) instead of being mapped cell to cell. `--memory-basis need` gives the models.md behaviour. [models.md §4](spec/models.md#4-from-option-probabilities-to-an-estimate); notes: [Pointer read-out](#pointer-read-out--estimate).
+- **GPU trees go in a companion file** (`rightsizer-trees-gpu/1`, `<out>.gpu.json`). This is a new format that models.md does not have. [models.md §1](spec/models.md#1-what-is-published-and-how-each-is-served); notes: [Trees](#trees-rightsizer-models-convert).
+
+## Known limitations / open items
+
+Checked against the code at `6b831e5` plus the working tree on 2026-11-19.
+
+**Core / engine**
+- Writes made by other processes are invisible to a running engine until `history.cache_ttl` / `decision.memo_ttl` expire (10 min). Such writes include an import, the K8s watcher and Ray workers. `_core` has no invalidation call, and the watcher's memo pre-warm can memoize a prior decision for a key that has no history yet. Freshness and revalidation are (in progress, 2026-11-19). Notes: [K8s results](#integration-results-k3d-rsz-it-k3s-v1343-2026-11-19), [Ray](#open--for-other-agents).
+- The following are (in progress, 2026-11-19) in the core crates:
+  - trust capping and workload-key validation;
+  - the URI-hash salt: with no salt the hash uses an empty one, so it is deterministic but guessable ([features](#rightsizer-features));
+  - the S3(b) veto rule (S3(b) now counts only the successes that fit; [core](#rightsizer-core));
+  - the `hf://` metadata cache, which serves a moving revision like `main` until eviction;
+  - local-path allowlists for input reads.
+- Fleet and per-estimator-version breakers are evaluated over a 31-day window of attempts that is local to the process (`rightsizer-engine/src/engine.rs`). Each replica sees only its own outcomes. Notes: [Engine behaviour](#engine-behaviour-spec-as-implemented).
+- There is no `Engine::record_decision`. The K8s webhook decides dry-run, logs the decision itself and bumps the metrics by hand. Notes: [Engine / shared changes](#engine--shared-changes-additive).
+- Adapters never set `RunRecord.staged_bytes`: the K8s watcher, the Prometheus importer, `apply --watch` and sacct all write `None`. Estimators then assume today's staging for past runs. Notes: [engine findings](#findings-for-other-crates).
+- The `RIGHTSIZER_DECISION` payload is defined only in Python (`rightsizer_runtime.env`). In Rust, K8s extract checks only that the variable is present. Notes: [runtime open items](#open-items-to-reconcile-with-rust).
+- The Rust `gbt` does not read the `rightsizer-trees-gpu/1` companion, so converted trees give no GPU axis. Notes: [Trees](#trees-rightsizer-models-convert), [round 3 deferred](#integration-round-3-core-set-core-features-estimators-history-engine-rsz-m0).
+
+**History**
+- sqlite always demotes enforce: `SqliteStore::shared()` is hard-coded `false`, and the `[history] durable/shared` overrides are not applied to sqlite (`rightsizer-history/src/{sqlite,factory}.rs`). Notes: [rightsizer-py notes](#notes-for-other-crates--next-round).
+- Snapshots and exports have no code tokens, because the decision log does not keep them.
+- On object stores, `decision(id)` lists the whole `decisions/` tree. That is acceptable for `rsz explain` but not on a hot path.
+
+**Kubernetes**
+- ~~The node agent's HTTP endpoint is unauthenticated, and the webhook uses axum's default 2 MB body limit.~~ — **resolved**: bearer token + NetworkPolicy in the chart; 16 MiB review limit. Notes: [Round 4 fixes](#round-4-store-options-node-agent-auth-flyte-backfill-dedupe-2026-11-19).
+- Karpenter NodePool requirements and tolerations are not in the GPU-type intersection.
+- `rightsizer.io/code-configmap` is recorded but never resolved. `input_credentials = "pod-service-account"` (TokenRequest, [kubernetes.md §4.3](spec/kubernetes.md#43-inputs-and-whose-credentials-read-them)) is not implemented.
+- Kueue: fair sharing and preemption are not modelled, and `coveredResources` in different resource groups are treated independently. Notes: [Not yet / follow-ups](#not-yet--follow-ups).
+- The adapter does not set `manifest.extra.manifest_yaml`, so the pointer model sees a synthesized skeleton instead of the real manifest.
+
+**Slurm**
+- `rsz recommend -p slurm` passes no `PlatformModel` (`rightsizer-cli/src/adapters.rs`), although the daemon uses `SlurmPlatform`. Notes: [Integration points](#integration-points-status-after-round-3).
+- The `gres/gpumem` units are unverified (no GPUs to test on); the importer assumes bytes.
+- Each `sbatch` takes 9.4 ms longer, from spawning `decide-client`. A resident helper or a Lua socket library would remove most of that. Notes: [Slurm e2e](#end-to-end-on-the-docker-cluster-2026-11-19-slurm-26055).
+
+**Flyte**
+- ~~The Python Flyte backfill does not dedupe against the key's full history.~~ — **resolved**: `Engine.import_runs` (`Importer`). Notes: [Round 4 fixes](#round-4-store-options-node-agent-auth-flyte-backfill-dedupe-2026-11-19).
+- ~~`export_flyte_storage_env` exports `AWS_*` variables instead of passing storage options to Rust.~~ — **resolved**: replaced by `flyte_storage_options()` (read-only). Notes: [Round 4 fixes](#round-4-store-options-node-agent-auth-flyte-backfill-dedupe-2026-11-19).
+- The devbox end-to-end run is incomplete. Scenarios b–i, the deploy round trip and the backfill against the devbox never ran. The latest history tuning and the parent pre-warm have never run inside a task image. Notes: [Not finished](#not-finished).
+- Scalar memory treated as enforced was checked on the devbox only; Union deployments may set other platform defaults.
+
+**Ray**
+- The KubeRay tenant variables (`RAY_CLUSTER_NAMESPACE`, `RAY_CLUSTER_NAME`) are assumptions that still need aligning with the K8s webhook. Notes: [Ray open items](#open--for-other-agents).
+- Ray's memory-monitor `OUT_OF_MEMORY` path is verified only in a Linux container; it cannot be produced on macOS.
+
+**Python / models**
+- ~~`rs.configure(storage_options=…)` and `python/rightsizer/src/rightsizer/_storage.py` export credentials to environment variables instead of passing them into Rust ([SPEC §10.3](spec/SPEC.md#103-python-runtime-details)).~~ — **resolved**: notes [Round 4 fixes](#round-4-store-options-node-agent-auth-flyte-backfill-dedupe-2026-11-19).
+- 22 tuner features are not mapped to features-v1: pool and GPU-code numerics, per-dtype column counts, and GPU and peak-CPU history. Notes: [Trees](#trees-rightsizer-models-convert).
+- With the default remote privacy settings (no source, no column names), the pointer model's prompt is far from its training distribution. Serving it usefully needs `send_source = true` and `send = ["columns"]`.
+- SGLang: LoRA together with `return_hidden_states` is unverified (mock only; there is no macOS build).
+
+**Plugins / daemon**
+- The systemd notify and watchdog path has not been run under a real systemd. Notes: [Lifecycle](#lifecycle).
+
+**Test infra**
+- Parity uses a synthetic fixture shaped like k8s-2, because the real k8s-2 rows are not reachable. Notes: [Parity](#parity-m0-exit-criterion).
+- Real vLLM ran only on a tiny random model; Qwen3-1.7B was never downloaded, and SGLang was mocked.
+
+## Contents
+
+- [rightsizer-runtime](#rightsizer-runtime)
+- [Test infrastructure (`tests/infra`)](#test-infrastructure-testsinfra)
+- [rightsizer-core](#rightsizer-core)
+- [rightsizer-features](#rightsizer-features)
+- [rightsizer-history](#rightsizer-history)
+- [rightsizer-estimators](#rightsizer-estimators)
+- [rightsizer-k8s](#rightsizer-k8s)
+- [rightsizer-engine / rsz](#rightsizer-engine--rsz)
+- [rightsizer.models / serve](#rightsizermodels--serve)
+- [rightsizer-plugin: protocol, daemon (`rsz serve`), plugins (M3)](#rightsizer-plugin-protocol-daemon-rsz-serve-plugins-m3)
+- [rightsizer-slurm](#rightsizer-slurm)
+- [Integration round 3](#integration-round-3-core-set-core-features-estimators-history-engine-rsz-m0)
+- [rightsizer-py / `rightsizer` (Python API)](#rightsizer-py--rightsizer-python-api)
+- [rightsizer.ray (M3)](#rightsizerray-m3)
+- [rightsizer.flyte (M1)](#rightsizerflyte-m1)
+- [Round 4: store options, node agent auth, Flyte backfill dedupe](#round-4-store-options-node-agent-auth-flyte-backfill-dedupe-2026-11-19)
+
 ## rightsizer-runtime
 
 Pure-Python package at `python/rightsizer-runtime/` (`rightsizer_runtime`,
@@ -50,7 +153,7 @@ separator, the tenant charset `[A-Za-z0-9._@+=,-]`, and the suffix rules.
 4. **Timestamps** are written as `YYYY-MM-DDTHH:MM:SS.ffffffZ`, always with
    microseconds. Any fractional precision and any `±HH:MM` offset are
    accepted on read.
-5. **`AttemptContext`** is not in Rust yet. Python writes
+5. ~~**`AttemptContext`** is not in Rust yet.~~ — **resolved**: `rightsizer_core::AttemptContext` (`crates/rightsizer-core/src/types/platform.rs`, with `v`). Python writes
    `{"v":1,"invocation_id":…,"attempt":…,"max_attempts"?}`, where `attempt`
    ≥ 1 and `max_attempts` is omitted when unknown.
 6. **`RIGHTSIZER_DECISION` payload** is not in Rust yet:
@@ -92,8 +195,8 @@ separator, the tenant charset `[A-Za-z0-9._@+=,-]`, and the suffix rules.
   *Note:* flyte.md §8.1 describes per-tenant IAM scoping as
   `{prefix}/v1/runs/{org}/{project}/{domain}/`, without the platform
   segment. With this layout the scoped prefix is
-  `{prefix}/v1/runs/flyte/{org}/{project}/{domain}/`. Update flyte.md (or
-  the layout) when the history crate lands.
+  `{prefix}/v1/runs/flyte/{org}/{project}/{domain}/`. ~~Update flyte.md (or
+  the layout) when the history crate lands.~~ — **resolved**: flyte.md §8.1 now gives the `…/v1/runs/flyte/{org}/{project}/{domain}/` prefix.
 - `ulid` is a fresh ULID per shard, not the decision id. It is generated
   once per record and reused on retry, so a retried PUT rewrites the same
   object. ULIDs are monotonic within a millisecond and across clock steps
@@ -153,8 +256,8 @@ on 2026-11-18 (macOS arm64, Docker Desktop 29.7, cgroup v2):
 
 The SDK serializes a scalar as a request only (no limit in the task
 template). The backend sets limit = request when it builds the pod. So on
-this backend a scalar-memory task **is** memory-enforced (`memory_enforced`
-should be true for scalar memory as well as tuples). Recheck against Union
+this backend a scalar-memory task **is** memory-enforced ~~(`memory_enforced`
+should be true for scalar memory as well as tuples)~~ — **resolved**: `[flyte] scalar_memory_enforced` defaults to `true` (`rightsizer-engine` `FlyteConfig`, `rightsizer/flyte/_engine.py`). Recheck against Union
 deployments, which may configure other platform defaults.
 
 OOM as Flyte reports it (task with `memory=("128Mi","128Mi")` allocating 512 MiB):
@@ -248,7 +351,7 @@ Spec ambiguities resolved in `crates/rightsizer-core` (one bullet each):
 - **Breakers.** A caused failure beyond the history's input sizes trips the input-bucket breaker, not the workload breaker, and is left out of rates. Slow-burn needs at least 200 enforced invocations in the window, so a single failure in a small fleet does not trip it (the spec gives no minimum). Only per-workload or input-bucket breakers that were not tripped by hand go half-open. A half-open breaker allows a trial enforce.
 - **Policy.** An unreadable `mode_ceiling` or breaker keeps the mode but blocks reductions (`breaker`). History unavailable past its TTL demotes enforce to recommend and blocks reductions (`store_unreachable`). A non-durable store demotes enforce. An unclassifiable surface keeps enforce for increases and blocks reductions.
 - **`AttemptContext`** carries `"v"` (default 1), to match the Python writer.
-- **Config env overrides** (`rightsizer-engine`) parse values as TOML literals, so a JSON-style `["a","b"]` works but JSON objects do not. A bare comma list becomes an array of strings, which differs from Python's leave-as-string. Typed sections use `deny_unknown_fields`, so typos are errors.
+- **Config env overrides** (`rightsizer-engine`) parse values as TOML literals, so a JSON-style `["a","b"]` works ~~but JSON objects do not~~ — **resolved**: JSON objects and arrays are tried after TOML (`rightsizer-engine/src/config.rs`, integration round 3). A bare comma list becomes an array of strings, which differs from Python's leave-as-string. Typed sections use `deny_unknown_fields`, so typos are errors.
 - **Performance.** `decide` takes about 0.33 ms on rs-grid-v1 with 32 history records, a ladder, a walltime and 10 node shapes (`cargo bench -p rightsizer-core --bench decide`). Computing the context digest inside `decide` adds about 0.1 ms; pass `DecisionInput.context_digest` to skip it.
 
 ## rightsizer-features
@@ -416,8 +519,8 @@ Prometheus importer come later and feed this code through `AdapterEnv`.
   `cluster_queues`, `local_queues`, `resource_flavors`, `runtime_classes`
   (raw K8s objects as JSON), `dry_run`. Settings given to `K8sAdapter::new`
   are the base; `env.settings` keys override them; `env.cluster` overrides
-  `cluster`. The engine's `K8sConfig` (`deny_unknown_fields`) needs the
-  extra keys (or a pass-through table) to be configurable from TOML.
+  `cluster`. ~~The engine's `K8sConfig` (`deny_unknown_fields`) needs the
+  extra keys (or a pass-through table) to be configurable from TOML.~~ — **resolved**: `[k8s] adapter` pass-through table, flattened by `rightsizer_k8s::runtime::settings_map` (integration round 3, item 8).
 - **Trait methods are thin wrappers.** The webhook and CLI use inherent
   methods: `extract_documents` (per object; documents may span namespaces),
   `extract_all` (includes already-sized units with their origin prior),
@@ -731,7 +834,7 @@ kube-free (`cargo xtask deps-check` passes). New pure modules:
   `metrics().recorded/joined/join_ratio`, `attempt_decide`, `outcome`.
 - **Requests**: (1) `Engine::record_decision(&Decision)` so surfaces that
   decide dry-run and finish the decision themselves (validation) are counted
-  like the engine's own writes; (2) a lease-expiry sweep the watcher can call;
+  like the engine's own writes; ~~(2) a lease-expiry sweep the watcher can call;~~ — **resolved**: `Engine::sweep`, called by the watcher's `sweep_loop` (`cluster/watcher.rs`);
   (3) memo/history invalidation for histories written by other processes
   (an import while a webhook runs is invisible to it for up to 10 min —
   the suite seeds before starting the webhook).
@@ -848,7 +951,7 @@ The k8s-2 rows are not reachable (Union run outputs `rt-paper-k2s1-rows`; no rep
 2. ~~Duplicate caches in `StoreView`~~ — **fixed**: `CachedStore::with_clock` + `BufferedWriter`; the engine's copies are deleted. Tests: `cache_ttls_run_on_an_injected_clock`, `deferred_writes_are_queued_untried` (history), the existing `s1_inert_on_store_unreachable_after_ttl` (manual clock).
 3. ~~Key listing~~ — **fixed**: `Engine::keys()`; `rsz shadow --tenant` and `history export --jsonl` work on sqlite and `file://` (CLI test runs both); `json://` removed (`the_interim_json_store_is_gone`). Every backend's `keys()` was already implemented by the history crate.
 4. ~~Two memos~~ — **fixed**: one memo, `rightsizer_estimators::memo::Memo` with single-flight (`memo::tests::ttl_on_the_clock_capacity_invalidation_and_single_flight`, plus the engine's memo/single-flight tests).
-5. Lease-expiry sweep — **fixed** (`Engine::sweep`, `rsz history compact`; `sweep_trips_on_leases_that_expire_open`, `sweep_skips_recovered_invocations`). Still open, owned elsewhere: the Slurm `PlatformModel` for `rsz recommend -p slurm` (rightsizer-slurm) and `rsz history import k8s|slurm|…` importers (adapter crates).
+5. Lease-expiry sweep — **fixed** (`Engine::sweep`, `rsz history compact`; `sweep_trips_on_leases_that_expire_open`, `sweep_skips_recovered_invocations`). Still open, owned elsewhere: the Slurm `PlatformModel` for `rsz recommend -p slurm` (rightsizer-slurm) ~~and `rsz history import k8s|slurm|…` importers (adapter crates)~~ — **resolved** (importers): `rsz history import k8s|slurm|flyte` dispatch in `crates/rightsizer-cli/src/main.rs`; the PlatformModel part is still open.
 
 ### Findings for other crates
 
@@ -1482,9 +1585,9 @@ Tests: `cargo test -p rightsizer-slurm -p rightsizer-plugin -p rightsizer-cli`;
   and kept memory). The e2e sets `prices = { default = 1.0 }` (per node-hour).
 - **CPU is rendered in whole CPUs.** Decisions can say 500m; the adapter
   renders `--cpus-per-task=1`. `sign` and the import's tamper check compare
-  against the decision rounded up to whole CPUs. (Follow-up: give the Slurm
+  against the decision rounded up to whole CPUs. ~~(Follow-up: give the Slurm
   `PlatformRef`/state a whole-CPU request model so decisions say what is
-  rendered.)
+  rendered.)~~ — **resolved**: `PlatformState.cpu_granularity` (Slurm sets 1000m in `rightsizer-slurm/src/platform.rs`; core `decide.rs` `cpu_step`).
 - **`rsz slurm sbatch`** decides in-process (`EngineDecider`: engine + the
   daemon's key ring) when `[slurm] token_key_file` is readable (the daemon
   user; `--local` forces it), else over the socket (`SocketDecider`). Over the
@@ -1578,7 +1681,7 @@ All API changes are additive except where marked. Per item:
 **Deferred (with reason):**
 - Rust `gbt` reading the `rightsizer-trees-gpu/1` companion (models section TODO): a new estimation feature (logistic classifier + `gpu_memory` axis) that needs its own Python parity fixture, not an integration fix.
 - `RIGHTSIZER_DECISION` payload / `AttemptContext` env contracts in Rust (runtime notes 5–7): owned by the Flyte/Python integration.
-- Slurm `PlatformModel` in `rsz recommend -p slurm`, `rsz history import k8s|slurm` importers: adapter crates.
+- Slurm `PlatformModel` in `rsz recommend -p slurm`, ~~`rsz history import k8s|slurm` importers~~: adapter crates. — **resolved** (importers only): `rsz history import k8s|slurm` exist (`crates/rightsizer-cli/src/main.rs`).
 - Exporting code tokens in snapshots (history note): no stored artifact carries tokens; needs the decision log to keep them.
 - Requests for other agents: K8s watcher / importers set `RunRecord.staged_bytes`; wrappers implementing `HistoryStore` must forward `keys()` (a default method: the engine's test `Flaky` did not).
 
@@ -1646,8 +1749,9 @@ fixtures: `RIGHTSIZER_WRITE_FIXTURES=1 cargo test -p rightsizer-py --test wire_f
   text (`0.1` cores = 100m, as Rust sees it).
 - `rs.recommend / arecommend / decide_group / outcome / aoutcome` use a
   default engine from `rs.configure(...)` (built at the first decision;
-  `storage_options` are exported to the env vars `object_store` reads, so
-  Python writes and Rust reads share credentials). Unset `mode` / `risk` /
+  ~~`storage_options` are exported to the env vars `object_store` reads, so
+  Python writes and Rust reads share credentials~~ — **resolved**: passed to
+  Rust explicitly, see [Round 4](#round-4-store-options-node-agent-auth-flyte-backfill-dedupe-2026-11-19)). Unset `mode` / `risk` /
   `estimator` come from the innermost `rs.policy(...)`; an attempt context
   (`rs.attempt_context` / `RIGHTSIZER_ATTEMPT`) routes to `attempt_decide`.
   `rs.outcome` attaches the context's input metadata and code digest.
@@ -1754,9 +1858,9 @@ Wall clock for 10k no-op tasks: 1.06 s plain vs 6.3 s rightsized (the driver's s
 ### Open / for other agents
 - Worker-written records bypass the driver engine's per-key history cache and memo: new evidence is seen after
   `history.cache_ttl` / `decision.memo_ttl` (10 min). `_core` has no invalidation call; the integration tests use 1 s.
-- Core: when the size-scaled floor exceeds a no-platform-state ceiling the core emits `infeasible_floor`, not
+- ~~Core: when the size-scaled floor exceeds a no-platform-state ceiling the core emits `infeasible_floor`, not
   `clamped` (not counted under `no_platform_state`), and its `recommended` memory fell *below* that floor
-  (256Mi with floor 8064Mi, ceiling 1Gi, an ad-hoc check); worth a look in `decide.rs`.
+  (256Mi with floor 8064Mi, ceiling 1Gi, an ad-hoc check); worth a look in `decide.rs`.~~ — **resolved**: clamped with reason `no_platform_state` and `recommended` ≥ the floor (test `no_platform_state_floor_above_prior_is_clamped_not_below_floor`, `crates/rightsizer-core/src/decide/tests.rs`).
 - KubeRay tenant: `RAY_CLUSTER_NAMESPACE` / `POD_NAMESPACE` / the service-account namespace file plus
   `RAY_CLUSTER_NAME`; the env names are assumptions to align with the K8s webhook.
 
@@ -1884,3 +1988,317 @@ deploy round trip, backfill against the devbox) could not run, and the devbox
 container could not be removed. The latest Rust tuning (history read window
 `limit + limit/4`, 64 concurrent GETs) and the parent pre-warm are in the
 source and unit-tested but were never in a task image.
+
+## Round 4: store options, node agent auth, Flyte backfill dedupe (2026-11-19)
+
+### Store options instead of environment variables (SPEC §10.3)
+
+- `rightsizer_history::factory::StoreOptions` (a `BTreeMap<String, String>`,
+  keys case-insensitive) on `StoreConfig.options`, mapped onto the
+  `object_store` builder of the URI's scheme: `s3_builder`, `gcs_builder`,
+  `azure_builder` (public, so tests check the builder config without a
+  network). Keys are anything `object_store`'s `FromStr` accepts
+  (`access_key_id`/`aws_access_key_id`, `secret_access_key`, `session_token`,
+  `endpoint`, `region`, `allow_http`, `virtual_hosted_style_request`,
+  `skip_signature`, `service_account`, `account_name`, `account_key`,
+  `sas_token`, …) plus fsspec spellings (`key`, `secret`, `token`,
+  `endpoint_url`, `region_name`, `anon`). Precedence: options > URI query
+  parameters > the ambient environment (`*Builder::from_env` is still the
+  base; reading the environment is fine, writing it is not). A custom
+  endpoint defaults to path-style requests and an `http://` endpoint to
+  `allow_http` unless the options say otherwise. An unknown key is a
+  configuration error naming the key, never the value. Options are ignored
+  for local, sqlite, postgres and memory stores.
+- **Redaction:** `Debug` and `Serialize` print `***` for every value except
+  an allowlist of non-secret keys (endpoint, region, `allow_http`,
+  addressing style, `skip_signature`, account name, …), so `rsz config show`,
+  `Engine.config`, `_core.Engine.config_json()` and logs never carry
+  credentials. Deserialization accepts strings, booleans and numbers (TOML
+  `allow_http = true`). A serialized config therefore does not round-trip
+  secrets — nothing in the tree re-reads a serialized `Config`.
+- Engine: `[history] storage_options` (`HistoryConfig.storage_options`,
+  skipped when empty; env overrides `RIGHTSIZER__HISTORY__STORAGE_OPTIONS__KEY`
+  work through the generic nested-override path) → `open_store`. This is the
+  only engine change (two lines in `config.rs`, one in `store.rs`).
+- Python: `_core.Engine(config, *, store, role, env_overrides, storage_options)`
+  (a `dict[str, str]`, merged over the config's table key by key);
+  `rightsizer.Engine(..., storage_options=…)` / `rs.configure(storage_options=…)`
+  normalize fsspec spellings with `object_store_options` and pass them
+  through. `apply_storage_options` / `env_for` are gone (they wrote
+  `os.environ`); `rightsizer.object_store_options` replaces the export.
+- `rightsizer_runtime.storage` (stdlib only): `object_store_options` (any
+  spelling → canonical), `fsspec_options` (canonical or fsspec → s3fs /
+  gcsfs / adlfs kwargs: `key`, `secret`, `token`,
+  `client_kwargs.endpoint_url`, `client_kwargs.region_name`,
+  `config_kwargs.s3.addressing_style`, `anon`) and `flyte_storage_options`
+  (`FLYTE_AWS_ENDPOINT`/`_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY` → options;
+  `allow_http` for `http://`, `region = us-east-1` when no `AWS_REGION`;
+  ambient `AWS_ENDPOINT[_URL]` / `AWS_ACCESS_KEY_ID` take precedence, as
+  before). `RunRecordWriter(storage_options=…)` translates through
+  `fsspec_options`; the Flyte child's fsspec fallback writer gets
+  `flyte_storage_options()`.
+- Flyte: `export_flyte_storage_env` is replaced by the read-only
+  `flyte_storage_options()`; `get_engine()` passes it as `storage_options`;
+  `flyte._store.Store` (obstore, deploy/reconcile) takes the same options.
+- Tests: `factory::tests::{store_options_are_redacted,
+  local_store_ignores_object_store_options, s3_options_map_onto_the_builder,
+  gcs_options_map_onto_the_builder, azure_options_map_onto_the_builder}`
+  (`cargo test -p rightsizer-history --features s3,gcs,azure --lib factory`);
+  `python/rightsizer-runtime/tests/test_storage.py`;
+  `python/rightsizer/tests/core/test_storage_import.py` (`os.environ` is
+  unchanged after building an engine with options, after the Flyte engine
+  with `FLYTE_AWS_*` set, and after a writer with options; the local store
+  still reads and writes; options are redacted in `Engine.config`).
+
+### K8s: node agent auth, webhook body limit
+
+- Node agent `/v1/*` requires `Authorization: Bearer <token>`; 401 (with
+  `WWW-Authenticate: Bearer`) otherwise. Compare: SHA-256 of both sides,
+  then an XOR-fold over the digests (no early exit; length does not leak).
+  `/healthz` and `/metrics` stay open (no per-pod data; probes). `rsz
+  node-agent --token-file F` (env `RSZ_NODE_AGENT_TOKEN_FILE`) is required
+  unless `--allow-unauthenticated` (dev only; logs a warning). The watcher
+  sends the token (`rsz webhook serve --node-agent-token-file F`;
+  `NodeAgentClient::with_token`) and logs a warning on 401.
+- Helm: `<release>-node-agent-token` Secret (key `token`, 48 random
+  characters, kept across upgrades with `lookup`, or
+  `nodeAgent.token.existingSecret`), mounted into the DaemonSet and the
+  webhook/watcher Deployment at `/etc/rightsizer/node-agent/token`. A
+  NetworkPolicy (`nodeAgent.networkPolicy.enabled`, default true; extra
+  peers in `nodeAgent.networkPolicy.extraFrom`) admits only this release's
+  `component: webhook` pods to the agent port. Token rotation = replace the
+  Secret and restart both (the token is read at start).
+- Webhook: `DefaultBodyLimit::max(16 MiB)` (`webhook::MAX_REVIEW_BYTES`) on
+  the router; a ~9 MiB AdmissionReview (6 MiB object + 3 MiB oldObject) is
+  admitted, > 16 MiB gets 413.
+- Tests: `node_agent::tests::{samples_need_the_bearer_token,
+  constant_time_compare_and_token_files}`,
+  `tests/admit.rs::webhook_accepts_large_admission_reviews`,
+  `tests/integration/k8s/helm_test.sh` (new `agent-existing-secret` variant;
+  `full` checks the Secret, mounts, flags and the NetworkPolicy).
+  Not re-run on k3d (Docker unavailable this round).
+
+### Flyte backfill dedupe
+
+- `_core.Engine.import_runs(records_json)` → `{read, inserted, duplicates,
+  joined, attributions, tripped, leases_closed}`: `rightsizer_history::Importer`
+  against the key's whole stored history (same as `rsz history import
+  jsonl|slurm|k8s`), then `Engine::outcome` (joins, attribution, breakers,
+  lease closing) only for inserted records, after all are stored; then a
+  flush. `rightsizer.Engine.import_runs(records)` wraps it.
+- `rightsizer.flyte._backfill.backfill` collects every record first and
+  imports in batches of 500 (`import_records`); the report adds `read`,
+  `inserted`, `duplicates`, `attributions`, … (`written` = `inserted`, kept).
+- Tests: `test_import_runs_dedupes_against_the_whole_history`,
+  `test_flyte_backfill_reimport_is_idempotent` (re-import inserts 0).
+
+## Refinement round (safety and trust gaps left by the adversarial review)
+
+Core set (core, engine, features, estimators, history) plus small wiring
+edits in `rightsizer-cli` (`k8s.rs`, `slurm_cmd.rs`, `main.rs`,
+`daemon.rs`) and `rightsizer-k8s/src/cluster/prefetch.rs`. New engine tests:
+`crates/rightsizer-engine/tests/refinement.rs` (13); the key ones were
+checked against the unfixed code (the fix reverted, the test fails).
+
+### 1. `Engine::outcome`: joins and idempotence
+
+- **Join by key.** A `decision_id` joins only a decision whose `key` equals
+  the record's (the tenant is part of the key); otherwise the record is
+  unjoined (`OutcomeReport::join_refused`, metric
+  `rightsizer_errors_total{component="outcome",kind="join_key_mismatch"}`).
+  Before, a record could borrow another tenant's prior, mode and estimator
+  (attribution, saved hours, estimator breakers), whether the decision came
+  from the in-process map or the store.
+- **Duplicates.** `StoreView::put_run` reports `Inserted | Duplicate |
+  Buffered | Dropped`; on `Duplicate` the outcome returns at once
+  (`OutcomeReport::duplicate`): no attribution, breaker trips, fleet /
+  estimator window entry, lease close, saved hours or memo / history
+  invalidation. A buffered write (store down) is still processed (whether it
+  duplicates is unknown until the retry).
+- **Importers that write first** (`rsz history import slurm`: the batch is
+  inserted so attribution sees every attempt) call
+  `Engine::outcome_with(rec, OutcomeOptions { prewritten: true })` for the
+  records the importer *inserted*; duplicates never reach the engine. Every
+  other surface (plugin daemon, K8s watcher and `apply --watch`, Flyte
+  parent and backfill, Ray, Python) calls `outcome`, so a retried or
+  replayed report is a no-op. The daemon's `outcome` result now carries the
+  real `duplicate` flag.
+- Tests: `outcome_does_not_join_a_decision_of_another_key`,
+  `outcome_does_not_join_a_stored_decision_of_another_key`,
+  `duplicate_outcome_runs_nothing_again` (no re-trip after an operator
+  reset, memo kept), `duplicate_success_is_not_counted_twice` (saved hours),
+  `importer_path_processes_inserted_records_once`.
+
+### 2. Trust: ceilings at ingestion, a source matrix at read time
+
+- **Matrix (core).** `OutcomeSource::max_trust()`: `self_report`, `cgroup`,
+  `ray_state` → `authenticated` (written with the workload's credentials);
+  `prometheus`, `sacct`, `flyte_remote`, `watcher`, `importer` → `verified`.
+  `RunRecord::effective_trust() = min(trust, source.max_trust())`, and
+  `safety::trusted` (floors, trust-region anchors, S3(b), GPU anchors,
+  `final_floor`) reads it. `history-peak` and the other estimators do not
+  gate on trust (by design: `Unverified` records are learnable), so nothing
+  changed there. With today's gates (≥ `authenticated`) the cap matters for
+  any `verified`-only consumer; the ingestion cap is what stops a client from
+  storing `verified`.
+- **Ingestion.** `history.max_ingest_trust` (`None` = by role:
+  `authenticated` for client engines, `verified` for operator engines);
+  `EngineBuilder::max_ingest_trust(Trust)` overrides it. `outcome` caps
+  `rec.trust` at min(ceiling, source ceiling); `Engine::cap_trust` does the
+  same for importers that write through `HistoryStore` directly. Wired:
+  `rsz k8s serve` (the watcher) and `rsz k8s apply --watch` → `verified`;
+  `rsz history import slurm` and `… import k8s` (Prometheus) → `verified`,
+  capped before the `Importer` writes; `rsz history import jsonl` caps at
+  the client ceiling. The plugin daemon keeps its own `authenticated` cap.
+- **For the Python side (not changed here):** the `_core` engine is a client
+  engine, so the Flyte `flyte.remote` backfill's `verified` records are now
+  stored as `authenticated` unless its engine config sets
+  `history.max_ingest_trust = "verified"` (both still pass S3(b)).
+- Tests: `safety::tests::trust_matrix_caps_claims_by_source`,
+  `client_engines_store_at_most_authenticated`,
+  `importer_engines_keep_verified_but_not_beyond_the_source`.
+
+### 3. Cross-process freshness
+
+- `HistoryStore` gains `run_marker(key)`, `runs_marked(key, limit)` (marker
+  taken before the read) and `runs_changed_since(key, marker)`, all with
+  defaults (no marker → no revalidation):
+  - object store: marker = newest shard ULID, else the pointer watermark,
+    else `""`; the check is one LIST `start-after` the marker shard (stops at
+    the first newer direct child). Writers whose clocks run behind the
+    marker can be missed until the TTL, as with the pointer watermark.
+  - sqlite: `MAX(rowid_)` (AUTOINCREMENT), check `EXISTS … rowid_ > ?`.
+  - postgres: `max(id):count(*)` (a BIGSERIAL can become visible out of
+    order; the count catches it; compaction only causes one extra refresh).
+  - memory: a per-key write counter.
+- `CachedStore`: entries keep the marker and their last check;
+  `CacheOptions::revalidate` (engine: `history.revalidate_s`, default 30,
+  0 = off). A hit whose last check is older claims the check (one per key per
+  interval) and spawns it; the reader waits for the check and the refresh it
+  triggers at most its `wait` (`history_within`), else answers from the
+  cache and the refresh lands for the next read. A change marks the entry
+  stale and calls the `set_on_change` hook (the engine drops the key's memo
+  entries; the memo key also contains the history head, so a refreshed
+  history never hits an old entry). A hit with no check due costs one clock
+  read.
+- Budget: the decision path waits min(25 ms, ¼ of what is left of the
+  budget) for a refresh or revalidation; a slow store never expires a
+  decision (S1).
+- `Engine::invalidate(key)`: drops the key's memo entries and marks its
+  history stale (for Python: Flyte parents after children, Ray drivers after
+  workers; the binding is the other agent's).
+- Tests: `conformance::*::run_markers_move_on_writes` (every backend),
+  `cache_buffer::revalidation_sees_other_processes_writes` (no store call
+  when no check is due; stale data within the wait; background refresh; one
+  check per interval; store down keeps the entry),
+  `another_processs_runs_are_seen_after_revalidation`,
+  `revalidation_can_be_turned_off`.
+
+### 4. Tenants, keys and breaker paths
+
+- `Tenant` segments and key suffix segments may not be empty, `.` or `..`
+  (`rejects_dot_and_empty_segments`).
+- Breaker trips moved to their own top-level prefix:
+  `{prefix}/v1/breakers-trips/{scope}/{ulid}.json`; resets stay at
+  `breakers/{scope}.json` (`BreakerScope::{trip_object, reset_object,
+  trip_dirs, reset_objects}`, `breaker::{TRIPS_ROOT, RESETS_ROOT}`).
+  Readers also read `breakers/{scope}/trips/` (N-1, both the platform and the
+  legacy platformless scope path); `breaker_list` reads a `…/trips/{ulid}.json`
+  path that does not decode as a trip as a reset.
+- Scope encoding is injective: free-form segments (bucket, estimator id and
+  version) are escaped with `breaker::escape_segment` (`[A-Za-z0-9.-]` kept,
+  a leading `.` and everything else `_HH`); the old lossy sanitizing is the
+  N-1 `legacy_path` for estimator scopes (`estimator/gbt/1.0` is unchanged).
+- IAM (SPEC §8.1): clients `PutObject` (create-only) on
+  `{prefix}/v1/breakers-trips/*`, read on `breakers/*` and `control/*`;
+  operators write `breakers/*` and `control/*`. The N-1 layout needed a
+  `breakers/*/trips/*` grant that a tenant segment named `trips` matched.
+- Tests: `scope_encoding_is_injective_and_trips_are_separate`,
+  `object_store::breaker_trips_layout_and_n_minus_1`, updated
+  `layout_matches_spec` / `breaker_paths_carry_the_platform_and_read_the_legacy_layout`.
+
+### 5. URI salt: one source, no empty salt
+
+- `engine::chain::resolve_salt`: the variable named by `privacy.salt_env`,
+  then `RIGHTSIZER_URI_SALT`, then none. A variable that is set but empty is
+  refused (configuration error under `strict`; otherwise a warning,
+  `rightsizer_errors_total{component="config",kind="empty_salt"}`, and the
+  next source).
+- `Engine::read_options()` / `Engine::resolver()` expose the engine's
+  readers; the K8s prefetcher now reads with them, so its cached
+  `uri_hash`es use the engine's salt (it used `ReadOptions::new`, i.e.
+  `RIGHTSIZER_URI_SALT` only, ignoring `privacy.salt_env`) and its local
+  path policy. `prefetch::run` lost its `allow_hosts` parameter (the
+  engine's `[features] allow_hosts` guard is used).
+- Tests: `empty_salt_is_refused`, `contexts_hash_uris_with_the_engines_salt`.
+
+### 6. S3(b) vetoes (SPEC §2.3 changed)
+
+- `safety::s3b_evidence` / `s3b_gpu_evidence`: allowed only if (i) ≥
+  `min_history` qualifying successes fit (unchanged), (ii) no qualifying
+  success among the newest K = `decision.history_limit` runs needs more than
+  the proposal (peak × scale × headroom), (iii) no OOM-class run among them
+  proves more (`oom_memory_bound`: the peak, else the limit / request it was
+  killed at; GPU: `RunRecord::gpu_oom_bound`, the GPU peak else the
+  requested device's usable memory) × scale. Vetoes ignore trust (a planted
+  record only makes the rule more conservative). `Evidence::veto` says which
+  (`Veto::{Success, Oom}`); the hold detail says "vetoed: …".
+  `S3Params::recent_k` and `DecisionParams::history_limit` carry K (32).
+- Property tests (`safety::tests::props`): allowed ⇒ nothing among the last
+  K needs or proves more; monotone in the proposal; a newer non-fitting run
+  never unlocks a reduction. Unit tests for both vetoes and the GPU variant;
+  engine: `s3b_veto_holds_a_reduction_a_newer_run_disproves`.
+- `replay::would_fail_is_censoring_aware_and_trips_the_simulated_breaker`
+  was reordered: after an OOM proving ≥ 8 GiB, the next decision now holds
+  the prior (the intended change), so the censored-success case is placed
+  before the OOM.
+
+### 7. Features and estimators
+
+- `hf://` metadata cache: keyed by (URI, endpoint, credential identity =
+  first 16 hex of SHA-256(`HF_TOKEN`)), maximum age 1 h
+  (`HF_METADATA_TTL`); expired entries are dropped. HTTP stores are cached per
+  (origin, bearer identity).
+- HTTP(S): a URI with a query string (presigned URL) is fetched with it (one
+  uncached store per URL whose base URL carries the query); `uri_hash` and
+  the metadata-cache key use `privacy::identity_uri` (query and fragment
+  dropped, HTTP(S) only; other schemes keep `?`). Test:
+  `ssrf::presigned_urls_keep_their_query_for_the_fetch_only` (a local
+  server that 403s unsigned requests).
+- Remote estimator: response bodies capped at `max_body_bytes` (8 MiB
+  default, `[estimator.members.X] max_body_bytes`), checked against
+  `Content-Length` and while streaming; over the cap is a protocol error
+  counted by the breaker (`oversized_bodies_are_refused`).
+- `Gbt::load` / `Gbt::try_new` refuse a novelty file whose `features`
+  schema differs from the trees file's (unlabeled = `features-v1`)
+  (`novelty_schema_must_match_the_trees`).
+- `gpu_obs`: a `GpuOom` without a GPU peak is `AtLeast(usable memory of one
+  requested device) × devices` when the accelerator is known
+  (`gpu_oom_without_peak_is_at_least_the_device`).
+
+### 8. Local input paths
+
+- `[features] local_paths = ["/dir", …]` (`FeaturesConfig::local_paths`):
+  bare paths and `file://` URIs open only under these directories, after
+  `canonicalize` (symlinks and `..` resolved). Unset: any path for in-process
+  engines (CLI, Python); none for servers (`EngineBuilder::server(true)`:
+  `rsz k8s serve`, i.e. the webhook and its prefetcher, and `rsz serve`).
+  `[]` denies everywhere. Enforced in `DefaultResolver` (`LocalPaths`).
+- Tests: `store::tests::local_path_policy`,
+  `servers_read_no_local_paths_unless_allowlisted`.
+
+### Measured (M-series laptop, `--quick`)
+
+| bench | before (HEAD 6b831e5) | after |
+|---|---|---|
+| engine `decide/memo-hit/dry-run` | 358 µs | 339 µs |
+| engine `decide/memo-hit/recorded` | 355 µs | 343 µs |
+| core `decide/rs-grid-v1/cpu` | 117.7 µs | 113.7 µs |
+| core `…/cpu/with-digest` | 216.3 µs | 217.0 µs |
+| core `…/gpu` | 169.6 µs | 166.3 µs |
+| core `…/gpu/with-digest` | 277.9 µs | 269.3 µs |
+
+A memo hit with no revalidation due adds one clock read (no measurable
+change; the bench's `MemoryStore` has run markers, so revalidation is on).
+The S3(b) vetoes add one pass over at most K records per evaluated
+proposal (cached per proposal, as before).

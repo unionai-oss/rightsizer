@@ -128,7 +128,11 @@ class FsspecBackend:
         if fs is None:
             import fsspec  # lazy: optional dependency
 
-            fs, root = fsspec.core.url_to_fs(uri, **dict(storage_options or {}))
+            from .storage import fsspec_options
+
+            # Explicit options only (canonical object_store keys or fsspec
+            # spellings); nothing is exported to the environment (SPEC §10.3).
+            fs, root = fsspec.core.url_to_fs(uri, **fsspec_options(uri, storage_options))
         else:
             root = uri.split("://", 1)[1] if "://" in uri else uri
         self.fs = fs
@@ -171,7 +175,11 @@ class RunRecordWriter:
     uri:
         Store prefix: a local path, ``file://…``, or any fsspec URL.
     storage_options:
-        Passed to fsspec (credentials, endpoint, …).
+        Store options (credentials, endpoint, …): canonical ``object_store``
+        keys (``access_key_id``, ``endpoint``, ``region``, … — the same
+        options the Rust engine takes) or fsspec spellings; translated by
+        :func:`rightsizer_runtime.storage.fsspec_options`. Never exported to
+        the environment.
     tenant:
         Optional cross-check: every key written must have this tenant
         (without platform). Per-call ``tenant=`` overrides it.

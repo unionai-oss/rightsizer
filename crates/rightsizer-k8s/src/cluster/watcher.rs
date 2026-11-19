@@ -91,13 +91,21 @@ pub struct NodeAgentClient {
     pub port: u16,
     /// Fixed URL template (`http://{node}:9102`), instead of pod-IP discovery.
     pub url_template: Option<String>,
+    /// Bearer token the agents require (the chart's node-agent Secret).
+    pub token: Option<String>,
 }
 
 impl NodeAgentClient {
     /// A client discovering agent pods by label in `namespace`.
     pub fn new(client: Client, namespace: &str, selector: &str, port: u16, url_template: Option<String>) -> Result<Self, String> {
         let http = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().map_err(|e| e.to_string())?;
-        Ok(NodeAgentClient { http, client, namespace: namespace.into(), selector: selector.into(), port, url_template })
+        Ok(NodeAgentClient { http, client, namespace: namespace.into(), selector: selector.into(), port, url_template, token: None })
+    }
+
+    /// With the bearer token the agents require.
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
     }
 
     async fn base(&self, node: &str) -> Option<String> {
@@ -118,7 +126,15 @@ impl NodeAgentClient {
         if let Some(id) = container_id {
             url.push_str(&format!("?container_id={id}"));
         }
-        let r = self.http.get(url).send().await.ok()?;
+        let mut req = self.http.get(url);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let r = req.send().await.ok()?;
+        if r.status() == reqwest::StatusCode::UNAUTHORIZED {
+            tracing::warn!(node, "node agent refused the token (401): check the node-agent token Secret");
+            return None;
+        }
         if !r.status().is_success() {
             return None;
         }

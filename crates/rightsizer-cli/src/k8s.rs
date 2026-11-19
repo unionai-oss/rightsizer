@@ -153,6 +153,9 @@ struct ServeArgs {
     /// Node agent URL template (`http://{node}:9102`) instead of pod discovery.
     #[arg(long)]
     node_agent_url: Option<String>,
+    /// File holding the node agents' bearer token (the chart's node-agent Secret).
+    #[arg(long, env = "RSZ_NODE_AGENT_TOKEN_FILE")]
+    node_agent_token_file: Option<PathBuf>,
     /// Namespace of the watcher Lease (default `[k8s] lease_namespace`, `POD_NAMESPACE`, `default`).
     #[arg(long)]
     lease_namespace: Option<String>,
@@ -186,6 +189,14 @@ struct NodeAgentArgs {
     /// Poll interval, ms.
     #[arg(long, default_value_t = 1000)]
     interval_ms: u64,
+    /// File holding the bearer token required on `/v1/*` (the chart mounts
+    /// its node-agent Secret here). Required unless `--allow-unauthenticated`.
+    #[arg(long, env = "RSZ_NODE_AGENT_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
+    /// Serve container samples without authentication (development only:
+    /// anyone who can reach the port reads other pods' memory and CPU).
+    #[arg(long)]
+    allow_unauthenticated: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -261,8 +272,14 @@ pub async fn platform(cfg: &Config, args: Vec<String>, out: Format) -> Res {
         }
         Top::Webhook { action: WebhookCmd::RotateKey { key_file, secret, keep } } => rotate_key(cfg, key_file, secret, keep).await,
         Top::NodeAgent(a) => {
+            let token = match (&a.token_file, a.allow_unauthenticated) {
+                (Some(p), _) => Some(cluster::node_agent::read_token(p).map_err(Fail::config)?),
+                (None, true) => None,
+                (None, false) => return Err(Fail::config("node-agent: --token-file (or RSZ_NODE_AGENT_TOKEN_FILE) is required; --allow-unauthenticated for development")),
+            };
             let client = kube_client().await?;
             let o = cluster::node_agent::AgentOptions {
+                token,
                 node: a.node_name,
                 cgroup_root: a.cgroup_root,
                 interval: Duration::from_millis(a.interval_ms.max(100)),
@@ -346,7 +363,10 @@ async fn rotate_key(cfg: &Config, key_file: Option<PathBuf>, secret: Option<Stri
 
 async fn serve(cfg: &Config, a: ServeArgs) -> Res {
     let k = cfg_k8s(cfg);
-    let engine = Engine::builder(cfg.clone()).role(Role::Client).build().await.map_err(Fail::config)?;
+    // One engine for the webhook (a server: no local input paths, SPEC §14)
+    // and the watcher (the only outcome writer here; its records come from
+    // the API server's authenticated namespaces: `verified`, SPEC §8.2).
+    let engine = Engine::builder(cfg.clone()).role(Role::Client).server(true).max_ingest_trust(rightsizer_core::Trust::Verified).build().await.map_err(Fail::config)?;
     if let Some(e) = engine.config_error() {
         eprintln!("rsz: warning: {e}; every admission keeps the prior (S1)");
     }
@@ -371,7 +391,7 @@ async fn serve(cfg: &Config, a: ServeArgs) -> Res {
     let admitter = Arc::new(
         Admitter::new(engine.clone(), adapter, base.clone(), Arc::new(view.clone()) as Arc<dyn ClusterView>, opts).with_prefetch(tx, cache.clone()).with_shared_ledger(shared),
     );
-    tokio::spawn(prefetch::run(rx, cache, engine.clone(), k.inputs.allow.clone(), cfg.features.allow_hosts.clone()));
+    tokio::spawn(prefetch::run(rx, cache, engine.clone(), k.inputs.allow.clone()));
     if let Some(p) = &k.signing_key_file {
         webhook::spawn_key_reload(admitter.clone(), p.clone(), Duration::from_secs(10));
     }
@@ -380,7 +400,9 @@ async fn serve(cfg: &Config, a: ServeArgs) -> Res {
         let node_agent = match (&a.node_agent_namespace, &a.node_agent_url) {
             (None, None) => None,
             (ns, url) => Some(
-                watcher::NodeAgentClient::new(client.clone(), ns.as_deref().unwrap_or("default"), &a.node_agent_selector, a.node_agent_port, url.clone()).map_err(Fail::config)?,
+                watcher::NodeAgentClient::new(client.clone(), ns.as_deref().unwrap_or("default"), &a.node_agent_selector, a.node_agent_port, url.clone())
+                    .map_err(Fail::config)?
+                    .with_token(a.node_agent_token_file.as_deref().map(cluster::node_agent::read_token).transpose().map_err(Fail::config)?),
             ),
         };
         let wc = watcher::WatcherConfig {
@@ -553,7 +575,8 @@ pub async fn apply(cfg: &Config, file: &str, out_path: Option<PathBuf>, diff: bo
     let adapter = K8sAdapter::new(rightsizer_k8s::K8sSettings::from_env(&env).map_err(Fail::config)?).with_keys(
         runtime::load_keys(cfg.k8s.signing_key_file.as_ref().expect("checked")).map_err(Fail::config)?,
     );
-    let engine = Engine::builder(cfg.clone()).role(Role::Client).build().await.map_err(Fail::config)?;
+    // `--watch` records come from the API server (`live::watch`): verified.
+    let engine = Engine::builder(cfg.clone()).role(Role::Client).max_ingest_trust(rightsizer_core::Trust::Verified).build().await.map_err(Fail::config)?;
     let exs = adapter.extract_documents(&native, &env).map_err(|e| Fail::parse(e.to_string()))?;
     if watch {
         if objs.len() != 1 || objs[0].get("kind").and_then(Value::as_str) != Some("Job") {
@@ -644,9 +667,14 @@ pub async fn import(cfg: &Config, args: Vec<String>, out: Format) -> Res {
         }
         return Ok(());
     }
-    let e = Engine::builder(cfg.clone()).role(Role::Client).build().await.map_err(Fail::config)?;
+    // Prometheus is platform accounting: a trusted importer (SPEC §8.2).
+    let e = Engine::builder(cfg.clone()).role(Role::Client).max_ingest_trust(rightsizer_core::Trust::Verified).build().await.map_err(Fail::config)?;
     let (mut ins, mut dup) = (0, 0);
     let mut imp = rightsizer_history::Importer::new();
+    let mut recs = recs;
+    for r in recs.iter_mut() {
+        e.cap_trust(r);
+    }
     for r in &recs {
         match imp.put_run(e.store().as_ref(), r).await.map_err(Fail::other)? {
             rightsizer_history::PutOutcome::Inserted => ins += 1,

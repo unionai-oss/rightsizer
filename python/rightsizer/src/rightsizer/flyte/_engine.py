@@ -6,8 +6,10 @@ decision. Nothing lives on tasks: they stay plain, picklable data.
 - **Store**: ``RIGHTSIZER__HISTORY__URI``, else ``{scheme}://{bucket}/rightsizer``
   from the action's raw data path (flyte.md §8.1).
 - **Credentials**: Flyte's own object-store settings (``FLYTE_AWS_*`` in task
-  pods) are exported as the ``AWS_*`` variables Rust's object store reads,
-  unless they are already set (SPEC §10.3).
+  pods) are passed to the engine as explicit store options
+  (``storage_options``), never exported to ``os.environ`` — the user's own
+  boto3/s3fs clients in this process keep their identity (SPEC §10.3).
+  ``AWS_*`` variables already set take precedence.
 - **Failures**: a missing native module or a config error is remembered;
   every decision then keeps the prior (S1).
 """
@@ -18,7 +20,7 @@ import collections
 import logging
 import os
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 log = logging.getLogger("rightsizer.flyte")
 
@@ -33,29 +35,12 @@ counters: Dict[str, int] = {"clamped_no_platform_state": 0, "budget_expired": 0,
 latencies_ms: "collections.deque[float]" = collections.deque(maxlen=100_000)
 
 
-def export_flyte_storage_env(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """``FLYTE_AWS_*`` → ``AWS_*`` (only unset variables). Returns what was set."""
-    env = os.environ if environ is None else environ
-    out: Dict[str, str] = {}
-    pairs = (
-        ("FLYTE_AWS_ENDPOINT", "AWS_ENDPOINT"),
-        ("FLYTE_AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
-        ("FLYTE_AWS_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
-    )
-    for src, dst in pairs:
-        v = env.get(src)
-        if v and not env.get(dst):
-            env[dst] = v
-            out[dst] = v
-    ep = env.get("AWS_ENDPOINT", "")
-    if ep:
-        if ep.startswith("http://") and not env.get("AWS_ALLOW_HTTP"):
-            env["AWS_ALLOW_HTTP"] = "true"
-            out["AWS_ALLOW_HTTP"] = "true"
-        if not env.get("AWS_REGION") and not env.get("AWS_DEFAULT_REGION"):
-            env["AWS_REGION"] = "us-east-1"
-            out["AWS_REGION"] = "us-east-1"
-    return out
+def flyte_storage_options(environ: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    """Flyte's object-store settings (``FLYTE_AWS_*``) as store options for
+    the engine and the record writer. Reads the environment; writes nothing."""
+    from rightsizer_runtime.storage import flyte_storage_options as _opts
+
+    return _opts(environ)
 
 
 def resolve_store(raw_data_path: Optional[str] = None) -> Optional[str]:
@@ -72,6 +57,17 @@ def _raw_data_path() -> Optional[str]:
         return c.raw_data_path.path if c and c.raw_data_path is not None else None
     except Exception:
         return None
+
+
+def importer_engine() -> Any:
+    """A fresh engine for backfills (``rsz history import flyte``): operator
+    role, so records read from ``flyte.remote`` — platform accounting with the
+    platform's own tenant — are stored as ``verified`` (SPEC §8.2) instead of
+    being capped at the client ceiling (``authenticated``)."""
+    from .._engine import Engine
+
+    store = None if os.environ.get("RIGHTSIZER__HISTORY__URI") else resolve_store(_raw_data_path())
+    return Engine(None, store=store, role="operator", storage_options=flyte_storage_options() or None)
 
 
 def get_engine() -> Any:
@@ -92,10 +88,9 @@ def get_engine() -> Any:
         try:
             from .._engine import Engine
 
-            export_flyte_storage_env()
             store = None if os.environ.get("RIGHTSIZER__HISTORY__URI") else resolve_store(_raw_data_path())
             st["store"] = store or os.environ.get("RIGHTSIZER__HISTORY__URI")
-            st["engine"] = Engine(None, store=store)
+            st["engine"] = Engine(None, store=store, storage_options=flyte_storage_options() or None)
             err = st["engine"].config_error
             if err:
                 log.warning("rightsizer: engine configuration error (decisions keep the prior): %s", err)
@@ -134,4 +129,4 @@ def reset_for_tests(engine: Any = None, error: Optional[BaseException] = None) -
     latencies_ms.clear()
 
 
-__all__ = ["counters", "latencies_ms", "export_flyte_storage_env", "flyte_config", "get_engine", "reset_for_tests", "resolve_store"]
+__all__ = ["counters", "latencies_ms", "flyte_storage_options", "flyte_config", "get_engine", "reset_for_tests", "resolve_store"]

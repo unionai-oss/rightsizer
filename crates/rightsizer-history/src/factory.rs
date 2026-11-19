@@ -4,7 +4,7 @@
 //! |---|---|
 //! | `memory://` | [`crate::MemoryStore`] (tests; not durable) |
 //! | `/path`, `./path`, `file:///path` | object store on a local directory |
-//! | `s3://bucket/prefix?endpoint=…&region=…&allow_http=true` | S3 or S3-compatible (MinIO, R2), feature `s3`; credentials from the environment |
+//! | `s3://bucket/prefix?endpoint=…&region=…&allow_http=true` | S3 or S3-compatible (MinIO, R2), feature `s3`; credentials from [`StoreOptions`], else the environment |
 //! | `gs://bucket/prefix` | GCS, feature `gcs` |
 //! | `az://container/prefix?account=…` (also `azure://`, `abfs://`) | Azure Blob, feature `azure` |
 //! | `sqlite:///abs/path.db`, `sqlite:rel.db`, `sqlite::memory:` | sqlite, feature `sqlite` |
@@ -12,7 +12,18 @@
 //!
 //! The engine maps its `[history]` config onto [`StoreConfig`] (this crate
 //! does not depend on the engine).
+//!
+//! **Store options** (SPEC §10.3): integrations pass the storage options they
+//! resolved for their own writes (Flyte's object-store settings, fsspec
+//! `storage_options`) as [`StoreOptions`], mapped onto the `object_store`
+//! builder of the URI's scheme. Nothing is read from or written to the
+//! process environment on their behalf (the builders still start from the
+//! ambient credential chain, `*Builder::from_env`, which explicit options
+//! override). Values are never logged: `Debug` and `Serialize` redact every
+//! value except a short allowlist of non-secret settings (endpoint, region,
+//! `allow_http`, …).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -41,6 +52,9 @@ pub struct StoreConfig {
     pub check_duplicates_on_write: bool,
     /// Compaction holder id (default `{host}-{pid}-{ulid}`).
     pub holder: Option<String>,
+    /// Object-store options (credentials, endpoint, region, …) for `s3://`,
+    /// `gs://` and `az://` URIs. Redacted in `Debug` / `Serialize`.
+    pub options: StoreOptions,
 }
 
 impl Default for StoreConfig {
@@ -54,6 +68,7 @@ impl Default for StoreConfig {
             allow_network_fs: false,
             check_duplicates_on_write: true,
             holder: None,
+            options: StoreOptions::default(),
         }
     }
 }
@@ -68,6 +83,232 @@ impl StoreConfig {
         self.role = role;
         self
     }
+    /// With object-store options.
+    pub fn options(mut self, options: StoreOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
+// ── store options ──────────────────────────────────────────────────────
+
+/// Object-store options: `object_store` configuration keys (any spelling its
+/// `FromStr` accepts: `aws_access_key_id` or `access_key_id`, `endpoint`,
+/// `region`, `session_token`, `allow_http`, `virtual_hosted_style_request`,
+/// `skip_signature`, `google_service_account`/`service_account_key`,
+/// `azure_storage_account_name`/`account_name`, `account_key`, `sas_token`,
+/// …) plus the common fsspec spellings (`key`, `secret`, `token`,
+/// `endpoint_url`, `region_name`, `anon`). Keys are case-insensitive.
+///
+/// Values are secrets unless the key is on a short non-secret allowlist:
+/// `Debug` and `Serialize` print `***` for them (so `rsz config show` and
+/// logs never carry credentials). Read the values with [`StoreOptions::get`]
+/// / [`StoreOptions::iter`].
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct StoreOptions(BTreeMap<String, String>);
+
+/// Keys whose values are not secret (shown by `Debug` / `Serialize`).
+const NON_SECRET: &[&str] = &[
+    "endpoint",
+    "endpoint_url",
+    "aws_endpoint",
+    "aws_endpoint_url",
+    "region",
+    "region_name",
+    "aws_region",
+    "aws_default_region",
+    "default_region",
+    "allow_http",
+    "aws_allow_http",
+    "azure_allow_http",
+    "virtual_hosted_style_request",
+    "aws_virtual_hosted_style_request",
+    "skip_signature",
+    "aws_skip_signature",
+    "anon",
+    "account_name",
+    "azure_storage_account_name",
+    "use_emulator",
+    "azure_storage_use_emulator",
+    "project",
+];
+
+impl StoreOptions {
+    /// Empty.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Set `key` (lower-cased) to `value`.
+    pub fn insert(&mut self, key: impl AsRef<str>, value: impl Into<String>) {
+        self.0.insert(key.as_ref().trim().to_ascii_lowercase(), value.into());
+    }
+    /// With `key` = `value`.
+    pub fn with(mut self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+        self.insert(key, value);
+        self
+    }
+    /// The value of `key`.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(&key.to_ascii_lowercase()).map(String::as_str)
+    }
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    /// How many.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    /// `(key, value)` pairs (values in clear: do not log).
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+    /// Whether `key`'s value is shown by `Debug` / `Serialize`.
+    pub fn is_secret(key: &str) -> bool {
+        !NON_SECRET.contains(&key.to_ascii_lowercase().as_str())
+    }
+    /// Keys and values with every secret value replaced by `***`.
+    pub fn redacted(&self) -> BTreeMap<String, String> {
+        self.0.iter().map(|(k, v)| (k.clone(), if Self::is_secret(k) { "***".to_string() } else { v.clone() })).collect()
+    }
+}
+
+impl<K: AsRef<str>, V: Into<String>> FromIterator<(K, V)> for StoreOptions {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut o = StoreOptions::new();
+        for (k, v) in iter {
+            o.insert(k, v);
+        }
+        o
+    }
+}
+
+impl std::fmt::Debug for StoreOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.redacted()).finish()
+    }
+}
+
+impl Serialize for StoreOptions {
+    /// Redacted (see the type docs): a serialized config never carries secrets.
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.redacted().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for StoreOptions {
+    /// A map of strings; booleans and numbers (TOML `allow_http = true`) are
+    /// accepted and stored as their text.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum V {
+            S(String),
+            B(bool),
+            I(i64),
+            F(f64),
+        }
+        let m = BTreeMap::<String, V>::deserialize(d)?;
+        Ok(m.into_iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    V::S(s) => s,
+                    V::B(b) => b.to_string(),
+                    V::I(i) => i.to_string(),
+                    V::F(f) => f.to_string(),
+                };
+                (k, v)
+            })
+            .collect())
+    }
+}
+
+/// fsspec spellings → `object_store` keys, per scheme (`object_store` parses
+/// its own spellings itself).
+#[cfg_attr(not(any(feature = "s3", feature = "gcs", feature = "azure")), allow(dead_code))]
+fn canonical_key<'a>(scheme: &str, key: &'a str) -> &'a str {
+    match (scheme, key) {
+        ("s3", "key") => "access_key_id",
+        ("s3", "secret") => "secret_access_key",
+        ("s3", "region_name") => "region",
+        ("s3", "anon") => "skip_signature",
+        ("gcs", "anon") => "skip_signature",
+        ("azure", "anon") => "skip_signature",
+        (_, k) => k,
+    }
+}
+
+/// The S3 builder for `s3://bucket` with URI parameters and `opts` applied
+/// (options override URI parameters, which override the environment).
+/// A custom endpoint defaults to path-style requests, and an `http://`
+/// endpoint to `allow_http`, unless the options say otherwise.
+#[cfg(feature = "s3")]
+pub fn s3_builder(
+    bucket: &str,
+    endpoint: Option<&str>,
+    region: Option<&str>,
+    allow_http: bool,
+    opts: &StoreOptions,
+) -> Result<object_store::aws::AmazonS3Builder, StoreError> {
+    use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, S3ConditionalPut};
+    use object_store::ClientConfigKey;
+    let mut b = AmazonS3Builder::from_env().with_bucket_name(bucket).with_conditional_put(S3ConditionalPut::ETagMatch);
+    if let Some(e) = endpoint {
+        b = b.with_endpoint(e);
+    }
+    if let Some(r) = region {
+        b = b.with_region(r);
+    }
+    if allow_http {
+        b = b.with_allow_http(true);
+    }
+    let mut set_vhost = false;
+    let mut set_http = false;
+    for (k, v) in opts.iter() {
+        let ck = canonical_key("s3", k);
+        let key: AmazonS3ConfigKey = ck.parse().map_err(|_| StoreError::Config(format!("unknown S3 store option {k:?}")))?;
+        set_vhost |= matches!(key, AmazonS3ConfigKey::VirtualHostedStyleRequest);
+        set_http |= matches!(key, AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp));
+        b = b.with_config(key, v);
+    }
+    let ep = b.get_config_value(&AmazonS3ConfigKey::Endpoint);
+    if let Some(ep) = ep.as_deref().filter(|e| !e.is_empty()) {
+        // S3-compatible stores (MinIO, R2, …) generally want path-style requests.
+        if !set_vhost {
+            b = b.with_virtual_hosted_style_request(false);
+        }
+        if !set_http && ep.starts_with("http://") {
+            b = b.with_allow_http(true);
+        }
+    }
+    Ok(b)
+}
+
+/// The GCS builder for `gs://bucket` with `opts` applied.
+#[cfg(feature = "gcs")]
+pub fn gcs_builder(bucket: &str, opts: &StoreOptions) -> Result<object_store::gcp::GoogleCloudStorageBuilder, StoreError> {
+    use object_store::gcp::{GoogleCloudStorageBuilder, GoogleConfigKey};
+    let mut b = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
+    for (k, v) in opts.iter() {
+        let key: GoogleConfigKey = canonical_key("gcs", k).parse().map_err(|_| StoreError::Config(format!("unknown GCS store option {k:?}")))?;
+        b = b.with_config(key, v);
+    }
+    Ok(b)
+}
+
+/// The Azure builder for `az://container` with `opts` applied.
+#[cfg(feature = "azure")]
+pub fn azure_builder(container: &str, account: Option<&str>, opts: &StoreOptions) -> Result<object_store::azure::MicrosoftAzureBuilder, StoreError> {
+    use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
+    let mut b = MicrosoftAzureBuilder::from_env().with_container_name(container);
+    if let Some(a) = account {
+        b = b.with_account(a);
+    }
+    for (k, v) in opts.iter() {
+        let key: AzureConfigKey = canonical_key("azure", k).parse().map_err(|_| StoreError::Config(format!("unknown Azure store option {k:?}")))?;
+        b = b.with_config(key, v);
+    }
+    Ok(b)
 }
 
 /// A parsed store URI.
@@ -197,33 +438,17 @@ fn remote(uri: &StoreUri, cfg: &StoreConfig) -> Result<ObjectHistoryStore, Store
     match uri {
         #[cfg(feature = "s3")]
         StoreUri::S3 { bucket, prefix, endpoint, region, allow_http } => {
-            use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
-            let mut b = AmazonS3Builder::from_env().with_bucket_name(bucket).with_conditional_put(S3ConditionalPut::ETagMatch);
-            if let Some(e) = endpoint {
-                // S3-compatible stores generally want path-style requests.
-                b = b.with_endpoint(e).with_virtual_hosted_style_request(false);
-            }
-            if let Some(r) = region {
-                b = b.with_region(r);
-            }
-            if *allow_http {
-                b = b.with_allow_http(true);
-            }
-            let s = b.build().map_err(err)?;
+            let s = s3_builder(bucket, endpoint.as_deref(), region.as_deref(), *allow_http, &cfg.options)?.build().map_err(err)?;
             Ok(ObjectHistoryStore::with_options(Arc::new(s), prefix.clone(), crate::redact_uri(&cfg.uri), object_opts(cfg, true, true)))
         }
         #[cfg(feature = "gcs")]
         StoreUri::Gcs { bucket, prefix } => {
-            let s = object_store::gcp::GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket).build().map_err(err)?;
+            let s = gcs_builder(bucket, &cfg.options)?.build().map_err(err)?;
             Ok(ObjectHistoryStore::with_options(Arc::new(s), prefix.clone(), crate::redact_uri(&cfg.uri), object_opts(cfg, true, true)))
         }
         #[cfg(feature = "azure")]
         StoreUri::Azure { container, prefix, account } => {
-            let mut b = object_store::azure::MicrosoftAzureBuilder::from_env().with_container_name(container);
-            if let Some(a) = account {
-                b = b.with_account(a);
-            }
-            let s = b.build().map_err(err)?;
+            let s = azure_builder(container, account.as_deref(), &cfg.options)?.build().map_err(err)?;
             Ok(ObjectHistoryStore::with_options(Arc::new(s), prefix.clone(), crate::redact_uri(&cfg.uri), object_opts(cfg, true, true)))
         }
         other => Err(StoreError::Config(format!("{other:?}: support for this store is not compiled in (cargo features s3 / gcs / azure)"))),
@@ -348,5 +573,89 @@ mod tests {
             assert!(!s.shared());
         }
         assert!(open(&StoreConfig { write_version: 9, ..StoreConfig::new("memory://") }).await.is_err());
+    }
+
+    #[test]
+    fn store_options_are_redacted() {
+        let o: StoreOptions = [("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE"), ("secret_access_key", "s3cr3t"), ("endpoint", "http://minio:9000"), ("region", "eu-west-1")]
+            .into_iter()
+            .collect();
+        assert_eq!(o.get("aws_access_key_id"), Some("AKIAEXAMPLE"), "keys are case-insensitive");
+        let dbg = format!("{:?}", StoreConfig::new("s3://b/p").options(o.clone()));
+        assert!(!dbg.contains("AKIAEXAMPLE") && !dbg.contains("s3cr3t"), "{dbg}");
+        assert!(dbg.contains("http://minio:9000") && dbg.contains("eu-west-1"), "{dbg}");
+        let json = serde_json::to_string(&o).unwrap();
+        assert!(!json.contains("s3cr3t") && json.contains("\"***\""), "{json}");
+        // TOML-ish values: booleans and numbers become text.
+        let back: StoreOptions = serde_json::from_str(r#"{"allow_http": true, "port": 9000, "key": "k"}"#).unwrap();
+        assert_eq!(back.get("allow_http"), Some("true"));
+        assert_eq!(back.get("port"), Some("9000"));
+        assert_eq!(back.get("key"), Some("k"));
+    }
+
+    #[tokio::test]
+    async fn local_store_ignores_object_store_options() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = StoreConfig::new(format!("file://{}", d.path().display())).options(StoreOptions::new().with("secret_access_key", "x"));
+        let s = open(&cfg).await.unwrap();
+        assert_eq!(s.info().backend, crate::Backend::ObjectStore);
+    }
+
+    #[cfg(feature = "s3")]
+    #[test]
+    fn s3_options_map_onto_the_builder() {
+        use object_store::ClientConfigKey;
+        use object_store::aws::AmazonS3ConfigKey as K;
+        let o: StoreOptions = [
+            ("key", "AKIAEXAMPLE"),
+            ("secret", "s3cr3t"),
+            ("token", "sess"),
+            ("endpoint_url", "http://minio:9000"),
+            ("region_name", "eu-west-1"),
+        ]
+        .into_iter()
+        .collect();
+        let b = s3_builder("bucket", None, None, false, &o).unwrap();
+        assert_eq!(b.get_config_value(&K::AccessKeyId).as_deref(), Some("AKIAEXAMPLE"));
+        assert_eq!(b.get_config_value(&K::SecretAccessKey).as_deref(), Some("s3cr3t"));
+        assert_eq!(b.get_config_value(&K::Token).as_deref(), Some("sess"));
+        assert_eq!(b.get_config_value(&K::Endpoint).as_deref(), Some("http://minio:9000"));
+        assert_eq!(b.get_config_value(&K::Region).as_deref(), Some("eu-west-1"));
+        assert_eq!(b.get_config_value(&K::Bucket).as_deref(), Some("bucket"));
+        // A custom http endpoint: path-style and plain HTTP unless said otherwise.
+        assert_eq!(b.get_config_value(&K::VirtualHostedStyleRequest).as_deref(), Some("false"));
+        assert_eq!(b.get_config_value(&K::Client(ClientConfigKey::AllowHttp)).as_deref(), Some("true"));
+        // Explicit settings win; object_store spellings work too.
+        let o = StoreOptions::new()
+            .with("aws_endpoint", "https://r2.example")
+            .with("virtual_hosted_style_request", "true")
+            .with("aws_access_key_id", "A2")
+            .with("allow_http", "false");
+        let b = s3_builder("bucket", Some("http://uri-endpoint:9000"), Some("us-west-2"), true, &o).unwrap();
+        assert_eq!(b.get_config_value(&K::Endpoint).as_deref(), Some("https://r2.example"), "options override URI parameters");
+        assert_eq!(b.get_config_value(&K::Region).as_deref(), Some("us-west-2"));
+        assert_eq!(b.get_config_value(&K::VirtualHostedStyleRequest).as_deref(), Some("true"));
+        assert_eq!(b.get_config_value(&K::Client(ClientConfigKey::AllowHttp)).as_deref(), Some("false"));
+        assert_eq!(b.get_config_value(&K::AccessKeyId).as_deref(), Some("A2"));
+        // Unknown keys are configuration errors naming the key, never the value.
+        let e = s3_builder("bucket", None, None, false, &StoreOptions::new().with("nope", "v4lue")).unwrap_err().to_string();
+        assert!(e.contains("nope") && !e.contains("v4lue"), "{e}");
+    }
+
+    #[cfg(feature = "gcs")]
+    #[test]
+    fn gcs_options_map_onto_the_builder() {
+        use object_store::gcp::GoogleConfigKey as K;
+        let b = gcs_builder("bkt", &StoreOptions::new().with("service_account", "/var/run/sa.json")).unwrap();
+        assert_eq!(b.get_config_value(&K::ServiceAccount).as_deref(), Some("/var/run/sa.json"));
+    }
+
+    #[cfg(feature = "azure")]
+    #[test]
+    fn azure_options_map_onto_the_builder() {
+        use object_store::azure::AzureConfigKey as K;
+        let b = azure_builder("ctr", None, &StoreOptions::new().with("account_name", "acct").with("account_key", "a2V5")).unwrap();
+        assert_eq!(b.get_config_value(&K::AccountName).as_deref(), Some("acct"));
+        assert_eq!(b.get_config_value(&K::AccessKey).as_deref(), Some("a2V5"));
     }
 }

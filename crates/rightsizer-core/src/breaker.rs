@@ -51,30 +51,55 @@ pub enum BreakerScope {
     Fleet,
 }
 
+/// Top-level store prefix of breaker **reset** objects (operator-written;
+/// SPEC §8.1): `{prefix}/v1/breakers/{scope}.json`.
+pub const RESETS_ROOT: &str = "breakers";
+
+/// Top-level store prefix of breaker **trip** objects (client-creatable with
+/// `If-None-Match: *`; SPEC §8.1): `{prefix}/v1/breakers-trips/{scope}/{ulid}.json`.
+///
+/// Trips live under their own top-level prefix so that an IAM policy can
+/// grant clients `PutObject` on `breakers-trips/*` and nothing under
+/// `breakers/*`: no tenant-chosen path segment can make a reset path match a
+/// trip pattern (the N-1 layout `breakers/{scope}/trips/{ulid}.json` needed a
+/// `breakers/*/trips/*` grant, which a tenant segment named `trips` matched).
+pub const TRIPS_ROOT: &str = "breakers-trips";
+
 impl BreakerScope {
     /// The store path segment for `{prefix}/v1/breakers/{scope}` (SPEC §8.1).
     /// Workload-scoped breakers sit under `{platform}/{tenant}`, like runs
     /// (`workload/{platform}/{tenant}/{key hash}`,
     /// `bucket/{platform}/{tenant}/{key hash}/{bucket}`), so per-tenant IAM
     /// can tell platforms apart.
+    ///
+    /// The encoding is injective: platforms and tenants are validated
+    /// ([`crate::Tenant`]: no empty, `.` or `..` segments), the key hash has a
+    /// fixed length, and free-form segments (bucket, estimator id and
+    /// version) are escaped with [`escape_segment`].
     pub fn path(&self) -> String {
         match self {
             BreakerScope::Workload { key } => format!("workload/{}/{}/{}", key.platform, key.tenant, key.hash()),
-            BreakerScope::InputBucket { key, bucket } => format!("bucket/{}/{}/{}/{}", key.platform, key.tenant, key.hash(), sanitize(bucket)),
-            BreakerScope::EstimatorVersion { id, version } => format!("estimator/{}/{}", sanitize(id), sanitize(version)),
+            BreakerScope::InputBucket { key, bucket } => {
+                format!("bucket/{}/{}/{}/{}", key.platform, key.tenant, key.hash(), escape_segment(bucket))
+            }
+            BreakerScope::EstimatorVersion { id, version } => format!("estimator/{}/{}", escape_segment(id), escape_segment(version)),
             BreakerScope::Fleet => "fleet".into(),
         }
     }
 
-    /// The previous (N-1) path of a workload-scoped breaker, without the
-    /// platform segment (`workload/{tenant}/{key hash}`). Readers look at
-    /// both; writers use [`path`](Self::path) only. `None` when the path did
-    /// not change.
+    /// The previous (N-1) path: workload-scoped breakers without the
+    /// platform segment (`workload/{tenant}/{key hash}`), estimator scopes
+    /// with the lossy `[A-Za-z0-9._-]` sanitizing. Readers look at both
+    /// (and keep only objects whose decoded scope is this one); writers use
+    /// [`path`](Self::path) only. `None` when the path did not change.
     pub fn legacy_path(&self) -> Option<String> {
         match self {
             BreakerScope::Workload { key } => Some(format!("workload/{}/{}", key.tenant, key.hash())),
             BreakerScope::InputBucket { key, bucket } => Some(format!("bucket/{}/{}/{}", key.tenant, key.hash(), sanitize(bucket))),
-            BreakerScope::EstimatorVersion { .. } | BreakerScope::Fleet => None,
+            BreakerScope::EstimatorVersion { id, version } => {
+                Some(format!("estimator/{}/{}", sanitize(id), sanitize(version))).filter(|p| *p != self.path())
+            }
+            BreakerScope::Fleet => None,
         }
     }
 
@@ -84,6 +109,52 @@ impl BreakerScope {
         v.extend(self.legacy_path());
         v
     }
+
+    /// The reset object, relative to `{prefix}/v1/`: `breakers/{path}.json`.
+    pub fn reset_object(&self) -> String {
+        format!("{RESETS_ROOT}/{}.json", self.path())
+    }
+
+    /// Every reset object a reader checks (current and N-1 paths).
+    pub fn reset_objects(&self) -> Vec<String> {
+        self.read_paths().into_iter().map(|p| format!("{RESETS_ROOT}/{p}.json")).collect()
+    }
+
+    /// A trip object, relative to `{prefix}/v1/`: `breakers-trips/{path}/{id}.json`.
+    pub fn trip_object(&self, id: Ulid) -> String {
+        format!("{TRIPS_ROOT}/{}/{id}.json", self.path())
+    }
+
+    /// Every directory holding this scope's trips, relative to `{prefix}/v1/`
+    /// and ending in `/`: the current `breakers-trips/{path}/`, then the N-1
+    /// layouts `breakers/{path}/trips/` and `breakers/{legacy path}/trips/`.
+    /// Readers list only direct children and keep trips whose decoded scope
+    /// is this one.
+    pub fn trip_dirs(&self) -> Vec<String> {
+        let mut v = vec![format!("{TRIPS_ROOT}/{}/", self.path())];
+        v.extend(self.read_paths().into_iter().map(|p| format!("{RESETS_ROOT}/{p}/trips/")));
+        v
+    }
+}
+
+/// Escape one free-form path segment injectively: `[A-Za-z0-9.-]` stay as
+/// they are (a leading `.` excepted, so a segment is never `.` or `..`);
+/// every other byte, `_` included, becomes `_HH` (uppercase hex); the empty
+/// string becomes `_`. Distinct inputs give distinct outputs, and an output
+/// never contains `/`.
+pub fn escape_segment(s: &str) -> String {
+    if s.is_empty() {
+        return "_".into();
+    }
+    let mut out = String::with_capacity(s.len());
+    for (i, b) in s.bytes().enumerate() {
+        if b.is_ascii_alphanumeric() || b == b'-' || (b == b'.' && i > 0) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("_{b:02X}"));
+        }
+    }
+    out
 }
 
 fn sanitize(s: &str) -> String {
@@ -118,7 +189,8 @@ pub enum TripReason {
     Manual,
 }
 
-/// A trip object (`breakers/{scope}/trips/{ulid}.json`, `If-None-Match: *`).
+/// A trip object (`breakers-trips/{scope}/{ulid}.json`, `If-None-Match: *`;
+/// N-1: `breakers/{scope}/trips/{ulid}.json`, still read).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Trip {
@@ -548,8 +620,71 @@ mod tests {
         assert_eq!(w.legacy_path(), Some(format!("workload/c/ns/{}", key().hash())));
         assert_eq!(w.read_paths().len(), 2);
         assert_eq!(BreakerScope::Fleet.legacy_path(), None);
-        assert_eq!(BreakerScope::EstimatorVersion { id: "gbt".into(), version: "1/2".into() }.path(), "estimator/gbt/1_2");
+        assert_eq!(BreakerScope::EstimatorVersion { id: "gbt".into(), version: "1/2".into() }.path(), "estimator/gbt/1_2F2");
+        assert_eq!(
+            BreakerScope::EstimatorVersion { id: "gbt".into(), version: "1/2".into() }.legacy_path().as_deref(),
+            Some("estimator/gbt/1_2"),
+            "N-1 path still read"
+        );
+        assert_eq!(BreakerScope::EstimatorVersion { id: "gbt".into(), version: "1.0".into() }.legacy_path(), None, "unchanged path");
         let j = serde_json::to_value(BreakerScope::Fleet).unwrap();
         assert_eq!(j, serde_json::json!({"kind": "fleet"}));
+    }
+
+    /// Refinement round (item 4): the scope encoding is injective, and trips
+    /// live under their own top-level prefix, so no scope's reset object can
+    /// sit where a client may create trips.
+    #[test]
+    fn scope_encoding_is_injective_and_trips_are_separate() {
+        let est = |id: &str, v: &str| BreakerScope::EstimatorVersion { id: id.into(), version: v.into() };
+        // The lossy N-1 sanitizing collided; the escaping does not.
+        let pairs = [(est("a", "1/2"), est("a", "1_2")), (est("a/b", "c"), est("a", "b/c")), (est("x", ".."), est("x", "_2E.")), (est("", "v"), est("_", "v"))];
+        for (a, b) in &pairs {
+            assert_ne!(a.path(), b.path(), "{a} vs {b}");
+        }
+        for s in ["", ".", "..", "a/b", "a_b", "a_2Fb", "trips", "é", "x.y-z"] {
+            let e = escape_segment(s);
+            assert!(!e.contains('/') && e != "." && e != ".." && !e.is_empty(), "{s:?} → {e:?}");
+        }
+        // Every escaped string decodes back (injective).
+        fn unescape(e: &str) -> Vec<u8> {
+            if e == "_" {
+                return vec![];
+            }
+            let b = e.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'_' {
+                    out.push(u8::from_str_radix(&e[i + 1..i + 3], 16).unwrap());
+                    i += 3;
+                } else {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            }
+            out
+        }
+        for s in ["", ".", "..", "a/b", "a_b", "a_2Fb", "_", "__", "é/ü", "-.-"] {
+            assert_eq!(unescape(&escape_segment(s)), s.as_bytes(), "{s:?}");
+        }
+        // Trips and resets never share a top-level prefix.
+        let w = BreakerScope::Workload { key: WorkloadKey::parse("k8s://trips/ns/job/x").unwrap() };
+        let id = Ulid::from_parts(1, 2);
+        assert!(w.trip_object(id).starts_with("breakers-trips/workload/k8s/trips/ns/"));
+        assert!(w.reset_object().starts_with("breakers/workload/k8s/trips/ns/"));
+        for s in [w.clone(), BreakerScope::Fleet, est("gbt", "1/2")] {
+            assert!(s.reset_objects().iter().all(|p| p.starts_with("breakers/") && !p.starts_with("breakers-trips/")));
+            let dirs = s.trip_dirs();
+            assert!(dirs[0].starts_with("breakers-trips/") && dirs[0].ends_with('/'));
+            assert!(dirs[1..].iter().all(|d| d.starts_with("breakers/") && d.ends_with("/trips/")), "N-1 trip dirs still read");
+        }
+        // A tenant segment named `trips` cannot place a reset object inside
+        // another scope's (N-1) trip directory: reset objects end in a
+        // 32-hex key hash + `.json`, trips in a 26-char ULID + `.json`.
+        let other = BreakerScope::Workload { key: WorkloadKey::parse("k8s://c/trips/job/x").unwrap() };
+        for d in (BreakerScope::Workload { key: WorkloadKey::parse("k8s://c/ns/job/x").unwrap() }).trip_dirs() {
+            assert!(!other.reset_object().starts_with(&d));
+        }
     }
 }

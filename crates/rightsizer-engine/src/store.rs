@@ -60,7 +60,7 @@ pub async fn open_store(uri: Option<&str>, cfg: &HistoryConfig, role: Role) -> R
             "{uri}: the interim json:// store was removed; use sqlite:///path/history.db or file:///dir"
         )));
     }
-    let sc = StoreConfig { uri: uri.to_string(), role, write_version: cfg.write_version, durable: cfg.durable, shared: cfg.shared, ..StoreConfig::default() };
+    let sc = StoreConfig { uri: uri.to_string(), role, write_version: cfg.write_version, durable: cfg.durable, shared: cfg.shared, options: cfg.storage_options.clone(), ..StoreConfig::default() };
     Ok(OpenedStore { store: rightsizer_history::open(&sc).await?, keys: None })
 }
 
@@ -82,6 +82,19 @@ impl Pending {
             Pending::Decision(_) => "decision",
         }
     }
+}
+
+/// What [`StoreView::put_run`] did.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PutResult {
+    /// Stored now.
+    Inserted,
+    /// The store already holds a record with this dedup key.
+    Duplicate,
+    /// Not written yet: buffered for retry (whether it is a duplicate is unknown).
+    Buffered,
+    /// Dropped (buffer full or rejected).
+    Dropped,
 }
 
 /// History availability for one key.
@@ -121,6 +134,7 @@ impl StoreView {
             // Over-fetch under a cluster filter so it still leaves `limit`.
             depth: if cfg.cluster.is_some() { 256 } else { 64 },
             scope: ClusterScope { cluster: cfg.cluster.clone(), share: cfg.share.clone() },
+            revalidate: (cfg.revalidate_s > 0).then(|| std::time::Duration::from_secs(cfg.revalidate_s)),
             ..CacheOptions::default()
         };
         let cached = Arc::new(CachedStore::with_clock(store.clone(), opts, clock));
@@ -151,8 +165,16 @@ impl StoreView {
     /// Same-key history (newest first, ≤ `limit`), per cluster unless shared.
     /// Store errors fall back to the cache within its TTL (SPEC §8.4). `now`
     /// is ignored: the cache runs on the clock it was built with.
-    pub async fn history(&self, key: &WorkloadKey, limit: usize, _now: DateTime<Utc>) -> HistoryRead {
-        match self.cached.history(key, limit).await {
+    pub async fn history(&self, key: &WorkloadKey, limit: usize, now: DateTime<Utc>) -> HistoryRead {
+        self.history_within(key, limit, rightsizer_history::cache::REFRESH_WAIT, now).await
+    }
+
+    /// [`history`](Self::history), waiting at most `wait` for a refresh or a
+    /// due revalidation (SPEC §8.4; the decision path passes what its budget
+    /// allows, so a slow check answers from the cache instead of expiring
+    /// the decision).
+    pub async fn history_within(&self, key: &WorkloadKey, limit: usize, wait: std::time::Duration, _now: DateTime<Utc>) -> HistoryRead {
+        match self.cached.history_within(key, limit, wait).await {
             CacheRead::Fresh(runs) => {
                 if self.writer.buffered() > 0 {
                     self.flush().await;
@@ -221,6 +243,27 @@ impl StoreView {
         };
         if out == WriteOutcome::Dropped {
             self.metrics.dropped.with_label_values(&[kind]).inc();
+        }
+    }
+
+    /// Write a run record now, or buffer it on failure (SPEC §8.4), and say
+    /// which: inserted, a duplicate of a stored record, or not written yet.
+    pub async fn put_run(&self, rec: RunRecord) -> PutResult {
+        if self.writer.buffered() > 0 {
+            self.flush().await;
+        }
+        match self.writer.put_run(rec).await {
+            WriteOutcome::Written(rightsizer_history::PutOutcome::Inserted) => PutResult::Inserted,
+            WriteOutcome::Written(rightsizer_history::PutOutcome::Duplicate) => PutResult::Duplicate,
+            WriteOutcome::Buffered => {
+                self.metrics.store_errors.with_label_values(&["put_run"]).inc();
+                tracing::warn!(kind = "run", "store write failed: buffered");
+                PutResult::Buffered
+            }
+            WriteOutcome::Dropped => {
+                self.metrics.dropped.with_label_values(&["run"]).inc();
+                PutResult::Dropped
+            }
         }
     }
 

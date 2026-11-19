@@ -467,6 +467,31 @@ pub trait HistoryStore: Send + Sync {
     /// The newest `limit` records of `key`, newest first.
     async fn runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError>;
 
+    /// A cheap per-key change marker: an opaque token that moves whenever a
+    /// run of `key` is written (object store: the newest shard's ULID, else
+    /// the pointer watermark; sqlite / postgres: the largest row id; memory:
+    /// a write count). `None` when the backend cannot tell; then caches
+    /// never revalidate and rely on their TTL. Default: `None`.
+    async fn run_marker(&self, _key: &WorkloadKey) -> Result<Option<String>, StoreError> {
+        Ok(None)
+    }
+
+    /// [`runs`](Self::runs) and the [`run_marker`](Self::run_marker) taken
+    /// **before** the records were read (a write in between makes the next
+    /// check see a change, never miss one). Default: the two calls.
+    async fn runs_marked(&self, key: &WorkloadKey, limit: usize) -> Result<(Vec<RunRecord>, Option<String>), StoreError> {
+        let marker = self.run_marker(key).await?;
+        Ok((self.runs(key, limit).await?, marker))
+    }
+
+    /// Whether runs of `key` were written after `marker` (from
+    /// [`run_marker`](Self::run_marker)). Object stores answer with one LIST
+    /// `start-after` the marker; databases with one indexed query. Default:
+    /// compare [`run_marker`](Self::run_marker).
+    async fn runs_changed_since(&self, key: &WorkloadKey, marker: &str) -> Result<bool, StoreError> {
+        Ok(self.run_marker(key).await?.is_some_and(|m| m != marker))
+    }
+
     /// Decisions matching `filter`, newest first.
     async fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<Decision>, StoreError>;
 

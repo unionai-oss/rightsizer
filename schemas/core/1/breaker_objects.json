@@ -139,7 +139,7 @@
       ]
     },
     "Trip": {
-      "description": "A trip object (`breakers/{scope}/trips/{ulid}.json`, `If-None-Match: *`).",
+      "description": "A trip object (`breakers-trips/{scope}/{ulid}.json`, `If-None-Match: *`;\nN-1: `breakers/{scope}/trips/{ulid}.json`, still read).",
       "type": "object",
       "properties": {
         "at": {

@@ -574,7 +574,7 @@ impl Engine {
         let prior_mem = ctx.prior.spec.requests.memory;
         let readiness = match (prior_mem, now_d.recommended.requests.memory) {
             (Some(p), Some(r)) if r < p => {
-                let s3 = S3Params { min_history: cfg.policy.min_history, allow_unverified: cfg.history.allow_unverified_for_reductions };
+                let s3 = S3Params { min_history: cfg.policy.min_history, allow_unverified: cfg.history.allow_unverified_for_reductions, recent_k: cfg.decision.history_limit };
                 let digest = ctx.code.as_ref().map(|c| c.digest.as_str());
                 let ev = s3b_evidence(&all, digest, ctx.input_bytes(), r, &s3);
                 if ev.ok {

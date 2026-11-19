@@ -69,6 +69,8 @@ pub struct DecisionParams {
     pub low_util_threshold: f32,
     /// Runs considered for history-based advisories (5).
     pub advisory_k: usize,
+    /// K of the S3(b) vetoes: the newest K runs (`decision.history_limit`, 32).
+    pub history_limit: usize,
 }
 
 impl Default for DecisionParams {
@@ -87,6 +89,7 @@ impl Default for DecisionParams {
             reductions_blocked: None,
             low_util_threshold: 0.30,
             advisory_k: 5,
+            history_limit: 32,
         }
     }
 }
@@ -672,7 +675,7 @@ impl<'a, 'b> Decider<'a, 'b> {
 
         // ── S3 inputs ─────────────────────────────────────────────────────
         let platform = &ctx.platform;
-        let s3p = S3Params { min_history: p.min_history, allow_unverified: cp.allow_unverified };
+        let s3p = S3Params { min_history: p.min_history, allow_unverified: cp.allow_unverified, recent_k: p.history_limit };
         let ladder = platform.retry.ladder.as_ref().filter(|l| ladder_counts(l, inp.attempt));
         let ffloor = ladder.and_then(|l| final_floor(pr.memory, history, l, cp.allow_unverified));
         let s3a = s3a_ladder(&platform.retry, inp.attempt, platform.memory_enforced, ffloor, Some(b.mem_ceiling));
@@ -683,7 +686,7 @@ impl<'a, 'b> Decider<'a, 'b> {
             };
             t.min(b.mem_ceiling)
         });
-        let mut evidence_cache: HashMap<u64, (bool, usize, usize)> = HashMap::new();
+        let mut evidence_cache: HashMap<u64, (bool, usize, usize, Option<crate::safety::Veto>)> = HashMap::new();
         let mut gate = |c: &Candidate| -> Gate {
             if mem_fixed_app {
                 return Gate::Ok;
@@ -699,14 +702,15 @@ impl<'a, 'b> Decider<'a, 'b> {
                     return Gate::Excluded(HoldReason::Unclassifiable, "failures on this surface cannot be classified".into());
                 }
                 if !s3a {
-                    let (ok, fit, q) = *evidence_cache.entry(c.effective_memory.0).or_insert_with(|| {
+                    let (ok, fit, q, veto) = *evidence_cache.entry(c.effective_memory.0).or_insert_with(|| {
                         let e = s3b_evidence(history, code_digest, b_now, c.effective_memory, &s3p);
-                        (e.ok, e.fitting, e.qualifying)
+                        (e.ok, e.fitting, e.qualifying, e.veto)
                     });
                     if !ok {
                         let reason = if platform.memory_enforced { HoldReason::S3NotMet } else { HoldReason::NotEnforced };
                         let why = if platform.memory_enforced && platform.retry.ladder.is_none() { "no ladder; " } else { "" };
-                        return Gate::Excluded(reason, format!("{why}{fit} of {q} measured successes fit (need {})", p.min_history));
+                        let vetoed = veto.map(|v| format!("; vetoed: {v}")).unwrap_or_default();
+                        return Gate::Excluded(reason, format!("{why}{fit} of {q} measured successes fit (need {}){vetoed}", p.min_history));
                     }
                 }
             }

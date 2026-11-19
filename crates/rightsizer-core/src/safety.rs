@@ -8,7 +8,10 @@
 //!   peak × `scale` × headroom fits under the proposed request. Headroom 1.05,
 //!   1.25 for `resolution_s > 1` or another digest, 1.5 for both; coarse peaks
 //!   (`resolution_s ≥ 10`) 1.5 / 1.75 and they count half (so S3(b) needs
-//!   `2 × min_history` of them).
+//!   `2 × min_history` of them). **Vetoes** (refinement round): no
+//!   qualifying success among the last K (`history_limit`) runs may need more
+//!   than the proposal (peak × scale × headroom), and no OOM-class run's
+//!   lower bound × scale may exceed it ([`Veto`]).
 //! - **S5 attribution** ([`attribute`]): which failures are rightsizer-caused.
 
 use chrono::{DateTime, Duration, Utc};
@@ -48,9 +51,11 @@ pub fn scale(b_now: Option<u64>, b_hist: Option<u64>) -> f64 {
     }
 }
 
-/// Whether a record's trust admits it for floors, anchors and S3(b) (SPEC §8.2).
+/// Whether a record's trust admits it for floors, anchors and S3(b) (SPEC
+/// §8.2). Reads [`RunRecord::effective_trust`]: a claim its source cannot
+/// carry (a `self_report` claiming `verified`) counts at the source's ceiling.
 pub fn trusted(rec: &RunRecord, allow_unverified: bool) -> bool {
-    allow_unverified || rec.trust >= Trust::Authenticated
+    allow_unverified || rec.effective_trust() >= Trust::Authenticated
 }
 
 /// Whether `rec` has the same code digest as the current context.
@@ -65,11 +70,40 @@ pub struct S3Params {
     pub min_history: u32,
     /// `history.allow_unverified_for_reductions`.
     pub allow_unverified: bool,
+    /// K of the vetoes: the newest K runs of the key (`decision.history_limit`, 32).
+    pub recent_k: usize,
 }
 
 impl Default for S3Params {
     fn default() -> Self {
-        S3Params { min_history: 3, allow_unverified: false }
+        S3Params { min_history: 3, allow_unverified: false, recent_k: 32 }
+    }
+}
+
+/// Why S3(b) refused a reduction although enough successes fit.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Veto {
+    /// A qualifying success among the last K runs needs more than the
+    /// proposal (its peak × scale × headroom, bytes).
+    Success {
+        /// The requirement, bytes.
+        requirement: f64,
+    },
+    /// An OOM-class run among the last K proves demand above the proposal
+    /// (its `AtLeast` bound × scale, bytes).
+    Oom {
+        /// The bound × scale, bytes.
+        bound: f64,
+    },
+}
+
+impl std::fmt::Display for Veto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let gib = |b: f64| b / Bytes::GIB as f64;
+        match self {
+            Veto::Success { requirement } => write!(f, "a recent success needs {:.2}Gi", gib(*requirement)),
+            Veto::Oom { bound } => write!(f, "a recent OOM proves demand ≥ {:.2}Gi", gib(*bound)),
+        }
     }
 }
 
@@ -84,6 +118,8 @@ pub struct Evidence {
     pub fitting: usize,
     /// Qualifying successes (fitting or not).
     pub qualifying: usize,
+    /// The largest veto, if any (then `ok` is false).
+    pub veto: Option<Veto>,
 }
 
 /// The peak × scale × headroom requirement a qualifying record puts on a request.
@@ -104,46 +140,108 @@ pub fn is_measured_success(rec: &RunRecord, allow_unverified: bool) -> bool {
         && rec.memory_peak.is_some_and(|m| matches!(m.censor, Censor::Exact | Censor::AtMost))
 }
 
+/// The memory lower bound an OOM-class record proves (SPEC §5.7): its peak
+/// when sampled (an OOM's peak is a lower bound whatever the importer
+/// wrote), else the limit (or request) it was killed at. `None` for other
+/// statuses.
+pub fn oom_memory_bound(rec: &RunRecord) -> Option<f64> {
+    if rec.status != RunStatus::OomKilled {
+        return None;
+    }
+    if let Some(m) = rec.memory_peak.filter(|m| m.value.is_finite() && m.value > 0.0) {
+        return Some(m.value);
+    }
+    let spec = rec.requested.as_ref()?;
+    spec.limits.memory.or(spec.requests.memory).filter(|b| b.0 > 0).map(|b| b.0 as f64)
+}
+
+fn bigger(a: Option<Veto>, b: Veto) -> Option<Veto> {
+    let size = |v: &Veto| match v {
+        Veto::Success { requirement } => *requirement,
+        Veto::Oom { bound } => *bound,
+    };
+    match a {
+        Some(x) if size(&x) >= size(&b) => Some(x),
+        _ => Some(b),
+    }
+}
+
 /// S3(b): evidence that a request of `proposed` bytes is safe (SPEC §2.3).
+///
+/// Allowed only if (i) at least `min_history` qualifying successes fit
+/// (coarse ones count ½), (ii) no qualifying success among the newest
+/// `recent_k` runs needs more than `proposed` (peak × scale × headroom), and
+/// (iii) no `OomKilled` run among them has a lower bound
+/// ([`oom_memory_bound`]) × scale above `proposed`. Vetoes ignore trust: a
+/// planted record can only make the rule more conservative.
 pub fn s3b_evidence(history: &[RunRecord], digest: Option<&str>, b_now: Option<u64>, proposed: Bytes, p: &S3Params) -> Evidence {
     let mut weight = 0.0;
     let mut fitting = 0;
     let mut qualifying = 0;
-    for rec in history.iter().filter(|r| is_measured_success(r, p.allow_unverified)) {
+    let mut veto = None;
+    let cap = proposed.0 as f64;
+    for (i, rec) in history.iter().enumerate() {
+        let recent = i < p.recent_k;
+        if recent && let Some(bound) = oom_memory_bound(rec) {
+            let b = bound * scale(b_now, rec.input_bytes());
+            if b > cap {
+                veto = bigger(veto, Veto::Oom { bound: b });
+            }
+        }
+        if !is_measured_success(rec, p.allow_unverified) {
+            continue;
+        }
         let Some(req) = record_requirement(rec, digest, b_now) else { continue };
         qualifying += 1;
-        if req <= proposed.0 as f64 {
+        if req <= cap {
             fitting += 1;
             weight += if is_coarse(rec.memory_peak.and_then(|m| m.resolution_s)) { 0.5 } else { 1.0 };
+        } else if recent {
+            veto = bigger(veto, Veto::Success { requirement: req });
         }
     }
-    Evidence { ok: weight + 1e-9 >= p.min_history as f64, weight, fitting, qualifying }
+    Evidence { ok: veto.is_none() && weight + 1e-9 >= p.min_history as f64, weight, fitting, qualifying, veto }
 }
 
 /// S3(b) on the GPU-memory axis: a smaller device (a GPU type change) is an
 /// incompressible reduction, so it needs the same evidence as memory, on
 /// `gpu_memory_peak`: measured successes whose GPU peak (`Exact` or
 /// `AtMost`) × `scale` × headroom (by resolution and digest) fits the
-/// device; coarse peaks count ½ (SPEC §2.3).
+/// device; coarse peaks count ½ (SPEC §2.3). The same vetoes apply: a recent
+/// qualifying success that does not fit, or a recent `GpuOom` whose bound
+/// ([`RunRecord::gpu_oom_bound`]: the GPU peak, else the requested device's
+/// memory) × scale exceeds the device.
 pub fn s3b_gpu_evidence(history: &[RunRecord], digest: Option<&str>, b_now: Option<u64>, device: Bytes, p: &S3Params) -> Evidence {
     let mut weight = 0.0;
     let mut fitting = 0;
     let mut qualifying = 0;
-    for rec in history.iter().filter(|r| {
-        r.status == RunStatus::Succeeded && r.status_confidence == Confidence::Observed && trusted(r, p.allow_unverified)
-    }) {
+    let mut veto = None;
+    let cap = device.0 as f64;
+    for (i, rec) in history.iter().enumerate() {
+        let recent = i < p.recent_k;
+        if recent && let Some(bound) = rec.gpu_oom_bound() {
+            let b = bound * scale(b_now, rec.input_bytes());
+            if b > cap {
+                veto = bigger(veto, Veto::Oom { bound: b });
+            }
+        }
+        if !(rec.status == RunStatus::Succeeded && rec.status_confidence == Confidence::Observed && trusted(rec, p.allow_unverified)) {
+            continue;
+        }
         let Some(peak) = rec.gpu_memory_peak.filter(|m| matches!(m.censor, Censor::Exact | Censor::AtMost)) else { continue };
         if !peak.value.is_finite() || peak.value < 0.0 {
             continue;
         }
         qualifying += 1;
         let req = peak.value * scale(b_now, rec.input_bytes()) * headroom(peak.resolution_s, !same_digest(rec, digest));
-        if req <= device.0 as f64 {
+        if req <= cap {
             fitting += 1;
             weight += if is_coarse(peak.resolution_s) { 0.5 } else { 1.0 };
+        } else if recent {
+            veto = bigger(veto, Veto::Success { requirement: req });
         }
     }
-    Evidence { ok: weight + 1e-9 >= p.min_history as f64, weight, fitting, qualifying }
+    Evidence { ok: veto.is_none() && weight + 1e-9 >= p.min_history as f64, weight, fitting, qualifying, veto }
 }
 
 /// Whether a ladder counts for S3(a) (SPEC §7.2): a `Caller` ladder always;
@@ -395,6 +493,201 @@ mod tests {
             r.memory_peak.as_mut().unwrap().censor = Censor::AtLeast;
         }
         assert!(!s3b_evidence(&a, Some("d1"), None, Bytes::gib(3), &p).ok);
+    }
+
+    /// Refinement round (item 2): readers grant a record at most what its
+    /// source can carry.
+    #[test]
+    fn trust_matrix_caps_claims_by_source() {
+        use crate::types::OutcomeSource as S;
+        let cases = [
+            (S::SelfReport, Trust::Verified, Trust::Authenticated),
+            (S::SelfReport, Trust::Authenticated, Trust::Authenticated),
+            (S::SelfReport, Trust::Unverified, Trust::Unverified),
+            (S::Cgroup, Trust::Verified, Trust::Authenticated),
+            (S::RayState, Trust::Verified, Trust::Authenticated),
+            (S::Watcher, Trust::Verified, Trust::Verified),
+            (S::Sacct, Trust::Verified, Trust::Verified),
+            (S::FlyteRemote, Trust::Verified, Trust::Verified),
+            (S::Prometheus, Trust::Unverified, Trust::Unverified),
+            (S::Importer { platform: "aws".into() }, Trust::Verified, Trust::Verified),
+        ];
+        for (src, claim, want) in cases {
+            let mut r = rec(RunStatus::Succeeded, Some(2.0), 8.0);
+            r.source = src.clone();
+            r.trust = claim;
+            assert_eq!(r.effective_trust(), want, "{src:?} claiming {claim:?}");
+            assert_eq!(trusted(&r, false), want >= Trust::Authenticated);
+        }
+        // Readers use the effective trust everywhere they gate on it.
+        let mut h: Vec<RunRecord> = (0..3).map(|_| rec(RunStatus::Succeeded, Some(2.0), 8.0)).collect();
+        for r in &mut h {
+            r.source = S::SelfReport;
+            r.trust = Trust::Unverified;
+        }
+        assert!(!s3b_evidence(&h, Some("d1"), None, Bytes::gib(3), &S3Params::default()).ok);
+    }
+
+    /// Refinement round (item 6): three old fitting runs no longer authorize
+    /// a reduction past a newer success that peaked above the proposal.
+    #[test]
+    fn s3b_vetoed_by_a_recent_success_above_the_proposal() {
+        let p = S3Params::default();
+        let mut h: Vec<RunRecord> = (0..3).map(|_| rec(RunStatus::Succeeded, Some(2.0), 8.0)).collect();
+        assert!(s3b_evidence(&h, Some("d1"), None, Bytes::gib(3), &p).ok);
+        // Newest first: a same-digest success that peaked at 6 GiB.
+        h.insert(0, rec(RunStatus::Succeeded, Some(6.0), 8.0));
+        let e = s3b_evidence(&h, Some("d1"), None, Bytes::gib(3), &p);
+        assert!(!e.ok && e.fitting == 3, "{e:?}");
+        assert!(matches!(e.veto, Some(Veto::Success { requirement }) if (requirement - 6.0 * 1.05 * Bytes::GIB as f64).abs() < 1.0));
+        // A proposal that fits the big run too is allowed.
+        assert!(s3b_evidence(&h, Some("d1"), None, Bytes::from_gib_f64(6.4), &p).ok);
+        // Outside the last K the old run no longer vetoes.
+        let old = S3Params { recent_k: 0, ..p };
+        assert!(s3b_evidence(&h, Some("d1"), None, Bytes::gib(3), &old).ok);
+        // Another digest's success vetoes too (with its larger headroom).
+        let mut d = h.clone();
+        d[0].code_digest = Some("d0".into());
+        d[0].memory_peak = Some(Measurement::exact(2.5 * Bytes::GIB as f64));
+        assert!(!s3b_evidence(&d, Some("d1"), None, Bytes::gib(3), &p).ok, "2.5 × 1.25 > 3");
+    }
+
+    #[test]
+    fn s3b_vetoed_by_a_recent_oom_above_the_proposal() {
+        let p = S3Params::default();
+        let mut h: Vec<RunRecord> = (0..4).map(|_| rec(RunStatus::Succeeded, Some(2.0), 8.0)).collect();
+        // An OOM at a 4 GiB limit (no sampled peak): demand ≥ 4 GiB.
+        let mut oom = rec(RunStatus::OomKilled, None, 4.0);
+        oom.trust = Trust::Unverified; // vetoes ignore trust
+        h.insert(1, oom.clone());
+        let e = s3b_evidence(&h, Some("d1"), None, Bytes::gib(3), &p);
+        assert!(!e.ok && matches!(e.veto, Some(Veto::Oom { .. })), "{e:?}");
+        assert!(s3b_evidence(&h, Some("d1"), None, Bytes::gib(5), &p).ok);
+        // A sampled AtLeast peak is the bound; scale applies.
+        let mut o2 = rec(RunStatus::OomKilled, Some(2.0), 16.0);
+        o2.memory_peak.as_mut().unwrap().censor = Censor::AtLeast;
+        o2.inputs = vec![crate::types::InputMeta::blob("x", 100)];
+        let mut h2: Vec<RunRecord> = (0..3).map(|_| rec(RunStatus::Succeeded, Some(1.0), 8.0)).collect();
+        h2.push(o2);
+        assert!(s3b_evidence(&h2, Some("d1"), Some(100), Bytes::gib(3), &p).ok, "2 GiB bound fits 3 GiB");
+        assert!(!s3b_evidence(&h2, Some("d1"), Some(200), Bytes::gib(3), &p).ok, "2× input: bound 4 GiB");
+    }
+
+    #[test]
+    fn s3b_gpu_vetoes() {
+        use crate::types::{AcceleratorId, GpuShape};
+        let p = S3Params::default();
+        let a100 = AcceleratorId::A100_80G;
+        let gpu_rec = |status, peak_gib: Option<f64>| {
+            let mut r = rec(status, Some(1.0), 8.0);
+            r.gpu_memory_peak = peak_gib.map(|g| Measurement::exact(g * Bytes::GIB as f64));
+            r.requested.as_mut().unwrap().requests.gpu = Some(GpuShape { accel: a100, count: 1 });
+            r
+        };
+        let mut h: Vec<RunRecord> = (0..3).map(|_| gpu_rec(RunStatus::Succeeded, Some(10.0))).collect();
+        assert!(s3b_gpu_evidence(&h, Some("d1"), None, Bytes::gib(22), &p).ok);
+        // A GPU OOM with no sampled peak proves demand ≥ the requested device's memory.
+        h.insert(0, gpu_rec(RunStatus::GpuOom, None));
+        let e = s3b_gpu_evidence(&h, Some("d1"), None, Bytes::gib(22), &p);
+        assert!(!e.ok && matches!(e.veto, Some(Veto::Oom { .. })), "{e:?}");
+        // A recent success that needs more than the device.
+        let mut h2: Vec<RunRecord> = (0..3).map(|_| gpu_rec(RunStatus::Succeeded, Some(10.0))).collect();
+        h2.insert(0, gpu_rec(RunStatus::Succeeded, Some(30.0)));
+        assert!(matches!(s3b_gpu_evidence(&h2, Some("d1"), None, Bytes::gib(22), &p).veto, Some(Veto::Success { .. })));
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_rec() -> impl Strategy<Value = RunRecord> {
+            (
+                prop_oneof![Just(RunStatus::Succeeded), Just(RunStatus::Succeeded), Just(RunStatus::OomKilled), Just(RunStatus::GpuOom), Just(RunStatus::Failed)],
+                prop::option::of(0.1f64..20.0),
+                prop::option::of(0.1f64..40.0),
+                1.0f64..32.0,
+                0u8..3,
+                prop::option::of(prop_oneof![Just(0.5f32), Just(5.0f32), Just(60.0f32)]),
+                any::<bool>(),
+                prop::option::of(1u64..1000),
+                0u8..3,
+            )
+                .prop_map(|(status, peak, gpu_peak, req, censor, res, other_digest, input, trust)| {
+                    let mut r = rec(status, peak, req);
+                    if let Some(m) = r.memory_peak.as_mut() {
+                        m.censor = [Censor::Exact, Censor::AtLeast, Censor::AtMost][censor as usize];
+                        m.resolution_s = res;
+                    }
+                    r.gpu_memory_peak = gpu_peak.map(|g| Measurement::exact(g * Bytes::GIB as f64));
+                    r.requested.as_mut().unwrap().requests.gpu =
+                        Some(crate::types::GpuShape { accel: crate::types::AcceleratorId::L4_24G, count: 1 });
+                    if other_digest {
+                        r.code_digest = Some("d0".into());
+                    }
+                    r.inputs = input.map(|b| vec![crate::types::InputMeta::blob("x", b)]).unwrap_or_default();
+                    r.trust = [Trust::Unverified, Trust::Authenticated, Trust::Verified][trust as usize];
+                    r
+                })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// When S3(b) allows a proposal, nothing among the last K says
+            /// demand may exceed it: every qualifying success needs at most
+            /// the proposal, and no OOM bound × scale exceeds it.
+            #[test]
+            fn allowed_means_no_recent_evidence_above(h in prop::collection::vec(arb_rec(), 0..12), gib in 0.5f64..48.0, k in 0usize..14, b_now in prop::option::of(1u64..2000)) {
+                let p = S3Params { recent_k: k, ..S3Params::default() };
+                let proposed = Bytes::from_gib_f64(gib);
+                for gpu in [false, true] {
+                    let e = if gpu { s3b_gpu_evidence(&h, Some("d1"), b_now, proposed, &p) } else { s3b_evidence(&h, Some("d1"), b_now, proposed, &p) };
+                    if !e.ok {
+                        continue;
+                    }
+                    prop_assert!(e.veto.is_none());
+                    for r in h.iter().take(k) {
+                        let sc = scale(b_now, r.input_bytes());
+                        let oom = if gpu { r.gpu_oom_bound() } else { oom_memory_bound(r) };
+                        if let Some(b) = oom {
+                            prop_assert!(b * sc <= proposed.0 as f64, "OOM bound above an allowed proposal");
+                        }
+                        if !gpu && is_measured_success(r, p.allow_unverified) && let Some(req) = record_requirement(r, Some("d1"), b_now) {
+                            prop_assert!(req <= proposed.0 as f64, "recent success needs more than an allowed proposal");
+                        }
+                    }
+                }
+            }
+
+            /// Monotone in the proposal: allowed at x ⇒ allowed at any y ≥ x.
+            #[test]
+            fn monotone_in_the_proposal(h in prop::collection::vec(arb_rec(), 0..12), a in 0.5f64..48.0, b in 0.5f64..48.0) {
+                let (lo, hi) = (a.min(b), a.max(b));
+                let p = S3Params::default();
+                if s3b_evidence(&h, Some("d1"), None, Bytes::from_gib_f64(lo), &p).ok {
+                    prop_assert!(s3b_evidence(&h, Some("d1"), None, Bytes::from_gib_f64(hi), &p).ok);
+                }
+                if s3b_gpu_evidence(&h, Some("d1"), None, Bytes::from_gib_f64(lo), &p).ok {
+                    prop_assert!(s3b_gpu_evidence(&h, Some("d1"), None, Bytes::from_gib_f64(hi), &p).ok);
+                }
+            }
+
+            /// Adding a newer run (at the front) never turns a refusal into
+            /// an allowance unless it is itself a fitting qualifying success.
+            #[test]
+            fn a_newer_non_fitting_run_never_unlocks(h in prop::collection::vec(arb_rec(), 0..10), new in arb_rec(), gib in 0.5f64..48.0) {
+                let p = S3Params::default();
+                let proposed = Bytes::from_gib_f64(gib);
+                let before = s3b_evidence(&h, Some("d1"), None, proposed, &p).ok;
+                let mut h2 = h.clone();
+                h2.insert(0, new.clone());
+                let after = s3b_evidence(&h2, Some("d1"), None, proposed, &p).ok;
+                let fits = is_measured_success(&new, false) && record_requirement(&new, Some("d1"), None).is_some_and(|r| r <= proposed.0 as f64);
+                if !before && after {
+                    prop_assert!(fits);
+                }
+            }
+        }
     }
 
     #[test]

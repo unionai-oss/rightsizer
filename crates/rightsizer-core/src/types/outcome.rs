@@ -93,6 +93,29 @@ impl RunRecord {
     pub fn requested_memory(&self) -> Option<u64> {
         self.requested.as_ref().and_then(|r| r.requests.memory).map(|b| b.0)
     }
+    /// The trust readers grant this record: its claimed `trust`, capped by
+    /// what its `source` can carry ([`OutcomeSource::max_trust`]). Floors,
+    /// trust-region anchors, S3(b) and breaker recovery read this, never the
+    /// raw claim (SPEC §8.2).
+    pub fn effective_trust(&self) -> Trust {
+        self.trust.min(self.source.max_trust())
+    }
+    /// The lower bound on per-device GPU memory demand of a `GpuOom` record:
+    /// its GPU peak when one was sampled (whatever its censoring: an OOM
+    /// always proves demand at least that high), else the usable memory of
+    /// one device of the requested shape when the accelerator is known
+    /// (SPEC §5.7: an OOM-class failure records `AtLeast(limit)`; a device's
+    /// memory is its limit). `None` for other statuses or an unknown shape.
+    pub fn gpu_oom_bound(&self) -> Option<f64> {
+        if self.status != RunStatus::GpuOom {
+            return None;
+        }
+        if let Some(m) = self.gpu_memory_peak.filter(|m| m.value.is_finite() && m.value > 0.0) {
+            return Some(m.value);
+        }
+        let g = self.requested.as_ref()?.requests.gpu?;
+        g.accel.usable_memory().map(|b| b.0 as f64)
+    }
 }
 
 /// Run status (SPEC §5.7).
@@ -203,6 +226,26 @@ pub enum OutcomeSource {
         /// Platform name.
         platform: String,
     },
+}
+
+impl OutcomeSource {
+    /// The highest trust a record from this source can carry (SPEC §8.2).
+    ///
+    /// | source | ceiling | why |
+    /// |---|---|---|
+    /// | `self_report`, `cgroup`, `ray_state` | `authenticated` | written by the workload (or its driver) with the workload's own credentials: at best tenant-scoped |
+    /// | `prometheus`, `sacct`, `flyte_remote`, `watcher`, `importer` | `verified` | written by a trusted component reading platform accounting |
+    ///
+    /// A record claiming more than its source can carry (a `self_report`
+    /// claiming `verified`) is read at the ceiling; the claim is ignored.
+    pub fn max_trust(&self) -> Trust {
+        match self {
+            OutcomeSource::SelfReport | OutcomeSource::Cgroup | OutcomeSource::RayState => Trust::Authenticated,
+            OutcomeSource::Prometheus | OutcomeSource::Sacct | OutcomeSource::FlyteRemote | OutcomeSource::Watcher | OutcomeSource::Importer { .. } => {
+                Trust::Verified
+            }
+        }
+    }
 }
 
 /// Trust level of a record (SPEC §8.2). Ordered: `Unverified < Authenticated < Verified`.

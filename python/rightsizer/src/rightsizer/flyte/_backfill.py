@@ -1,8 +1,11 @@
 """``rsz history import flyte`` (flyte.md §8.3): backfill statuses from ``flyte.remote``.
 
-Walks ``Run.listall`` → ``Action.listall`` → ``ActionDetails`` and writes one
-``RunRecord`` per attempt through the engine (``outcome``: dedup, joins,
-attribution, lease closing):
+Walks ``Run.listall`` → ``Action.listall`` → ``ActionDetails`` and imports one
+``RunRecord`` per attempt through the engine's bulk importer
+(``Engine.import_runs`` → ``rightsizer_history::Importer``, like the Rust
+importers): every record is deduplicated against its key's **whole** stored
+history, and joins, attribution, breakers and lease closing run only for the
+records actually inserted, so re-importing an overlapping window is a no-op:
 
 - key ``flyte://{org}/{project}/{domain}/{task name}``;
 - requested resources from the task template proto
@@ -16,7 +19,7 @@ attribution, lease closing):
   no metrics API; child records are the only peak source).
 
 ``invocation_id`` is ``{run}/{action}``: stable across re-imports, so a
-re-run inserts duplicates the store drops.
+re-run finds every record already stored (``duplicates``).
 """
 
 from __future__ import annotations
@@ -183,34 +186,45 @@ def iter_action_details(project: Optional[str], domain: Optional[str], since: _d
             log.warning("rightsizer: actions of %s: %s", run.name, e)
 
 
+def import_records(eng: Any, records: List[RunRecord], *, batch: int = 500) -> Dict[str, Any]:
+    """Import ``records`` through ``eng.import_runs`` in batches; returns the summed report."""
+    tot: Dict[str, Any] = {"read": 0, "inserted": 0, "duplicates": 0, "joined": 0, "attributions": {}, "tripped": [],
+                           "leases_closed": 0}
+    for i in range(0, len(records), max(1, batch)):
+        rep = eng.import_runs(records[i:i + batch])
+        for k in ("read", "inserted", "duplicates", "joined", "leases_closed"):
+            tot[k] += int(rep.get(k, 0))
+        for a, n in (rep.get("attributions") or {}).items():
+            tot["attributions"][a] = tot["attributions"].get(a, 0) + int(n)
+        tot["tripped"].extend(rep.get("tripped") or [])
+    return tot
+
+
 def backfill(project: Optional[str] = None, domain: Optional[str] = None, since: str = "30d", *, limit: int = 1000,
              dry_run: bool = False, engine: Any = None) -> Dict[str, Any]:
-    """Import statuses; returns counts by status and how many records were written."""
+    """Import statuses; returns counts by status and the import report
+    (``inserted``, ``duplicates``, ``joined``, ``attributions``, …)."""
     from . import _engine as _eng
 
     eng = engine
     if eng is None and not dry_run:
-        eng = _eng.get_engine()
+        eng = _eng.importer_engine()
     counts: Dict[str, int] = {}
-    written = joined = actions = 0
+    actions = 0
+    records: List[RunRecord] = []
     for det in iter_action_details(project, domain, parse_since(since), limit=limit):
         actions += 1
         for rec in records_for(det):
             counts[rec.status.value] = counts.get(rec.status.value, 0) + 1
-            if dry_run:
-                continue
-            try:
-                rep = eng.outcome(rec)
-                written += int(bool(rep.written))
-                joined += int(bool(rep.joined))
-            except Exception as e:
-                log.warning("rightsizer: record for %s not written: %s", rec.key, e)
-    if eng is not None:
-        try:
-            eng.flush()
-        except Exception:
-            pass
-    return {"actions": actions, "statuses": counts, "written": written, "joined": joined, "dry_run": dry_run}
+            records.append(rec)
+    out: Dict[str, Any] = {"actions": actions, "statuses": counts, "read": len(records), "inserted": 0, "duplicates": 0,
+                           "written": 0, "joined": 0, "dry_run": dry_run}
+    if dry_run or not records:
+        return out
+    rep = import_records(eng, records)
+    out.update(rep)
+    out["written"] = rep["inserted"]  # kept for older callers
+    return out
 
 
-__all__ = ["backfill", "parse_since", "records_for", "requested_from_template", "status_of"]
+__all__ = ["backfill", "import_records", "parse_since", "records_for", "requested_from_template", "status_of"]

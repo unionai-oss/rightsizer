@@ -85,7 +85,13 @@ impl Shared {
     }
 }
 
-/// `Engine(config=None, *, store=None, role="client", env_overrides=True)`.
+/// `Engine(config=None, *, store=None, role="client", env_overrides=True, storage_options=None)`.
+///
+/// `storage_options` (a `dict[str, str]`) are the object-store options of
+/// the history store (`object_store` keys or fsspec spellings: credentials,
+/// endpoint, region, …; SPEC §10.3). They override
+/// `[history.storage_options]` key by key and are never written to the
+/// process environment.
 #[pyclass(name = "Engine", module = "rightsizer._core", frozen)]
 pub struct PyEngine {
     shared: Arc<Shared>,
@@ -125,13 +131,60 @@ fn run_decide(py: Python<'_>, shared: &Arc<Shared>, request_json: &str) -> Strin
     })
 }
 
+/// See [`PyEngine::import_runs`].
+pub async fn import_runs(engine: &rightsizer_engine::Engine, recs: Vec<RunRecord>) -> Result<String, String> {
+    use rightsizer_history::{Importer, PutOutcome};
+    let read = recs.len();
+    let mut imp = Importer::new();
+    let mut fresh = Vec::new();
+    let mut duplicates = 0usize;
+    for r in recs {
+        match imp.put_run(engine.store().as_ref(), &r).await.map_err(|e| e.to_string())? {
+            PutOutcome::Inserted => fresh.push(r),
+            PutOutcome::Duplicate => duplicates += 1,
+        }
+    }
+    let inserted = fresh.len();
+    let (mut joined, mut leases_closed) = (0usize, 0usize);
+    let mut attributions = std::collections::BTreeMap::<String, usize>::new();
+    let mut tripped = Vec::new();
+    for r in fresh {
+        // Already stored by the importer: process without writing again
+        // (joins, attribution, breakers, lease closing).
+        if let Ok(rep) = engine.outcome_with(r, rightsizer_engine::OutcomeOptions { prewritten: true }).await {
+            joined += rep.joined as usize;
+            leases_closed += rep.lease_closed as usize;
+            if let Some(a) = rep.attribution {
+                *attributions.entry(a).or_default() += 1;
+            }
+            tripped.extend(rep.tripped.into_iter().map(|s| s.to_string()));
+        }
+    }
+    engine.flush().await;
+    Ok(serde_json::json!({
+        "read": read, "inserted": inserted, "duplicates": duplicates, "joined": joined,
+        "attributions": attributions, "tripped": tripped, "leases_closed": leases_closed,
+    })
+    .to_string())
+}
+
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (config=None, *, store=None, role=None, env_overrides=true))]
-    fn new(py: Python<'_>, config: Option<String>, store: Option<String>, role: Option<String>, env_overrides: bool) -> PyResult<Self> {
+    #[pyo3(signature = (config=None, *, store=None, role=None, env_overrides=true, storage_options=None))]
+    fn new(
+        py: Python<'_>,
+        config: Option<String>,
+        store: Option<String>,
+        role: Option<String>,
+        env_overrides: bool,
+        storage_options: Option<std::collections::BTreeMap<String, String>>,
+    ) -> PyResult<Self> {
         let role = api::parse_role(role.as_deref()).map_err(|e| rs_err(py, e))?;
-        let cfg = py.detach(|| api::load_config(config.as_deref(), store.as_deref(), env_overrides)).map_err(|e| rs_err(py, e))?;
+        let mut cfg = py.detach(|| api::load_config(config.as_deref(), store.as_deref(), env_overrides)).map_err(|e| rs_err(py, e))?;
+        for (k, v) in storage_options.unwrap_or_default() {
+            cfg.history.storage_options.insert(k, v);
+        }
         let shared = Shared::new(cfg, role);
         // Build now so `strict` configuration errors surface here.
         let s2 = shared.clone();
@@ -268,12 +321,44 @@ impl PyEngine {
         })
     }
 
+    /// Bulk import (`rsz history import …` backfills): `RunRecord`s (JSON
+    /// array). Each record is deduplicated against its key's **whole**
+    /// stored history (`rightsizer_history::Importer`, like the Rust
+    /// importers), so a re-import of an overlapping window inserts nothing;
+    /// attribution, breakers and lease closing run only for inserted
+    /// records (after every record is stored, so a recovered OOM is seen as
+    /// such). Returns JSON `{read, inserted, duplicates, joined,
+    /// attributions: {attribution: n}, tripped: [scope], leases_closed}`.
+    /// Raises `RightsizerError` on invalid records or a store error.
+    fn import_runs(&self, py: Python<'_>, records_json: &str) -> PyResult<String> {
+        let recs: Vec<RunRecord> = serde_json::from_str(records_json).map_err(|e| rs_err(py, format!("records: {e}")))?;
+        let shared = self.shared.clone();
+        py.detach(move || -> Result<String, String> {
+            let engine = shared.engine()?;
+            block_on(async move { import_runs(&engine, recs).await })?
+        })
+        .map_err(|e| rs_err(py, e))
+    }
+
     /// Flush buffered writes; returns how many were written.
     fn flush(&self, py: Python<'_>) -> PyResult<usize> {
         let shared = self.shared.clone();
         py.detach(move || -> Result<usize, String> {
             let engine = shared.engine()?;
             block_on(async move { engine.flush().await })
+        })
+        .map_err(|e| rs_err(py, e))
+    }
+
+    /// Forget cached history and memoized estimates for `key` (a workload
+    /// key string), so the next decision re-reads the store. Raises
+    /// `RightsizerError` only on an unparseable key.
+    fn invalidate(&self, py: Python<'_>, key: &str) -> PyResult<()> {
+        let key: rightsizer_core::WorkloadKey = key.parse().map_err(|e| rs_err(py, format!("key: {e}")))?;
+        let shared = self.shared.clone();
+        py.detach(move || -> Result<(), String> {
+            shared.engine()?.invalidate(&key);
+            Ok(())
         })
         .map_err(|e| rs_err(py, e))
     }

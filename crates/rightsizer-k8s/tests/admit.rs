@@ -151,3 +151,38 @@ async fn no_patch_that_would_push_annotations_over_the_apiserver_limit() {
     let resp = a.review("jobs.rightsizer.io", &review(common::value("job.yaml"), "ml", false)).await;
     assert!(resp["response"].get("patch").is_some());
 }
+
+/// A large AdmissionReview (well over axum's 2 MB default body limit, as the
+/// API server sends for big objects: ~3 MiB object + oldObject) is admitted,
+/// not rejected with 413 (a call failure); bodies over 16 MiB are refused.
+#[cfg(feature = "webhook")]
+#[tokio::test]
+async fn webhook_accepts_large_admission_reviews() {
+    use tower::ServiceExt as _;
+    let a = Arc::new(admitter("recommend").await);
+    let app = rightsizer_k8s::webhook::router(rightsizer_k8s::webhook::AppState {
+        admitter: a,
+        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    });
+    let mut obj = common::value("job.yaml");
+    obj["metadata"]["annotations"]["big"] = json!("x".repeat(6 * 1024 * 1024));
+    let mut r = review(obj, "ml", false);
+    r["request"]["oldObject"] = json!({"padding": "y".repeat(3 * 1024 * 1024)});
+    let body = serde_json::to_vec(&r).unwrap();
+    assert!(body.len() > 9 * 1024 * 1024);
+    let post = |body: Vec<u8>| {
+        app.clone().oneshot(
+            axum::http::Request::post(rightsizer_k8s::manifests::JOBS_PATH)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap(),
+        )
+    };
+    let resp = post(body).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let v: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(v["response"]["allowed"], true);
+    assert_eq!(v["response"]["uid"], "u-1");
+    let huge = vec![b' '; rightsizer_k8s::webhook::MAX_REVIEW_BYTES + 1];
+    assert_eq!(post(huge).await.unwrap().status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+}

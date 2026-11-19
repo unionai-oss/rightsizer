@@ -29,6 +29,10 @@ struct Flaky {
     delay_ms: AtomicUsize,
     /// Latency of `runs` after it has read the store, ms (the answer is as of the start).
     delay_after_read_ms: AtomicUsize,
+    /// `runs_changed_since` calls.
+    checks: AtomicUsize,
+    /// Latency of `runs_changed_since`, ms.
+    check_delay_ms: AtomicUsize,
 }
 
 impl Flaky {
@@ -40,6 +44,8 @@ impl Flaky {
             reads: AtomicUsize::new(0),
             delay_ms: AtomicUsize::new(0),
             delay_after_read_ms: AtomicUsize::new(0),
+            checks: AtomicUsize::new(0),
+            check_delay_ms: AtomicUsize::new(0),
         })
     }
     fn set_down(&self, d: bool) {
@@ -79,6 +85,19 @@ impl HistoryStore for Flaky {
             tokio::time::sleep(Duration::from_millis(d as u64)).await;
         }
         r
+    }
+    async fn run_marker(&self, key: &WorkloadKey) -> Result<Option<String>, StoreError> {
+        self.check()?;
+        self.inner.run_marker(key).await
+    }
+    async fn runs_changed_since(&self, key: &WorkloadKey, marker: &str) -> Result<bool, StoreError> {
+        self.checks.fetch_add(1, Ordering::SeqCst);
+        let d = self.check_delay_ms.load(Ordering::SeqCst);
+        if d > 0 {
+            tokio::time::sleep(Duration::from_millis(d as u64)).await;
+        }
+        self.check()?;
+        self.inner.runs_changed_since(key, marker).await
     }
     async fn decisions(&self, f: &DecisionFilter) -> Result<Vec<Decision>, StoreError> {
         self.check()?;
@@ -406,4 +425,60 @@ async fn a_hung_store_read_times_out() {
     // The next reader starts a new read instead of joining the hung one.
     inner.delay_ms.store(0, Ordering::SeqCst);
     assert!(matches!(c.history(&k, 10).await, HistoryRead::Fresh(v) if v.len() == 1));
+}
+
+/// Refinement round (item 3): a record another process writes is seen once
+/// the entry's last check is older than `revalidate`, not after the TTL.
+/// No check is due → no store call at all; a due check that cannot finish
+/// within the caller's wait answers from the cache and the refresh lands
+/// for the next read; the change hook fires.
+#[tokio::test]
+async fn revalidation_sees_other_processes_writes() {
+    use rightsizer_core::clock::ManualClock;
+    let inner = Flaky::new();
+    let k = k1();
+    inner.put_run(&rec(&k, "a", 1, t(0))).await.unwrap();
+    let clock = Arc::new(ManualClock::new(t(0)));
+    let opts = CacheOptions { revalidate: Some(Duration::from_secs(30)), ..CacheOptions::default() };
+    let me = CachedStore::with_clock(inner.clone(), opts, clock.clone());
+    let changed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let c2 = changed.clone();
+    me.set_on_change(Arc::new(move |k: &WorkloadKey| c2.lock().unwrap().push(k.to_string())));
+    assert_eq!(me.history(&k, 10).await.records().unwrap().len(), 1);
+    // Another process writes (straight to the store, not through this cache).
+    inner.inner.put_run(&rec(&k, "b", 1, t(5))).await.unwrap();
+    let reads = inner.reads.load(Ordering::SeqCst);
+    clock.advance(Duration::from_secs(29));
+    assert_eq!(me.history(&k, 10).await.records().unwrap().len(), 1, "no check due yet: cached");
+    assert_eq!(inner.checks.load(Ordering::SeqCst), 0, "a hit with no check due touches nothing");
+    assert_eq!(inner.reads.load(Ordering::SeqCst), reads);
+    clock.advance(Duration::from_secs(2));
+    let r = me.history_within(&k, 10, Duration::from_secs(5)).await;
+    assert!(matches!(&r, HistoryRead::Fresh(v) if v.len() == 2), "{r:?}");
+    assert_eq!(inner.checks.load(Ordering::SeqCst), 1);
+    assert_eq!(changed.lock().unwrap().as_slice(), [k.to_string()]);
+    // Nothing new: the next due check finds no change and keeps the entry.
+    clock.advance(Duration::from_secs(31));
+    let reads = inner.reads.load(Ordering::SeqCst);
+    assert!(matches!(me.history_within(&k, 10, Duration::from_secs(5)).await, HistoryRead::Cached { .. }));
+    assert_eq!(inner.checks.load(Ordering::SeqCst), 2);
+    assert_eq!(inner.reads.load(Ordering::SeqCst), reads, "no change: no refresh");
+    // A slow check never holds the caller past its wait.
+    inner.inner.put_run(&rec(&k, "c", 1, t(9))).await.unwrap();
+    inner.check_delay_ms.store(200, Ordering::SeqCst);
+    clock.advance(Duration::from_secs(31));
+    let t0 = std::time::Instant::now();
+    let r = me.history_within(&k, 10, Duration::from_millis(10)).await;
+    assert!(t0.elapsed() < Duration::from_millis(150), "waited {:?}", t0.elapsed());
+    assert!(matches!(&r, HistoryRead::Cached { records, .. } if records.len() == 2), "stale data within the wait");
+    // The check finishes in the background, marks the entry stale, and the next read refreshes.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let r = me.history_within(&k, 10, Duration::from_secs(5)).await;
+    assert!(matches!(&r, HistoryRead::Fresh(v) if v.len() == 3), "{r:?}");
+    assert_eq!(inner.checks.load(Ordering::SeqCst), 3, "one check per key per interval");
+    // A store that cannot be checked keeps the cached entry (TTL rules).
+    inner.check_delay_ms.store(0, Ordering::SeqCst);
+    inner.set_down(true);
+    clock.advance(Duration::from_secs(31));
+    assert!(matches!(me.history_within(&k, 10, Duration::from_secs(1)).await, HistoryRead::Cached { .. }));
 }
