@@ -71,12 +71,25 @@ local function recently_failed(path, now)
   return ts ~= nil and ts <= now and now - ts < M.NEG_TTL_S
 end
 
+-- The marker lives at a predictable name in a world-writable directory, so
+-- it is never opened for writing in place: another user could have planted
+-- a symlink there (to this user's ~/.bashrc, say) and io.open(path, "w")
+-- would truncate its target. Instead the timestamp goes into a fresh
+-- os.tmpname() file (mkstemp: created by us, mode 0600) that is renamed
+-- over the marker; rename replaces a planted symlink itself, never its
+-- target, and fails (we then drop the temp file) on a name another user
+-- owns in a sticky /tmp.
 local function mark_failed(path, now)
-  local f = io.open(path, "w")
-  if f then
-    f:write(string.format("%d\n", now))
-    f:close()
+  local ok, tmp = pcall(os.tmpname)
+  if not ok or type(tmp) ~= "string" then return end
+  local f = io.open(tmp, "w")
+  if not f then
+    os.remove(tmp)
+    return
   end
+  f:write(string.format("%d\n", now))
+  f:close()
+  if not os.rename(tmp, path) then os.remove(tmp) end
 end
 
 local function nonempty(v)
@@ -165,12 +178,15 @@ function M.pre_submit(options, offset, deps)
     end
     local typ = options.type
     if typ == "sbatch" and resp.mode == "enforce" then
-      local applied = M.apply(options, resp)
-      if applied and type(resp.token) == "string" and resp.token ~= "" then
+      -- A layer that cannot write its marker does not change the
+      -- submission: without a well-formed token (base64url, '.'-joined for
+      -- het jobs) nothing is applied, so every resized job is attributable.
+      local tok = resp.token
+      if type(tok) == "string" and tok:match("^[%w%-_%.]+$") and M.apply(options, resp) then
         -- Keep the user's export semantics: unset means ALL.
         local exp = options["export"]
         if not nonempty(exp) then exp = "ALL" end
-        options["export"] = exp .. ",RIGHTSIZER_TOKEN=" .. resp.token
+        options["export"] = exp .. ",RIGHTSIZER_TOKEN=" .. tok
       end
     elseif type(resp.summary) == "string" and resp.summary ~= "" then
       (deps.stderr or io.stderr):write("rightsizer: " .. resp.summary .. "\n")

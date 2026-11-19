@@ -175,7 +175,9 @@ def _nodes(predictor: Any) -> list[dict]:
             continue
         if "is_categorical" in names and n["is_categorical"]:
             raise ValueError("categorical split; not supported by rightsizer-trees/1")
-        out.append({"feature": int(n["feature_idx"]), "threshold": float(n[thr]), "left": int(n["left"]),
+        from rightsizer.export._trees import finite_threshold
+
+        out.append({"feature": int(n["feature_idx"]), "threshold": finite_threshold(n[thr]), "left": int(n["left"]),
                     "right": int(n["right"]), "default_left": bool(n["missing_go_to_left"]), "missing": "none"})
     return out
 

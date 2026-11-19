@@ -25,6 +25,7 @@ pass through unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import urllib.parse
@@ -41,6 +42,7 @@ log = logging.getLogger("rightsizer.runtime.flyte")
 HISTORY_URI_ENV = "RIGHTSIZER__HISTORY__URI"
 DEFAULT_PREFIX = "rightsizer"
 CPU_WINDOW_S = 60.0
+PUT_TIMEOUT_S = 15.0
 
 
 def store_uri(raw_data_path: Optional[str] = None, environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
@@ -102,6 +104,7 @@ def _flyte_remote_storage() -> bool:
 async def write_records(uri: str, records: Iterable[Tuple[RunRecord, Optional[str]]]) -> int:
     """Write records under ``uri``; returns how many were written. Never raises."""
     n = 0
+    slow = False
     fallback: Optional[RunRecordWriter] = None
     for rec, tenant in records:
         try:
@@ -115,11 +118,15 @@ async def write_records(uri: str, records: Iterable[Tuple[RunRecord, Optional[st
             try:
                 import flyte.storage as storage  # type: ignore
 
-                await storage.put_stream(data, to_path=f"{uri.rstrip('/')}/{rel}")
+                await asyncio.wait_for(storage.put_stream(data, to_path=f"{uri.rstrip('/')}/{rel}"), PUT_TIMEOUT_S)
                 written = True
+            except asyncio.TimeoutError:
+                # A hung store must not hang the task (S1); do not wait on fsspec too.
+                log.warning("rightsizer: RunRecord write timed out after %g s; dropped", PUT_TIMEOUT_S)
+                slow = True
             except Exception as e:
                 log.warning("rightsizer: RunRecord write through flyte.storage failed (%s); trying fsspec", e)
-        if not written:
+        if not written and not slow:
             try:
                 if fallback is None:
                     fallback = RunRecordWriter(uri)

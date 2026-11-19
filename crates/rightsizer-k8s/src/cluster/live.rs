@@ -198,7 +198,7 @@ pub async fn apply_watch(client: &Client, engine: &Engine, adapter: &K8sAdapter,
         obj.pointer_mut("/metadata").and_then(Value::as_object_mut).map(|m| m.entry("namespace").or_insert(json!(o.namespace)));
         let native = Native::Object { value: obj.clone() };
         let rendered = adapter
-            .render_with(&native, &RenderRequest { mode: Mode::Enforce, decision_id: ds.first().map(|(_, d)| d.id.to_string()), units: renders.clone(), annotate: true, output: Output::JsonPatch })
+            .render_with(&native, &RenderRequest { mode: Mode::Enforce, decision_id: ds.first().map(|(_, d)| d.id.to_string()), units: renders.clone(), annotate: true, output: Output::JsonPatch, namespace: Some(o.namespace.clone()) })
             .map_err(|e| e.to_string())?;
         let mut sized = match &rendered.patch {
             Patch::JsonPatch { ops } => match adapter.validate_at(&native, &rendered.patch, env, Utc::now()) {

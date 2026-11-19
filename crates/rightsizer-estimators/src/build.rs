@@ -143,8 +143,16 @@ pub async fn build_chain(spec: &ChainSpec, privacy: &RemotePrivacy) -> Result<Bu
             .and_then(|m| m.kind.clone())
             .unwrap_or_else(|| if m.is_some_and(|m| m.url.is_some()) { "remote".into() } else { name.clone() });
         let est: Option<Arc<dyn Estimator>> = match kind.as_str() {
-            "rules-sized" => Some(Arc::new(RulesSized::new(params::<RulesSizedParams>(name, m)?))),
-            "history-peak" => Some(Arc::new(HistoryPeak::new(params::<HistoryPeakParams>(name, m)?))),
+            "rules-sized" => {
+                let p = params::<RulesSizedParams>(name, m)?;
+                p.validate().map_err(|message| BuildError::Config { name: name.clone(), message })?;
+                Some(Arc::new(RulesSized::new(p)))
+            }
+            "history-peak" => {
+                let p = params::<HistoryPeakParams>(name, m)?;
+                p.validate().map_err(|message| BuildError::Config { name: name.clone(), message })?;
+                Some(Arc::new(HistoryPeak::new(p)))
+            }
             "prior" => Some(Arc::new(PriorEstimator::default())),
             "gbt" => {
                 let g = match m.and_then(|m| m.path.as_deref()) {
@@ -253,5 +261,23 @@ mod tests {
         assert!(b.is_ok());
         let bad = build(serde_json::json!({"chain": ["history-peak"], "members": {"history-peak": {"params": {"k": "x"}}}})).await;
         assert!(matches!(bad, Err(BuildError::Config { .. })));
+    }
+
+    /// Parameters that silently collapse every estimate to the 16 MiB floor
+    /// (a zero or negative margin, a negative cold-start slope) or that
+    /// undo the OOM bump are configuration errors, not estimates.
+    #[tokio::test]
+    async fn rejects_degenerate_params() {
+        for (member, params) in [
+            ("history-peak", serde_json::json!({"margin": 0.0})),
+            ("history-peak", serde_json::json!({"bump_factor": 0.5})),
+            ("history-peak", serde_json::json!({"sigma": -1.0})),
+            ("rules-sized", serde_json::json!({"margin": -1.0})),
+            ("rules-sized", serde_json::json!({"cold_default": {"base_mib": 256.0, "k": -2.0, "exponent": 1.0}})),
+            ("rules-sized", serde_json::json!({"bump_add_mib": -100.0})),
+        ] {
+            let b = build(serde_json::json!({"chain": [member], "members": {member: {"params": params.clone()}}})).await;
+            assert!(matches!(b, Err(BuildError::Config { .. })), "{member} {params}: accepted");
+        }
     }
 }

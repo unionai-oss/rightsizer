@@ -140,6 +140,35 @@ pub fn verify_pin(spec: &PluginSpec) -> Result<(), CallError> {
     Ok(())
 }
 
+/// Longest plugin stderr line kept for the log (the rest is dropped).
+pub const MAX_STDERR_LINE: usize = 8 << 10;
+
+/// One line of a plugin's stderr, at most `max` bytes (lossy UTF-8): a
+/// plugin that writes megabytes without a newline must not make the daemon
+/// buffer them. `None` at EOF.
+pub async fn read_log_line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R, max: usize) -> std::io::Result<Option<String>> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut seen = false;
+    loop {
+        let avail = r.fill_buf().await?;
+        if avail.is_empty() {
+            return Ok(seen.then(|| String::from_utf8_lossy(&buf).into_owned()));
+        }
+        seen = true;
+        let (chunk, done) = match avail.iter().position(|b| *b == b'\n') {
+            Some(i) => (&avail[..i], Some(i + 1)),
+            None => (avail, None),
+        };
+        let room = max.saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        let n = done.unwrap_or(avail.len());
+        r.consume(n);
+        if done.is_some() {
+            return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+        }
+    }
+}
+
 type Pending = Arc<std::sync::Mutex<HashMap<i64, oneshot::Sender<Response>>>>;
 
 struct Conn {
@@ -296,8 +325,8 @@ impl PluginClient {
         if let Some(err) = child.stderr.take() {
             let k = kind.clone();
             tokio::spawn(async move {
-                let mut lines = BufReader::new(err).lines();
-                while let Ok(Some(l)) = lines.next_line().await {
+                let mut r = BufReader::new(err);
+                while let Ok(Some(l)) = read_log_line(&mut r, MAX_STDERR_LINE).await {
                     tracing::debug!(plugin = %k, "{l}");
                 }
             });
@@ -566,5 +595,23 @@ impl Adapter for PluginAdapter {
             Ok(ValidateResult { rejection: None, .. }) => Err(Rejection { reason: "rejected".into(), detail: None, field: None }),
             Err(e) => Err(Rejection { reason: "plugin_error".into(), detail: Some(e.to_string()), field: None }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stderr_lines_are_bounded() {
+        // 10 MiB without a newline, then a normal line.
+        let mut data = vec![b'x'; 10 << 20];
+        data.extend_from_slice(b"\nok\ntail");
+        let mut r = BufReader::new(&data[..]);
+        let first = read_log_line(&mut r, 1024).await.unwrap().unwrap();
+        assert_eq!(first.len(), 1024);
+        assert_eq!(read_log_line(&mut r, 1024).await.unwrap().as_deref(), Some("ok"));
+        assert_eq!(read_log_line(&mut r, 1024).await.unwrap().as_deref(), Some("tail"));
+        assert_eq!(read_log_line(&mut r, 1024).await.unwrap(), None);
     }
 }

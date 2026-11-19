@@ -139,6 +139,9 @@ pub struct WatcherConfig {
     pub delay: Duration,
     /// Adapter settings map (`[k8s]`).
     pub base: Map<String, Value>,
+    /// Run the engine's lease-expiry sweep (`Engine::sweep`, SPEC §2.3 S5)
+    /// this often while leading (`None`: never).
+    pub sweep_every: Option<Duration>,
 }
 
 /// Watcher metrics.
@@ -189,6 +192,9 @@ pub struct Term {
     pub term: Value,
     /// Status known from the pod (eviction).
     pub status_hint: Option<RunStatus>,
+    /// The owner chain read when the termination was seen (`top_owner`): a
+    /// Job with `ttlSecondsAfterFinished: 0` is gone by the time peaks are read.
+    pub owners: Option<(Value, Option<Value>)>,
 }
 
 fn ts(v: Option<&Value>) -> Option<DateTime<Utc>> {
@@ -222,6 +228,28 @@ pub fn status_of(term: &Value, pod: &Value, owner: Option<&Value>) -> RunStatus 
         return RunStatus::Timeout;
     }
     RunStatus::Failed
+}
+
+/// The attempt number of run `restart` (0-based) of the `rank`-th (1-based)
+/// pod of an invocation: ordered by (pod, restart) and collision-free, so
+/// the store's (key, invocation, attempt, source) dedup never drops a
+/// genuine run (`rank + restart` made pod 1's first restart and pod 2's
+/// first run both attempt 2).
+pub fn attempt_number(rank: u32, restart: u32) -> u32 {
+    rank.max(1).saturating_sub(1).saturating_mul(1000).saturating_add(restart.min(999)).saturating_add(1)
+}
+
+/// The engine's unclassified-failure sweep (SPEC §2.3 S5): ladder leases
+/// left open past `policy.lease_ttl` count their failures as unrecovered.
+/// Leader-only, so one replica sweeps.
+async fn sweep_loop(engine: Engine, every: Duration) {
+    loop {
+        tokio::time::sleep(every).await;
+        match engine.sweep(false).await {
+            Ok(r) => tracing::debug!(report = ?r, "watcher: lease sweep"),
+            Err(e) => tracing::warn!(error = %e, "watcher: lease sweep failed"),
+        }
+    }
 }
 
 /// The unit of `top` that container `c` of `pod` belongs to.
@@ -279,17 +307,33 @@ impl Watcher {
             tracing::info!("watcher: leading; watching sized pods");
             let me = self.clone();
             let work = tokio::spawn(async move { me.watch_pods().await });
+            let sweep = self.cfg.sweep_every.map(|every| {
+                let engine = self.engine.clone();
+                tokio::spawn(async move { sweep_loop(engine, every).await })
+            });
             loop {
                 if leading.changed().await.is_err() || !*leading.borrow() {
                     break;
                 }
             }
             work.abort();
+            if let Some(s) = sweep {
+                s.abort();
+            }
             tracing::info!("watcher: lost leadership");
         }
     }
 
-    /// Run without leader election (tests, single replica).
+    /// Run without leader election (tests, single replica): the pod watch
+    /// and, when configured, the lease sweep.
+    pub async fn run_unelected(self: Arc<Self>) {
+        if let Some(every) = self.cfg.sweep_every {
+            tokio::spawn(sweep_loop(self.engine.clone(), every));
+        }
+        self.watch_pods().await
+    }
+
+    /// The pod watch alone.
     pub async fn watch_pods(self: Arc<Self>) {
         let api: Api<Pod> = Api::all(self.client.clone());
         let mut stream = watcher(api, watcher::Config::default().labels(SIZED_LABEL)).boxed();
@@ -325,7 +369,7 @@ impl Watcher {
                 let mut push = |term: &Value, restart: u32, hint: Option<RunStatus>| {
                     let id = format!("{uid}/{name}/{restart}");
                     if self.first_time(&id) {
-                        out.push(Term { pod: pod.clone(), container: name.clone(), restart, term: term.clone(), status_hint: hint });
+                        out.push(Term { pod: pod.clone(), container: name.clone(), restart, term: term.clone(), status_hint: hint, owners: None });
                     }
                 };
                 if let Some(t) = cs.pointer("/state/terminated") {
@@ -374,7 +418,10 @@ impl Watcher {
         (cur, direct)
     }
 
-    async fn process(self: Arc<Self>, t: Term) {
+    async fn process(self: Arc<Self>, mut t: Term) {
+        if let Some(ns) = t.pod.pointer("/metadata/namespace").and_then(Value::as_str).map(str::to_string) {
+            t.owners = Some(self.top_owner(&t.pod, &ns).await);
+        }
         let finished = ts(t.term.get("finishedAt")).unwrap_or_else(Utc::now);
         let wait = if self.cfg.node_agent.is_some() && self.cfg.prom.is_none() { Duration::from_secs(1) } else { self.cfg.delay };
         let due = finished + chrono::Duration::from_std(wait).unwrap_or_default();
@@ -401,7 +448,15 @@ impl Watcher {
         if !inputs.enabled() {
             return Ok(None);
         }
-        let (top, direct) = self.top_owner(pod, &ns).await;
+        let (mut top, mut direct) = self.top_owner(pod, &ns).await;
+        // The owner was deleted meanwhile: use the chain read at termination.
+        if let Some((t0, d0)) = &t.owners
+            && top.pointer("/metadata/uid") == pod.pointer("/metadata/uid")
+            && t0.pointer("/metadata/uid") != pod.pointer("/metadata/uid")
+        {
+            top = t0.clone();
+            direct = direct.or_else(|| d0.clone());
+        }
         let mut settings = self.cfg.base.clone();
         inputs.apply_to(&mut settings);
         let adapter = (self.adapter)();
@@ -413,7 +468,8 @@ impl Watcher {
         // Join: per-unit decision id, then the object's, then the pod's.
         let (obj_id, per) = crate::runtime::decision_ids(&top);
         let pod_id = string_map(pod, "/metadata/annotations").get(crate::extract::DECISION_ID).cloned();
-        let mut decision_id: Option<Ulid> = per.get(&unit.id.0).cloned().or(obj_id).or(pod_id).and_then(|s| s.parse().ok());
+        let claimed: Option<Ulid> = per.get(&unit.id.0).cloned().or(obj_id).or(pod_id).and_then(|s| s.parse().ok());
+        let mut decision_id = crate::runtime::verified_decision_id(&self.engine, claimed, &key).await;
         let created = ts(pod.pointer("/metadata/creationTimestamp")).unwrap_or_else(Utc::now);
         if decision_id.is_none() {
             let f = DecisionFilter { key: Some(key.clone()), since: Some(created - chrono::Duration::minutes(10)), limit: Some(16), ..Default::default() };
@@ -483,8 +539,15 @@ impl Watcher {
         let invocation_id = top_ann.get(INVOCATION_ANNOTATION).cloned().unwrap_or(top_uid.clone());
         let attempt = match top_ann.get(ATTEMPT_ANNOTATION).and_then(|a| a.parse::<u32>().ok()) {
             Some(a) => a + t.restart,
-            None => self.attempt_of(pod, &top, &ns).await + t.restart,
+            None => attempt_number(self.attempt_of(pod, &top, &ns).await, t.restart),
         };
+        // Already recorded (a new leader re-lists every terminated pod): the
+        // engine would attribute and count it again.
+        if let Ok(runs) = self.engine.store().runs(&key, 512).await
+            && runs.iter().any(|r| r.invocation_id == invocation_id && r.attempt == attempt && r.source == OutcomeSource::Watcher)
+        {
+            return Ok(None);
+        }
         let rec = RunRecord {
             v: rightsizer_core::WIRE_VERSION,
             key: key.clone(),

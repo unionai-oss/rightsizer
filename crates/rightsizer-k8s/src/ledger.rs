@@ -38,6 +38,19 @@ pub trait ReservationLedger: Send + Sync {
     fn release(&self, namespace: &str, id: &str);
     /// The sum of live reservations in `namespace` at `now` (requests, limits).
     fn reserved(&self, namespace: &str, now: DateTime<Utc>) -> (Totals, Totals);
+    /// The part of [`ReservationLedger::reserved`] other admitting replicas
+    /// may not have seen yet (a ledger shared with a sync lag). Default: none.
+    fn unsynced(&self, _namespace: &str, _now: DateTime<Utc>) -> (Totals, Totals) {
+        (Totals::default(), Totals::default())
+    }
+    /// The number of replicas admitting concurrently against this ledger
+    /// (≥ 1). With more than one, `validate` lets each replica use only its
+    /// share of the quota headroom for increases the others cannot see yet,
+    /// so concurrent admissions within one sync period cannot overrun the
+    /// quota together. Default: 1.
+    fn peers(&self) -> u64 {
+        1
+    }
 }
 
 /// In-process ledger with a fixed TTL.
@@ -65,6 +78,13 @@ impl MemoryLedger {
     /// Whether empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    /// Live reservations of `namespace` at `now` (expired ones dropped).
+    pub fn live(&self, namespace: &str, now: DateTime<Utc>) -> Vec<Reservation> {
+        let Ok(mut items) = self.items.lock() else { return Vec::new() };
+        let ttl = self.ttl;
+        items.retain(|x| now.signed_duration_since(x.at) < ttl);
+        items.iter().filter(|x| x.namespace == namespace).cloned().collect()
     }
     /// One reservation.
     pub fn get(&self, namespace: &str, id: &str) -> Option<Reservation> {

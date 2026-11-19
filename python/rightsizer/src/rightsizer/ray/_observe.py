@@ -202,7 +202,10 @@ class Observer:
 
         loc = (get_local_object_locations([ref]) or {}).get(ref) or {}
         size = loc.get("object_size")
-        if isinstance(size, int) and size > INLINE_LIMIT_BYTES:
+        # A plasma object (it has node locations, or is too big to be inlined)
+        # is a success and is never read: a zero-timeout ``get_objects`` on it
+        # would still start pulling it to this node.
+        if (isinstance(size, int) and size > INLINE_LIMIT_BYTES) or loc.get("node_ids") or loc.get("did_spill"):
             self.stats["skipped_plasma"] += 1
             return None, "plasma"
         w = ray._private.worker.global_worker

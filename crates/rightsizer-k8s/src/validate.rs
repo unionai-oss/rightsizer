@@ -403,10 +403,26 @@ pub fn validate(sub: &Submission, patch: &Patch, cx: &ValidateCtx<'_>) -> Result
             let (r1, l1) = object_totals(new, cx.settings, cx.namespace).map_err(|e| reject(check::POD_SPEC, e, None))?;
             let (r0, l0) = object_totals(orig, cx.settings, cx.namespace).map_err(|e| reject(check::POD_SPEC, e, None))?;
             let (rr, rl) = cx.ledger.reserved(cx.namespace, cx.now);
+            let (ur, ul) = cx.ledger.unsynced(cx.namespace, cx.now);
+            let peers = cx.ledger.peers().max(1) as i128;
             for (name, rem) in quota_remaining(&cx.settings.resource_quotas, cx.namespace) {
                 let (Some(a1), Some(a0), Some(res)) = (quota_amount(&name, &r1, &l1), quota_amount(&name, &r0, &l0), quota_amount(&name, &rr, &rl)) else { continue };
                 if a1 > rem - res && a1 > a0 {
                     return Err(reject(check::RESOURCE_QUOTA, format!("{name}: needs {a1}, {} remaining after reservations", rem - res), None));
+                }
+                // Replicas that cannot see each other's latest reservations:
+                // this replica's unsynced increases plus this one must fit its
+                // share of the headroom everyone sees.
+                if peers > 1 && a1 > a0 {
+                    let pending = quota_amount(&name, &ur, &ul).unwrap_or(0).min(res);
+                    let share = (rem - (res - pending) - a0) / peers;
+                    if pending + (a1 - a0) > share {
+                        return Err(reject(
+                            check::RESOURCE_QUOTA,
+                            format!("{name}: +{} (+{pending} pending sync) exceeds this replica's share {share} of the headroom ({peers} replicas)", a1 - a0),
+                            None,
+                        ));
+                    }
                 }
             }
         }

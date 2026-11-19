@@ -112,7 +112,9 @@ def test_deploy_sizes_increases_only_and_restores_the_registry(engine, monkeypat
     flyte.init(project="proj", domain="dev", org="acme")
     out = rf.deploy(env)
     assert out == ["deployment"]
-    assert deployed["version"].startswith("rsz-")
+    # Flyte derives the version (code bundle + envs with the sized tasks + images): a version made
+    # from the sizing alone would give a code change the previous deploy's version.
+    assert deployed["version"] is None
     from rightsizer import _units
 
     mem = deployed["tasks"]["rsz_unit_dep.grow"].memory

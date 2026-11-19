@@ -203,7 +203,47 @@ def inputs_from_args(args: Sequence[Any], kwargs: Mapping[str, Any], scalars: It
 # ── deciding ─────────────────────────────────────────────────────────────
 
 
-def _constraints(pol: SizingPolicy, pins: FrozenSet[str], prior: Mapping[str, Any], shapes_source: str) -> Dict[str, Any]:
+def in_placement_group(options: Mapping[str, Any]) -> bool:
+    """Whether a task/actor with these options is scheduled into a placement group.
+
+    Explicitly (``PlacementGroupSchedulingStrategy`` or the deprecated
+    ``placement_group=`` option) or by Ray capturing the caller's group
+    (``placement_group_capture_child_tasks``, Ray's
+    ``_configure_placement_group_based_on_context``). A request larger than
+    its bundle can never be scheduled (the task stays pending forever), so
+    rightsizer never increases it. Never raises (unknown = not in a group).
+    """
+    try:
+        ss = options.get("scheduling_strategy")
+        try:
+            from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
+            if isinstance(ss, PlacementGroupSchedulingStrategy):
+                return getattr(ss, "placement_group", None) is not None
+        except Exception:  # pragma: no cover - ray is installed when this runs
+            pass
+        pg = options.get("placement_group", "default")
+        if pg is not None and not (isinstance(pg, str) and pg == "default"):
+            return True
+        if ss is not None or pg is None:
+            return False
+        capture = options.get("placement_group_capture_child_tasks")
+        import ray
+
+        w = ray._private.worker.global_worker
+        if capture is None:
+            capture = bool(getattr(w, "should_capture_child_tasks_in_placement_group", False))
+        if not capture:
+            return False
+        pg_id = getattr(w, "placement_group_id", None)
+        return pg_id is not None and not pg_id.is_nil()
+    except Exception as e:
+        log.debug("rightsizer.ray: placement group unknown: %s", e)
+        return False
+
+
+def _constraints(pol: SizingPolicy, pins: FrozenSet[str], prior: Mapping[str, Any], shapes_source: str,
+                 hold_increases: bool = False) -> Dict[str, Any]:
     from .._engine import _requests
 
     c: Dict[str, Any] = {}
@@ -222,6 +262,21 @@ def _constraints(pol: SizingPolicy, pins: FrozenSet[str], prior: Mapping[str, An
             if ceiling.get(ax) is None and prior.get(ax) is not None:
                 ceiling[ax] = prior[ax]
         c["ceiling_reason"] = "no_platform_state"
+    if hold_increases:
+        # Placement-group bundles are fixed: an increase could never be
+        # scheduled, and an axis the task does not request (no prior) is not
+        # in the bundle either.
+        for ax in ("cpu", "memory"):
+            if prior.get(ax) is not None:
+                cap = ceiling.get(ax)
+                ceiling[ax] = prior[ax] if cap is None else min(cap, prior[ax])
+            else:
+                all_pins.add(ax)
+        if all_pins:
+            from ..types import AXES
+
+            c["pinned"] = sorted(all_pins, key=AXES.index)
+        c.setdefault("ceiling_reason", "placement_group")
     if ceiling:
         c["ceiling"] = ceiling
     return c
@@ -289,7 +344,8 @@ def decide_options(
         if can_classify is not None:
             policy["can_classify"] = can_classify
         state: Dict[str, Any] = {"shapes": shapes} if shapes else {}
-        d = s.engine.decide(ctx, constraints=_constraints(pol, pins, prior, src), state=state, **policy)
+        cons = _constraints(pol, pins, prior, src, hold_increases=in_placement_group(opts))
+        d = s.engine.decide(ctx, constraints=cons, state=state, **policy)
         changed = merge(opts, d, prior, set(pol.pins) | set(pins), s.labelled_accelerators)
         return Sized(options=opts, decision=d, changed=changed, settings=s, inputs=[i.to_dict() for i in ins])
     except Exception as e:  # S1: the call proceeds unchanged

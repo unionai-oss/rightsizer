@@ -704,3 +704,529 @@ proptest! {
         prop_assert!(mem(&d.applied).unwrap() >= Bytes::from_gib_f64(prior));
     }
 }
+
+// ── adversarial review: invariants over random contexts ────────────────
+
+mod adversarial {
+    use super::*;
+
+    /// An independent reading of SPEC §2.3 S3(b) (not `safety::s3b_evidence`).
+    fn oracle_s3b(c: &WorkloadContext, proposed: Bytes, min_history: u32, allow_unverified: bool) -> bool {
+        let digest = c.code.as_ref().map(|x| x.digest.as_str());
+        let b_now = c.input_bytes();
+        let mut w = 0.0;
+        for r in &c.history {
+            let Some(m) = r.memory_peak else { continue };
+            if r.status != RunStatus::Succeeded
+                || r.status_confidence != Confidence::Observed
+                || !(allow_unverified || r.trust >= Trust::Authenticated)
+                || !matches!(m.censor, Censor::Exact | Censor::AtMost)
+                || !m.value.is_finite()
+            {
+                continue;
+            }
+            let other = r.code_digest.as_deref() != digest;
+            let res = m.resolution_s.unwrap_or(0.0);
+            let coarse = res >= 10.0;
+            let h = match (coarse, res > 1.0, other) {
+                (true, _, false) => 1.5,
+                (true, _, true) => 1.75,
+                (false, true, false) => 1.25,
+                (false, true, true) => 1.5,
+                (false, false, false) => 1.05,
+                (false, false, true) => 1.25,
+            };
+            let scale = match (b_now, r.input_bytes()) {
+                (Some(n), Some(hb)) if hb > 0 => (n as f64 / hb as f64).max(1.0),
+                _ => 1.0,
+            };
+            if m.value * scale * h <= proposed.0 as f64 {
+                w += if coarse { 0.5 } else { 1.0 };
+            }
+        }
+        w + 1e-9 >= min_history as f64
+    }
+
+    /// An independent reading of S3(a).
+    fn oracle_s3a(c: &WorkloadContext, ceiling: Bytes, attempt: Option<&AttemptContext>, allow_unverified: bool) -> bool {
+        let Some(l) = &c.platform.retry.ladder else { return false };
+        if !c.platform.memory_enforced || l.max_steps == 0 || l.memory_factor.is_nan() || l.memory_factor <= 1.0 {
+            return false;
+        }
+        if l.driver == crate::types::LadderDriver::Orchestrator
+            && !attempt.and_then(|a| a.max_attempts).is_some_and(|m| m.saturating_sub(1) >= l.max_steps)
+        {
+            return false;
+        }
+        let largest = c
+            .history
+            .iter()
+            .filter(|r| r.status == RunStatus::Succeeded && (allow_unverified || r.trust >= Trust::Authenticated))
+            .filter_map(|r| r.requested_memory())
+            .max()
+            .map(Bytes);
+        let ff = [c.prior.spec.requests.memory, largest, l.final_floor.memory].into_iter().flatten().max();
+        ff.is_none_or(|f| f <= ceiling)
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecSpec {
+        peak_gib: f64,
+        req_gib: f64,
+        status: u8,
+        confidence_observed: bool,
+        censor: u8,
+        resolution: u8,
+        trust: u8,
+        other_digest: bool,
+        input_gib: Option<f64>,
+    }
+
+    fn rec_strategy() -> impl Strategy<Value = RecSpec> {
+        (
+            0.0f64..96.0,
+            0.25f64..128.0,
+            0u8..6,
+            prop::bool::weighted(0.8),
+            0u8..3,
+            0u8..4,
+            0u8..3,
+            any::<bool>(),
+            prop::option::of(0.01f64..64.0),
+        )
+            .prop_map(|(peak_gib, req_gib, status, confidence_observed, censor, resolution, trust, other_digest, input_gib)| RecSpec {
+                peak_gib,
+                req_gib,
+                status,
+                confidence_observed,
+                censor,
+                resolution,
+                trust,
+                other_digest,
+                input_gib,
+            })
+    }
+
+    fn build_rec(i: usize, s: &RecSpec) -> RunRecord {
+        let mut r = success(s.peak_gib, s.req_gib);
+        r.invocation_id = format!("inv-{i}");
+        r.started_at = DateTime::from_timestamp(1_700_000_000 - i as i64 * 3600, 0).unwrap();
+        r.status = match s.status {
+            0..=2 => RunStatus::Succeeded,
+            3 => RunStatus::OomKilled,
+            4 => RunStatus::Failed,
+            _ => RunStatus::Unknown,
+        };
+        r.status_confidence = if s.confidence_observed { Confidence::Observed } else { Confidence::Inferred };
+        let censor = [Censor::Exact, Censor::AtMost, Censor::AtLeast][s.censor as usize];
+        let resolution = [None, Some(0.5), Some(5.0), Some(60.0)][s.resolution as usize];
+        r.memory_peak = Some(Measurement { value: s.peak_gib * GIB, censor, resolution_s: resolution });
+        r.trust = [Trust::Unverified, Trust::Authenticated, Trust::Verified][s.trust as usize];
+        if s.other_digest {
+            r.code_digest = Some("d0".into());
+        }
+        if let Some(g) = s.input_gib {
+            r.inputs = vec![InputMeta::blob("in", Bytes::from_gib_f64(g).0)];
+        }
+        r
+    }
+
+    fn est_strategy() -> impl Strategy<Value = Estimate> {
+        let mem = prop_oneof![
+            (0.0f64..300.0).prop_map(|g| AxisEstimate::Point { value: g * GIB }),
+            (0usize..27).prop_map(|i| {
+                let mut p = vec![0.0f32; 27];
+                p[i] = 1.0;
+                AxisEstimate::Cells { grid: "rs-grid-v1".into(), probs: p }
+            }),
+            prop::collection::vec((0.01f32..0.99, 0.0f64..200.0), 1..5)
+                .prop_map(|q| AxisEstimate::Quantiles { q: q.into_iter().map(|(l, v)| (l, v * GIB)).collect() }),
+            (0.0f64..200.0).prop_map(|v| AxisEstimate::Quantiles { q: vec![(0.1, v * GIB), (0.5, v * GIB), (0.9, v * GIB)] }),
+        ];
+        let cpu = prop_oneof![(0.0f64..64.0).prop_map(|v| AxisEstimate::Point { value: v }),];
+        let dur = prop::option::of(prop_oneof![
+            (0.0f64..100_000.0).prop_map(|v| AxisEstimate::Point { value: v }),
+            Just(AxisEstimate::Quantiles { q: vec![(0.1, 0.0), (0.5, 0.0), (0.9, 0.0)] }),
+        ]);
+        (prop::option::of(mem), prop::option::of(cpu), dur, prop::option::of(0.0f32..1.0), prop::bool::weighted(0.2)).prop_map(|(m, c, d, t, action)| {
+            let mut e = est(1.0, 1.0);
+            if action {
+                e.kind = EstimateKind::Action;
+            }
+            e.memory = m;
+            e.cpu_mean = c;
+            e.duration_s = d;
+            e.t_peak_frac = t;
+            e
+        })
+    }
+
+    #[derive(Clone, Debug)]
+    struct World {
+        prior_gib: f64,
+        prior_cpu: f64,
+        mem_limit_ratio: Option<f64>,
+        cpu_limit: bool,
+        guaranteed: bool,
+        history: Vec<RecSpec>,
+        ladder: u8,
+        max_attempts: Option<u32>,
+        memory_enforced: bool,
+        blocked: bool,
+        can_classify: bool,
+        ceiling_gib: Option<f64>,
+        cpu_ceiling_m: Option<u32>,
+        input_gib: Option<f64>,
+        allow_unverified: bool,
+        walltime: Option<u64>,
+        zero_price: bool,
+        model: u8,
+    }
+
+    fn world_strategy() -> impl Strategy<Value = World> {
+        (
+            (0.25f64..256.0, 0.1f64..32.0, prop::option::of(1.0f64..4.0), any::<bool>(), prop::bool::weighted(0.2)),
+            prop::collection::vec(rec_strategy(), 0..9),
+            (0u8..3, prop::option::of(1u32..5), prop::bool::weighted(0.8), prop::bool::weighted(0.15), prop::bool::weighted(0.9)),
+            (prop::option::of(0.5f64..512.0), prop::option::of(100u32..64_000), prop::option::of(0.01f64..64.0)),
+            (prop::bool::weighted(0.2), prop::option::of(1u64..100_000), prop::bool::weighted(0.1), 0u8..4),
+        )
+            .prop_map(|(p, history, l, c, x)| World {
+                prior_gib: p.0,
+                prior_cpu: p.1,
+                mem_limit_ratio: p.2,
+                cpu_limit: p.3,
+                guaranteed: p.4,
+                history,
+                ladder: l.0,
+                max_attempts: l.1,
+                memory_enforced: l.2,
+                blocked: l.3,
+                can_classify: l.4,
+                ceiling_gib: c.0,
+                cpu_ceiling_m: c.1,
+                input_gib: c.2,
+                allow_unverified: x.0,
+                walltime: x.1,
+                zero_price: x.2,
+                model: x.3,
+            })
+    }
+
+    fn setup(w: &World) -> (Fx, WorkloadContext, Option<AttemptContext>) {
+        let mut fx = Fx::new();
+        fx.params.reductions_blocked = w.blocked.then_some(HoldReason::Breaker);
+        fx.params.can_classify = w.can_classify;
+        fx.params.constraints.allow_unverified = w.allow_unverified;
+        fx.constraints.ceiling = Requests {
+            memory: w.ceiling_gib.map(Bytes::from_gib_f64),
+            cpu: w.cpu_ceiling_m.map(MilliCpu),
+            ..Default::default()
+        };
+        if w.zero_price {
+            fx.state.price = crate::types::PriceModel::Linear { rates: crate::types::Rates { cpu_core_hr: 0.0, mem_gib_hr: 0.0, gpu_hr: BTreeMap::new() } };
+        }
+        match w.model {
+            1 => {
+                let shape = |name: &str, cpu: u32, mem: u64, price: f64| crate::types::Shape {
+                    name: name.into(),
+                    cpu: MilliCpu::cores(cpu),
+                    memory: Bytes::gib(mem),
+                    reserved: Bytes::gib(1),
+                    gpu: None,
+                    price: [("training".to_string(), price)].into_iter().collect(),
+                    family: "m5".into(),
+                };
+                fx.state.request_model = RequestModel::Catalog {
+                    shapes: (1..9).map(|k| shape(&format!("s{k}"), 1 << (k / 2), 2u64 << k, 0.05 * (1 << k) as f64)).collect(),
+                };
+                fx.state.price = crate::types::PriceModel::Instance { usage: Some("training".into()) };
+            }
+            2 => {
+                fx.state.request_model = RequestModel::Combos {
+                    combos: vec![
+                        Combo { cpu: MilliCpu(250), memory: vec![Bytes::mib(512), Bytes::gib(1), Bytes::gib(2)] },
+                        Combo { cpu: MilliCpu(1000), memory: (2..=8).map(Bytes::gib).collect() },
+                        Combo { cpu: MilliCpu(4000), memory: (8..=30).map(Bytes::gib).collect() },
+                        Combo { cpu: MilliCpu(16000), memory: (32..=120).step_by(8).map(Bytes::gib).collect() },
+                    ],
+                };
+                fx.state.price = crate::types::PriceModel::Linear { rates: crate::types::Rates { cpu_core_hr: 0.04, mem_gib_hr: 0.0044, gpu_hr: BTreeMap::new() } };
+            }
+            3 => {
+                fx.state.shapes = vec![
+                    NodeShape { name: None, cpu: MilliCpu::cores(8), memory: Bytes::gib(32), gpu: None, price_per_hour: 0.4, host_per_gpu: None },
+                    NodeShape { name: None, cpu: MilliCpu::cores(64), memory: Bytes::gib(256), gpu: None, price_per_hour: 3.2, host_per_gpu: None },
+                ];
+            }
+            _ => {}
+        }
+        let mut c = ctx(Some(w.prior_gib), Some(w.prior_cpu));
+        if w.guaranteed {
+            c.prior.spec.requests.cpu = Some(MilliCpu::from_cores_f64(w.prior_cpu).ceil_whole());
+            c.prior.spec.limits = Limits { memory: c.prior.spec.requests.memory, cpu: c.prior.spec.requests.cpu, ephemeral_storage: None };
+            c.prior.qos = Some(QosClass::Guaranteed);
+        } else {
+            if let Some(r) = w.mem_limit_ratio {
+                c.prior.spec.limits.memory = Some(Bytes::from_gib_f64(w.prior_gib * r));
+            }
+            if w.cpu_limit {
+                c.prior.spec.limits.cpu = Some(MilliCpu::from_cores_f64(w.prior_cpu * 2.0));
+            }
+        }
+        c.history = w.history.iter().enumerate().map(|(i, s)| build_rec(i, s)).collect();
+        if let Some(g) = w.input_gib {
+            c.inputs = vec![InputMeta::blob("in", Bytes::from_gib_f64(g).0)];
+        }
+        c.platform.memory_enforced = w.memory_enforced;
+        c.platform.walltime_s = w.walltime;
+        c.platform.retry.ladder = match w.ladder {
+            1 => Some(Ladder::caller()),
+            2 => Some(Ladder { driver: crate::types::LadderDriver::Orchestrator, ..Ladder::caller() }),
+            _ => None,
+        };
+        let at = w.max_attempts.map(|m| AttemptContext { v: 1, invocation_id: "now".into(), attempt: 1, max_attempts: Some(m) });
+        (fx, c, at)
+    }
+
+    fn run(fx: &Fx, c: &WorkloadContext, e: &Estimate, at: Option<&AttemptContext>) -> Decision {
+        let mut inp = DecisionInput::new(c, Some(e), &fx.grid, &fx.state, &fx.constraints, &fx.params, Mode::Enforce);
+        inp.attempt = at;
+        decide(&inp)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 384, ..ProptestConfig::default() })]
+
+        /// S2/S3/S4 and numerical sanity over random worlds.
+        #[test]
+        fn adversarial_invariants(w in world_strategy(), e in est_strategy()) {
+            let (fx, c, at) = setup(&w);
+            let d = run(&fx, &c, &e, at.as_ref());
+            let pr = &c.prior.spec.requests;
+            let a = &d.applied.requests;
+            let (ceil, ..) = crate::constraints::ceiling(&fx.state, &fx.constraints, pr.gpu, &fx.grid);
+            if let Some(x) = d.expected_cost { prop_assert!(x.is_finite(), "expected cost {x}"); }
+            prop_assert!(d.applied.requests.gpu == pr.gpu && d.recommended.requests.gpu.map(|g| g.count) == pr.gpu.map(|g| g.count));
+            if let Some(p) = d.p_fail { prop_assert!(p.is_finite() && (0.0..=1.0 + 1e-6).contains(&p), "p_fail {p}"); }
+            // S3: a reduction below the origin prior needs (a) or (b), and no block.
+            if let (Some(am), Some(pm)) = (a.memory, pr.memory) && am < pm {
+                prop_assert!(!w.blocked && w.can_classify, "reduction while blocked: {:?}", d.explanation);
+                let s3a = oracle_s3a(&c, ceil, at.as_ref(), w.allow_unverified);
+                let s3b = oracle_s3b(&c, am, fx.params.min_history, w.allow_unverified);
+                prop_assert!(s3a || s3b, "reduction {} → {} without S3: {:#?}", pm, am, d.explanation);
+                if !w.memory_enforced { prop_assert!(s3b, "not enforced: only (b) applies"); }
+            }
+            // S4: an increase stays within the ceiling.
+            if let (Some(am), Some(pm)) = (a.memory, pr.memory) && am > pm {
+                prop_assert!(am <= ceil, "increase {am} above ceiling {ceil}");
+            }
+            // S2: limits.
+            for spec in [&d.applied, &d.recommended] {
+                prop_assert_eq!(spec.limits.memory.is_some(), c.prior.spec.limits.memory.is_some());
+                prop_assert_eq!(spec.limits.cpu.is_some(), c.prior.spec.limits.cpu.is_some());
+                if let (Some(l), Some(r)) = (spec.limits.memory, spec.requests.memory) { prop_assert!(l >= r); }
+                if let (Some(l), Some(r)) = (spec.limits.cpu, spec.requests.cpu) { prop_assert!(l >= r); }
+                if w.guaranteed {
+                    prop_assert_eq!(spec.limits.memory, spec.requests.memory);
+                    prop_assert_eq!(spec.limits.cpu, spec.requests.cpu);
+                    prop_assert!(spec.requests.cpu.is_none_or(|x| x.is_whole()), "guaranteed whole CPUs: {:?}", spec.requests.cpu);
+                }
+            }
+            // Exploration off: propensity 1.
+            prop_assert_eq!(d.propensity, 1.0);
+        }
+
+        /// The size-scaled floor binds `applied` and `recommended` (within the
+        /// ceiling): history shows the workload needs it.
+        #[test]
+        fn adversarial_floor_binds_both(w in world_strategy(), e in est_strategy()) {
+            let (fx, c, at) = setup(&w);
+            let d = run(&fx, &c, &e, at.as_ref());
+            let pr = &c.prior.spec.requests;
+            let digest = c.code.as_ref().map(|x| x.digest.as_str());
+            let b = crate::constraints::bounds(&c.prior, &fx.constraints, &fx.state, &fx.grid, &c.history, digest, c.input_bytes(), &fx.params.constraints);
+            if let Some(f) = b.mem_floor {
+                if let Some(rm) = d.recommended.requests.memory && e.memory.is_some() && d.recommended.requests != *pr {
+                    prop_assert!(rm >= f, "recommended {rm} below the floor {f}: {:#?}", d.explanation);
+                }
+                if let Some(am) = d.applied.requests.memory && pr.memory.is_some_and(|p| p < f) && e.memory.is_some() && d.applied.requests != *pr {
+                    prop_assert!(am >= f, "applied {am} below the floor {f} (prior {:?}): {:#?}", pr.memory, d.explanation);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_platform_state_floor_above_prior_is_clamped_not_below_floor() {
+        // Reported: an adapter without node shapes sets the ceiling to the
+        // prior (`no_platform_state`); history's floor is above it. The
+        // increase the floor demands is clamped (S4: counted and explained),
+        // and `recommended` must not fall below the floor.
+        let mut fx = Fx::new();
+        fx.constraints.ceiling = Requests { memory: Some(Bytes::gib(4)), ..Default::default() };
+        fx.constraints.ceiling_reason = Some("no_platform_state".into());
+        let mut c = ctx(Some(4.0), Some(1.0));
+        c.history = vec![success(6.0, 8.0)];
+        let d = fx.decide(&c, Some(&est(1.0, 1.0)));
+        assert_eq!(mem(&d.applied), Some(Bytes::gib(4)));
+        assert!(mem(&d.recommended).unwrap() >= Bytes::gib(4), "recommended {:?} below the (clamped) floor", mem(&d.recommended));
+        assert!(
+            d.advisories.iter().any(|a| matches!(a, Advisory::Clamped { axis: Axis::Memory, reason } if reason == "no_platform_state")),
+            "{:?}",
+            d.advisories
+        );
+        assert!(!d.infeasible_floor(), "the floor is not infeasible on the platform, only unknown: {:?}", d.advisories);
+        // A real ceiling (a node shape) still flags infeasible_floor, and is counted as a clamp.
+        let mut fx = Fx::new();
+        fx.state.shapes = vec![NodeShape { name: None, cpu: MilliCpu::cores(4), memory: Bytes::gib(4), gpu: None, price_per_hour: 0.2, host_per_gpu: None }];
+        let d = fx.decide(&c, Some(&est(1.0, 1.0)));
+        assert!(d.infeasible_floor());
+        assert!(d.advisories.iter().any(|a| matches!(a, Advisory::Clamped { axis: Axis::Memory, .. })), "{:?}", d.advisories);
+        assert!(mem(&d.recommended).unwrap() >= Bytes::gib(4));
+    }
+
+    #[test]
+    fn guaranteed_whole_cpus_with_fractional_cpu_ceiling() {
+        let mut fx = Fx::new();
+        fx.state.quota = Some(Quota { cpu: Some(MilliCpu(3500)), ..Default::default() });
+        let mut c = ctx(Some(4.0), Some(2.0));
+        c.prior.spec.limits = Limits { memory: Some(Bytes::gib(4)), cpu: Some(MilliCpu(2000)), ephemeral_storage: None };
+        c.prior.qos = Some(QosClass::Guaranteed);
+        let d = fx.decide(&c, Some(&est(4.0, 6.0)));
+        for s in [&d.applied, &d.recommended] {
+            let cpu = s.requests.cpu.unwrap();
+            assert!(cpu.is_whole(), "{cpu:?} is not whole: the static CPU manager needs whole CPUs");
+            assert!(cpu <= MilliCpu(3500));
+        }
+    }
+
+    #[test]
+    fn cpu_granularity_whole_cpus_for_slurm_like_platforms() {
+        // Slurm renders `--cpus-per-task` as an integer: a 500m decision would
+        // be rendered as 1 CPU (or rejected), so the decision must already be whole.
+        let mut fx = Fx::new();
+        fx.state.cpu_granularity = Some(MilliCpu(1000));
+        fx.state.quota = Some(Quota { cpu: Some(MilliCpu(3500)), ..Default::default() });
+        let c = ctx(Some(4.0), Some(2.0));
+        for cores in [0.2, 0.45, 1.3, 2.6, 9.0] {
+            let d = fx.decide(&c, Some(&est(3.0, cores)));
+            for s in [&d.applied, &d.recommended] {
+                let cpu = s.requests.cpu.unwrap();
+                assert!(cpu.is_whole() && cpu <= MilliCpu(3500), "{cores} cores → {cpu:?}");
+            }
+        }
+        // Without granularity the same platform decides sub-core CPUs.
+        fx.state.cpu_granularity = None;
+        let d = fx.decide(&c, Some(&est(3.0, 0.2)));
+        assert!(!d.applied.requests.cpu.unwrap().is_whole(), "{:?}", d.applied.requests.cpu);
+        // JSON: absent by default, round-trips when set.
+        let j = serde_json::to_value(PlatformState::default()).unwrap();
+        assert!(j.get("cpu_granularity").is_none());
+        let st: PlatformState = serde_json::from_str(r#"{"cpu_granularity": 1000}"#).unwrap();
+        assert_eq!(st.cpu_granularity, Some(MilliCpu(1000)));
+    }
+
+    #[test]
+    fn catalog_kept_prior_never_renders_a_smaller_shape() {
+        // The catalog has no shape that holds the 64Gi prior (e.g. the
+        // user's instance type is not in the refreshed catalog). Keeping the
+        // prior must not render the largest listed shape (31Gi usable): that
+        // is a reduction S3 never checked.
+        let mut fx = Fx::new();
+        let shape = |name: &str, cpu: u32, mem: u64, price: f64| crate::types::Shape {
+            name: name.into(),
+            cpu: MilliCpu::cores(cpu),
+            memory: Bytes::gib(mem),
+            reserved: Bytes::gib(1),
+            gpu: None,
+            price: [("training".to_string(), price)].into_iter().collect(),
+            family: "m5".into(),
+        };
+        fx.state.request_model = RequestModel::Catalog { shapes: vec![shape("ml.m5.xlarge", 4, 16, 0.23), shape("ml.m5.2xlarge", 8, 32, 0.461)] };
+        fx.state.price = crate::types::PriceModel::Instance { usage: Some("training".into()) };
+        let c = ctx(Some(64.0), Some(8.0));
+        for demand in [2.0, 20.0, 60.0] {
+            let d = fx.decide(&c, Some(&est(demand, 2.0)));
+            if let Some(name) = &d.shape {
+                let RequestModel::Catalog { shapes } = &fx.state.request_model else { unreachable!() };
+                let s = shapes.iter().find(|s| &s.name == name).unwrap();
+                assert!(s.usable() >= Bytes::gib(64), "demand {demand}: renders {name} ({}) for a 64Gi prior without S3: {:?}", s.usable(), d.explanation);
+            }
+            assert!(mem(&d.applied).unwrap() >= Bytes::gib(64));
+        }
+    }
+
+    fn gpu_ctx() -> (Fx, WorkloadContext, Estimate) {
+        let mut fx = Fx::new();
+        fx.params.constraints.allow_gpu_type_change = true;
+        fx.params.risk = Some(RiskProfile::LEAN);
+        fx.constraints.allowed_shapes = Some(vec!["L4-24G:1".parse().unwrap()]);
+        let mut c = ctx(Some(16.0), Some(4.0));
+        c.prior.spec.requests.gpu = Some("A100-80G:1".parse().unwrap());
+        let mut e = est(8.0, 2.0);
+        e.gpu_memory = Some(AxisEstimate::Point { value: 6.0 * GIB });
+        (fx, c, e)
+    }
+
+    fn gpu_rec(i: usize, gpu_peak_gib: f64) -> RunRecord {
+        let mut r = success(8.0, 16.0);
+        r.invocation_id = format!("g{i}");
+        r.gpu_memory_peak = Some(Measurement::exact(gpu_peak_gib * GIB));
+        r
+    }
+
+    #[test]
+    fn gpu_type_reduction_uses_s3b_headroom_for_other_digest() {
+        // 21 GiB peaks × 1.05 = 22.05 fits under an L4's ~22 GiB? No — but
+        // from another digest the headroom is 1.25 (26.25 GiB): never fits.
+        let (fx, mut c, e) = gpu_ctx();
+        c.history = (0..3)
+            .map(|i| {
+                let mut r = gpu_rec(i, 18.0);
+                r.code_digest = Some("other".into());
+                r
+            })
+            .collect();
+        let d = fx.decide(&c, Some(&e));
+        assert_eq!(d.applied.requests.gpu, c.prior.spec.requests.gpu, "18 GiB × 1.25 (other digest) does not fit an L4: {:?}", d.explanation);
+    }
+
+    #[test]
+    fn gpu_type_reduction_needs_double_coarse_evidence() {
+        let (fx, mut c, e) = gpu_ctx();
+        c.history = (0..3)
+            .map(|i| {
+                let mut r = gpu_rec(i, 6.0);
+                r.gpu_memory_peak.as_mut().unwrap().resolution_s = Some(60.0);
+                r
+            })
+            .collect();
+        let d = fx.decide(&c, Some(&e));
+        assert_eq!(d.applied.requests.gpu, c.prior.spec.requests.gpu, "3 coarse peaks count 1.5 < 3");
+    }
+
+    #[test]
+    fn gpu_type_reduction_ignores_lower_bound_peaks_and_unclassifiable_surfaces() {
+        let (mut fx, mut c, e) = gpu_ctx();
+        c.history = (0..3)
+            .map(|i| {
+                let mut r = gpu_rec(i, 6.0);
+                r.gpu_memory_peak.as_mut().unwrap().censor = Censor::AtLeast;
+                r
+            })
+            .collect();
+        let d = fx.decide(&c, Some(&e));
+        assert_eq!(d.applied.requests.gpu, c.prior.spec.requests.gpu, "AtLeast GPU peaks are not evidence");
+        c.history = (0..3).map(|i| gpu_rec(i, 6.0)).collect();
+        let ok = fx.decide(&c, Some(&e));
+        assert_eq!(ok.applied.requests.gpu, c.prior.spec.requests.gpu, "A100-80G → L4 is more than the trust region's 2 steps (half)");
+        // Control: A100-40G → L4 is within the trust region, and exact evidence permits it.
+        c.prior.spec.requests.gpu = Some("A100-40G:1".parse().unwrap());
+        let ok = fx.decide(&c, Some(&e));
+        assert_ne!(ok.applied.requests.gpu, c.prior.spec.requests.gpu, "control: exact evidence permits the smaller device");
+        fx.params.can_classify = false;
+        let d = fx.decide(&c, Some(&e));
+        assert_eq!(d.applied.requests.gpu, c.prior.spec.requests.gpu, "unclassifiable surface: no incompressible reductions");
+    }
+}

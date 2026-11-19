@@ -197,8 +197,12 @@ fn tenant_comes_from_the_admission_request() {
 
 #[test]
 fn flyte_pods_keyed_only_in_their_namespace() {
+    // The org-less default template does not bind the org label: the org is configured.
+    let mut fs = settings();
+    fs.flyte.default_org = Some("acme".into());
     let n = rightsizer_plugin::Native::Object { value: serde_json::from_str(&fixture("flyte-pod.json")).unwrap() };
-    let e = extract(&adapter(), &n, &env());
+    assert!(extract(&adapter(), &n, &env()).units[0].key.is_none(), "no configured org: not Flyte-keyed");
+    let e = extract(&adapter(), &n, &env_with(&fs));
     let k = e.units[0].key.as_ref().expect("flyte key");
     assert_eq!(k.to_string(), "flyte://acme/flytesnacks/development/workflows.example.train");
     assert_eq!(e.units[0].workload_key("k8s", &e.tenant).unwrap(), *k);
@@ -209,7 +213,7 @@ fn flyte_pods_keyed_only_in_their_namespace() {
     assert!(e.units[0].key.is_none());
     assert_eq!(e.units[0].workload_key("k8s", &e.tenant).unwrap().to_string(), "k8s://prod/team-b/pod/a7f8k2l9m3n4-n0-0/a7f8k2l9m3n4-n0-0");
     // A custom namespace template.
-    let mut s = settings();
+    let mut s = fs.clone();
     s.flyte.namespace_template = "flyte-{project}".into();
     let mut v: serde_json::Value = serde_json::from_str(&fixture("flyte-pod.json")).unwrap();
     v["request"]["namespace"] = json!("flyte-flytesnacks");
@@ -284,7 +288,8 @@ fn reinvocation_resumes_only_unsized_units() {
     assert!(matches!(skip_of(&admission(sized.clone(), "ml")), SkipReason::AlreadySized { decision_id: Some(_) }));
     // extract_all sees the sized units with their origin prior.
     let all = a.extract_all(&admission(sized, "ml"), &env()).unwrap();
-    assert_eq!(all[0].units[0].prior.spec.requests.cpu, Some(MilliCpu(2000)));
+    // (The origin is the author's 4 CPUs, not the applied 2: attribution needs it.)
+    assert_eq!(all[0].units[0].prior.spec.requests.cpu, Some(MilliCpu(4000)));
 }
 
 #[test]

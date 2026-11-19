@@ -86,6 +86,46 @@ fn is_executable(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// Why a server-mode plugin path is unsafe to run, if it is: the
+/// executable or any directory above it (before and after resolving
+/// symlinks) is writable by someone other than root and this process's
+/// user. The sha256 pin is checked when the file is read, and the file is
+/// executed afterwards by path: whoever can replace it in between defeats
+/// the pin, so only root and the daemon's own user may be able to (the
+/// same rule sudo and sshd apply). Sticky directories (`/tmp`) are fine:
+/// others cannot replace entries they do not own there.
+pub fn insecure_path(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let me = crate::server::current_uid();
+    let trusted = |uid: u32| uid == 0 || Some(uid) == me;
+    let mut checked: Vec<PathBuf> = Vec::new();
+    let real = std::fs::canonicalize(path).ok();
+    for p in std::iter::once(path.to_path_buf()).chain(real) {
+        let mut cur = Some(p.as_path());
+        let mut first = true;
+        while let Some(c) = cur {
+            if !c.as_os_str().is_empty() && !checked.iter().any(|x| x == c) {
+                // The leaf may be a symlink: its target is checked through the canonical path.
+                let m = if first { std::fs::symlink_metadata(c) } else { std::fs::metadata(c) };
+                let Ok(m) = m else { return Some(format!("{}: cannot stat", c.display())) };
+                let sticky_dir = m.is_dir() && m.mode() & 0o1000 != 0;
+                if !m.file_type().is_symlink() {
+                    if m.mode() & 0o022 != 0 && !sticky_dir {
+                        return Some(format!("{} is group- or world-writable", c.display()));
+                    }
+                    if !trusted(m.uid()) {
+                        return Some(format!("{} is owned by uid {}, not root or this user", c.display(), m.uid()));
+                    }
+                }
+                checked.push(c.to_path_buf());
+            }
+            first = false;
+            cur = c.parent();
+        }
+    }
+    None
+}
+
 fn on_path(path_var: Option<&std::ffi::OsStr>) -> Vec<(String, PathBuf)> {
     let mut out: BTreeMap<String, PathBuf> = BTreeMap::new();
     let Some(pv) = path_var else { return vec![] };
@@ -154,6 +194,13 @@ pub fn discover(config: &BTreeMap<String, PluginConfig>, mode: Mode, path_var: O
         };
         if !is_executable(&path) {
             refused.push(Refused { kind: kind.clone(), reason: format!("{}: not an executable file", path.display()) });
+            found.remove(kind);
+            continue;
+        }
+        if mode == Mode::Server
+            && let Some(why) = insecure_path(&path)
+        {
+            refused.push(Refused { kind: kind.clone(), reason: format!("{}: unsafe to run from a server: {why}", path.display()) });
             found.remove(kind);
             continue;
         }
@@ -242,6 +289,31 @@ mod tests {
         // Interactive: a relative config path resolves on PATH.
         let (f, _) = discover(&cfg, Mode::Interactive, Some(&path));
         assert!(f.iter().any(|x| x.kind == "rel" && x.path == a.join("rsz-plugin-armada")));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn server_mode_refuses_replaceable_executables() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("rsz-disc-{}", ulid::Ulid::generate()));
+        let shared = d.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let p = exe(&shared, "rsz-plugin-nomad", "#!/bin/sh\n");
+        let sha = file_sha256(&p).unwrap();
+        let mut cfg = BTreeMap::new();
+        cfg.insert("nomad".to_string(), PluginConfig { path: p.clone(), sha256: Some(sha), ..Default::default() });
+        assert_eq!(discover(&cfg, Mode::Server, None).0.len(), 1, "{:?}", discover(&cfg, Mode::Server, None).1);
+        // A world-writable directory: anyone could swap the file after the pin check.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let (f, r) = discover(&cfg, Mode::Server, None);
+        assert!(f.is_empty(), "pinned plugin in a world-writable dir was accepted");
+        assert!(r[0].reason.contains("writable"), "{}", r[0].reason);
+        // A group-writable executable likewise.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(discover(&cfg, Mode::Server, None).0.is_empty());
+        // Interactive use is the user's own business.
+        assert_eq!(discover(&cfg, Mode::Interactive, None).0.len(), 1);
         let _ = std::fs::remove_dir_all(d);
     }
 }

@@ -9,7 +9,7 @@ metadata:
     team: ranking
   annotations:
     rightsizer.io/inputs: '["s3://ml-data/features/2026-11-17.parquet"]'
-    rightsizer.io/prior: eyJ2IjoxLCJraWQiOiJrMSIsInByaW9yIjp7InNwZWMudGVtcGxhdGUuc3BlYy5jb250YWluZXJzW2J1aWxkXSI6eyJyZXF1ZXN0cyI6eyJjcHUiOjQwMDAsIm1lbW9yeSI6MTcxNzk4NjkxODR9LCJsaW1pdHMiOnsibWVtb3J5IjozNDM1OTczODM2OH19fSwic2lnIjoiTm0zcFFWcHhodjR4dW1ITjQ3eWNVRm9fTXBZdVA5VDJnY0RjMDlhZlR2NCJ9
+    rightsizer.io/prior: eyJ2IjoxLCJraWQiOiJrMSIsInByaW9yIjp7InNwZWMudGVtcGxhdGUuc3BlYy5jb250YWluZXJzW2J1aWxkXSI6eyJyZXF1ZXN0cyI6eyJjcHUiOjQwMDAsIm1lbW9yeSI6MTcxNzk4NjkxODR9LCJsaW1pdHMiOnsibWVtb3J5IjozNDM1OTczODM2OH19fSwiYmluZCI6Im1sL0pvYi9mZWF0dXJlLWJ1aWxkIiwic2lnIjoibm9zVTI5YjhORWM5b2NzaTFHSWZ0VWpTOVNUNlpoVDJsNnhXNDFpYjNGdyJ9
     rightsizer.io/decision-id: 01JDRSZ0000000000000000000
     rightsizer.io/recommendation: "{\"id\":\"01JDRSZ0000000000000000000\",\"mode\":\"enforce\",\"units\":{\"spec.template.spec.containers[build]\":{\"cpu\":\"2\",\"memory\":\"12Gi\"}},\"v\":1}"
 spec:

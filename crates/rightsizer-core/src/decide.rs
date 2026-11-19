@@ -30,7 +30,7 @@ use crate::digest::context_digest;
 use crate::grid::{Grid, GridAxis, covering};
 use crate::normalize::{Normalized, normalize};
 use crate::safety::{
-    S3Params, final_floor, headroom, is_measured_success, ladder_counts, s3a_ladder, s3b_evidence, trusted,
+    S3Params, final_floor, ladder_counts, s3a_ladder, s3b_evidence, s3b_gpu_evidence,
 };
 use crate::stats::SplitMix64;
 use crate::types::{
@@ -611,7 +611,8 @@ impl<'a, 'b> Decider<'a, 'b> {
         let whole = whole_cpu_required(prior);
         let mem_lo = b.mem_platform_floor.unwrap_or(Bytes(0));
         let mut mem_vals: Vec<Bytes> = grid.memory.iter().copied().filter(|m| *m >= mem_lo && *m <= b.mem_ceiling).collect();
-        for extra in [Some(b.mem_ceiling), pr.memory] {
+        // The floor itself is a candidate (it is usually off-grid).
+        for extra in [Some(b.mem_ceiling), pr.memory, b.mem_floor] {
             if let Some(x) = extra.filter(|x| *x >= mem_lo && *x <= b.mem_ceiling)
                 && !mem_vals.contains(&x)
             {
@@ -620,29 +621,32 @@ impl<'a, 'b> Decider<'a, 'b> {
         }
         mem_vals.sort();
         let cpu_lo = b.cpu_floor.unwrap_or(MilliCpu(0));
+        // CPU granularity: whole CPUs for the static CPU manager, or what the
+        // platform renders (`PlatformState::cpu_granularity`). Grid cells
+        // round up, the ceiling rounds down, and nothing off-step survives
+        // except the prior (a ceiling below one step leaves only the prior).
+        let step = cpu_step(whole, inp.state.cpu_granularity);
+        let on_step = |c: MilliCpu| step.is_none_or(|s| c.0 > 0 && c.0.is_multiple_of(s));
+        let cpu_ceiling_cand = match step {
+            Some(s) => MilliCpu(b.cpu_ceiling.0 / s * s),
+            None => b.cpu_ceiling,
+        };
         let mut cpu_vals: Vec<MilliCpu> = grid
             .cpu
             .iter()
-            .map(|c| if whole { c.ceil_whole() } else { *c })
-            .chain([Some(b.cpu_ceiling), pr.cpu].into_iter().flatten())
-            .filter(|c| *c >= cpu_lo && *c <= b.cpu_ceiling)
+            .map(|c| match step {
+                Some(s) => MilliCpu(c.0.div_ceil(s).saturating_mul(s)),
+                None => *c,
+            })
+            .chain([Some(cpu_ceiling_cand), pr.cpu].into_iter().flatten())
+            .filter(|c| *c >= cpu_lo && *c <= b.cpu_ceiling && (on_step(*c) || Some(*c) == pr.cpu))
             .collect();
         cpu_vals.sort();
         cpu_vals.dedup();
 
         let rec_mem = if held_hard(Axis::Memory) { Choice::Fixed(pr.memory) } else { Choice::Free(mem_vals.clone()) };
         let rec_cpu = if held_hard(Axis::Cpu) { Choice::Fixed(pr.cpu) } else { Choice::Free(cpu_vals.clone()) };
-        let app_mem = if held_any(Axis::Memory) {
-            Choice::Fixed(pr.memory)
-        } else {
-            // The floor itself is a candidate for `applied` (it is usually off-grid).
-            let mut v = mem_vals;
-            if let Some(f) = b.mem_floor.filter(|f| *f >= mem_lo && *f <= b.mem_ceiling && !v.contains(f)) {
-                v.push(f);
-                v.sort();
-            }
-            Choice::Free(v)
-        };
+        let app_mem = if held_any(Axis::Memory) { Choice::Fixed(pr.memory) } else { Choice::Free(mem_vals) };
         let app_cpu = if held_any(Axis::Cpu) { Choice::Fixed(pr.cpu) } else { Choice::Free(cpu_vals) };
 
         let mut rec_cands = space.candidates(&rec_mem, &rec_cpu, &gpu_opts, pr);
@@ -656,7 +660,15 @@ impl<'a, 'b> Decider<'a, 'b> {
             (mem_fixed || (c.effective_memory <= b.mem_ceiling && c.effective_memory >= mem_lo))
                 && (cpu_fixed || c.cpu.is_none_or(|x| x <= b.cpu_ceiling && x >= cpu_lo))
         };
-        rec_cands.retain(|c| within_hard(c, mem_fixed_rec, matches!(rec_cpu, Choice::Fixed(_))));
+        // Whole CPUs also bind shapes and combos (their CPU is the platform's).
+        let whole_ok = |c: &Candidate| c.cpu.is_none_or(on_step) || c.cpu == pr.cpu;
+        // `recommended` honours the floor too (clamped to the ceiling): the
+        // size-scaled floor is measured history, and a recommendation below
+        // it is one that history shows failing (`rsz suggest` would write it).
+        let rec_floor = b.mem_floor.filter(|_| !mem_fixed_rec).unwrap_or(Bytes(0));
+        rec_cands.retain(|c| {
+            within_hard(c, mem_fixed_rec, matches!(rec_cpu, Choice::Fixed(_))) && whole_ok(c) && c.effective_memory >= rec_floor
+        });
 
         // ── S3 inputs ─────────────────────────────────────────────────────
         let platform = &ctx.platform;
@@ -713,17 +725,30 @@ impl<'a, 'b> Decider<'a, 'b> {
             if have >= was {
                 return true;
             }
-            let n = history
+            // Same rules as memory: no block, a classifiable surface, and
+            // S3(b) on GPU peaks (digest and resolution headroom, coarse ½,
+            // `AtLeast` never counts).
+            // Trust region (memory and GPU memory, SPEC §7.4): devices are
+            // discrete shapes, so the catalog rule applies — no smaller than
+            // `anchor × 2^(−max_step_down/2)`, the anchor being the smallest
+            // device among recent same-digest successes, else the prior's.
+            let gpu_anchor = history
                 .iter()
-                .filter(|r| is_measured_success(r, cp.allow_unverified) && trusted(r, cp.allow_unverified))
-                .filter_map(|r| r.gpu_memory_peak)
-                .filter(|m| m.value * headroom(m.resolution_s, false) <= have.0 as f64)
-                .count();
-            p.reductions_blocked.is_none() && n as u32 >= p.min_history
+                .filter(|r| r.status == crate::types::RunStatus::Succeeded && crate::safety::same_digest(r, code_digest))
+                .filter(|r| crate::safety::trusted(r, cp.allow_unverified))
+                .take(cp.anchor_k)
+                .filter_map(|r| r.requested.as_ref()?.requests.gpu?.accel.usable_memory())
+                .min()
+                .unwrap_or(was);
+            let gpu_trust_min = trust_region_min_ratio(gpu_anchor, cp.max_step_down);
+            p.reductions_blocked.is_none()
+                && p.can_classify
+                && have >= gpu_trust_min
+                && s3b_gpu_evidence(history, code_digest, b_now, have, &s3p).ok
         };
         let mut excluded: Vec<(Candidate, HoldReason, String)> = Vec::new();
         app_cands.retain(|c| {
-            if !within_hard(c, mem_fixed_app, cpu_fixed_app) || !gpu_gate(c) {
+            if !within_hard(c, mem_fixed_app, cpu_fixed_app) || !gpu_gate(c) || !whole_ok(c) {
                 return false;
             }
             match gate(c) {
@@ -897,7 +922,16 @@ impl<'a, 'b> Decider<'a, 'b> {
         let app = &all[app_best];
         let recommended = spec_of(rec);
         let applied = spec_of(app);
-        let shape = app.shape.and_then(|i| space.catalog.get(i)).map(|s| s.name.clone());
+        // A shape is rendered only when it holds the applied request: the
+        // prior candidate falls back to the largest compatible shape when no
+        // listed shape covers the prior (an instance type missing from the
+        // catalog), and rendering that would be a reduction S3 never checked.
+        // `None` keeps the user's own form.
+        let shape = app
+            .shape
+            .and_then(|i| space.catalog.get(i))
+            .filter(|s| app.memory.is_none_or(|m| s.usable() >= m) && app.cpu.is_none_or(|c| s.cpu >= c))
+            .map(|s| s.name.clone());
 
         // Soft holds: a recommended reduction S3 (or a block) kept at the prior.
         if let (Some(pm), Some(rm)) = (pr.memory, rec.memory)
@@ -915,12 +949,26 @@ impl<'a, 'b> Decider<'a, 'b> {
         // ── advisories (SPEC §7.7) ────────────────────────────────────────
         let mut advisories = Vec::new();
         if b.infeasible_floor {
-            advisories.push(Advisory::InfeasibleFloor { axis: Axis::Memory });
+            // The increase the floor demands is clamped (S4: counted and
+            // explained). A ceiling that only stands in for missing platform
+            // state (`ceiling_reason`, e.g. `no_platform_state`) says nothing
+            // about what the platform can schedule, so it is a clamp, not an
+            // infeasible floor.
+            let reason = clamp_reason(b.mem_ceiling_source, self.input.constraints);
+            let stand_in = b.mem_ceiling_source == crate::constraints::CeilingSource::User
+                && self.input.constraints.ceiling_reason.as_deref().is_some_and(|r| !r.is_empty());
+            if !stand_in {
+                advisories.push(Advisory::InfeasibleFloor { axis: Axis::Memory });
+            }
             explanation.push(format!(
-                "infeasible_floor: the floor {} exceeds the ceiling {}; using the ceiling",
+                "{}: the floor {} exceeds the ceiling {} ({reason}); using the ceiling",
+                if stand_in { "clamped" } else { "infeasible_floor" },
                 fmt_b(b.mem_size_floor.max(b.mem_platform_floor)),
                 fmt_b(Some(b.mem_ceiling))
             ));
+            if !mem_clamped && !mem_fixed_app {
+                advisories.push(Advisory::Clamped { axis: Axis::Memory, reason });
+            }
         }
         if mem_clamped {
             let reason = clamp_reason(b.mem_ceiling_source, self.input.constraints);
@@ -1136,6 +1184,50 @@ impl<'a, 'b> Decider<'a, 'b> {
             }
         }
     }
+}
+
+/// The shape a Catalog or Snap platform runs a request on, by the data snap
+/// rule (SPEC §5.8): the cheapest listed shape with the same GPU whose usable
+/// memory and CPU cover the request (ties: less usable memory). `None` when
+/// no listed shape covers it (render the user's own form then), and on other
+/// request models. Callers that
+/// change a decided request after the rule (ladder steps, groups) use it to
+/// keep the rendered shape consistent with the request.
+pub fn covering_shape<'s>(state: &'s PlatformState, req: &Requests) -> Option<&'s Shape> {
+    let shapes = match &state.request_model {
+        RequestModel::Catalog { shapes } | RequestModel::Snap { shapes, .. } => shapes,
+        _ => return None,
+    };
+    let usage = match &state.price {
+        crate::types::PriceModel::Instance { usage } => usage.as_deref(),
+        _ => None,
+    };
+    let compatible = |s: &&Shape| Space::gpu_match(s.gpu, req.gpu);
+    let mem = req.memory.unwrap_or(Bytes(0));
+    shapes
+        .iter()
+        .filter(compatible)
+        .filter(|s| s.usable() >= mem && req.cpu.is_none_or(|c| s.cpu >= c))
+        .min_by(|a, b| a.price_for(usage).total_cmp(&b.price_for(usage)).then(a.usable().cmp(&b.usable())))
+}
+
+/// The CPU step candidates must sit on: 1000 m for whole CPUs, else the
+/// platform's granularity (ignored when 0).
+fn cpu_step(whole: bool, granularity: Option<MilliCpu>) -> Option<u32> {
+    let g = granularity.map(|g| g.0).filter(|g| *g > 0);
+    match (whole, g) {
+        // Whole CPUs and a coarser platform step: the least common multiple.
+        (true, Some(g)) => Some(lcm(1000, g)),
+        (true, None) => Some(1000),
+        (false, g) => g,
+    }
+}
+
+fn lcm(a: u32, b: u32) -> u32 {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    (a / gcd(a, b)).saturating_mul(b)
 }
 
 /// The clamp reason for a ceiling source: `Constraints::ceiling_reason`

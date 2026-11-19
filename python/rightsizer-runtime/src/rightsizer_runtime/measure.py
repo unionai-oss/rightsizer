@@ -651,7 +651,8 @@ class MeasurementScope:
         self._rss_probe_arg = rss_probe
 
         self.result: Optional[MeasurementResult] = None
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # sample state (held by the sampler while probing)
+        self._life = threading.Lock()  # start/stop flags (never held across a probe)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._started = False
@@ -697,7 +698,7 @@ class MeasurementScope:
     def start(self) -> "MeasurementScope":
         """Start sampling. Never raises."""
         try:
-            with self._lock:
+            with self._life:
                 if self._started:
                     return self
                 self._started = True
@@ -790,17 +791,26 @@ class MeasurementScope:
     def stop(self, status: Optional[Union[RunStatus, str]] = None) -> Optional[MeasurementResult]:
         """Stop sampling and compute the result (censored for ``status`` if given). Never raises."""
         try:
-            with self._lock:
+            with self._life:
                 if not self._started or self._stopped:
                     return self.result
                 self._stopped = True
             self._stop.set()
+            stuck = False
             if self._thread is not None:
                 self._thread.join(timeout=max(2.0, 2 * self.interval_s))
-            try:
-                self._sample()
-            except Exception:
-                pass
+                stuck = self._thread.is_alive()
+            if stuck:
+                # The sampler is blocked inside a probe (e.g. NVML on a failed GPU) and holds
+                # the lock: a final sample would hang the task. Use what was sampled, and do
+                # not shut NVML down under the blocked call.
+                log.warning("rightsizer: sampler did not stop; measurement uses the samples so far")
+                self._nv = None
+            else:
+                try:
+                    self._sample()
+                except Exception:
+                    pass
             r = self._compute()
             if status is not None and r is not None:
                 r = r.censored(status)

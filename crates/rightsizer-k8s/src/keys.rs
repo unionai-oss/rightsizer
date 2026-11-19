@@ -87,7 +87,20 @@ pub fn flyte_key(labels: &BTreeMap<String, String>, namespace: &str, s: &FlyteSe
     let project = labels.get(&s.project_label)?;
     let domain = labels.get(&s.domain_label)?;
     let task = labels.get(&s.task_label)?;
-    let org = labels.get(&s.org_label).cloned().or_else(|| s.default_org.clone())?;
+    let label_org = labels.get(&s.org_label).filter(|o| !o.is_empty());
+    let org = if s.namespace_template.contains("{org}") {
+        // The namespace binds the org label.
+        label_org.cloned().or_else(|| s.default_org.clone())?
+    } else {
+        // The namespace does not say which org the pod belongs to, and labels
+        // are user-settable: only the configured org is trusted, and a
+        // different org label is not Flyte-keyed at all.
+        let org = s.default_org.clone()?;
+        if label_org.is_some_and(|l| *l != org) {
+            return None;
+        }
+        org
+    };
     if render_namespace(&s.namespace_template, &org, project, domain) != namespace {
         return None;
     }
@@ -136,7 +149,10 @@ mod tests {
         assert_eq!(k.to_string(), "flyte://acme/ml/development/env.train");
         // Forged labels in another namespace: not Flyte-keyed.
         assert!(flyte_key(&l, "team-b", &s).is_none());
+        // An org label the namespace template does not bind is not trusted.
         l.insert("organization".to_string(), "other".to_string());
-        assert_eq!(flyte_key(&l, "ml-development", &s).unwrap().tenant.as_str(), "other/ml/development");
+        assert!(flyte_key(&l, "ml-development", &s).is_none());
+        l.insert("organization".to_string(), "acme".to_string());
+        assert_eq!(flyte_key(&l, "ml-development", &s).unwrap().tenant.as_str(), "acme/ml/development");
     }
 }

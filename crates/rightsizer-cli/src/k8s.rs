@@ -162,6 +162,14 @@ struct ServeArgs {
     /// Cluster-input cache TTL, s.
     #[arg(long, default_value_t = 30)]
     view_ttl: u64,
+    /// Webhook replicas admitting concurrently (the Helm chart passes its
+    /// `replicas`): each may use only its share of a ResourceQuota's
+    /// headroom for increases the others have not seen yet (kubernetes.md §3.4).
+    #[arg(long, default_value_t = 1)]
+    replicas: u64,
+    /// Interval of the watcher's lease-expiry sweep (`Engine::sweep`), s; 0 disables.
+    #[arg(long, default_value_t = 300)]
+    sweep_interval: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -343,6 +351,7 @@ async fn serve(cfg: &Config, a: ServeArgs) -> Res {
         eprintln!("rsz: warning: {e}; every admission keeps the prior (S1)");
     }
     let shared = rightsizer_k8s::ledger_shared::SharedLedger::new();
+    shared.set_peers(a.replicas);
     let adapter = runtime::adapter(k).map_err(Fail::config)?.with_ledger(shared.clone());
     if k.signing_key_file.is_none() {
         eprintln!("rsz: warning: no [k8s] signing_key_file: enforce falls back to annotation-only patches");
@@ -380,11 +389,12 @@ async fn serve(cfg: &Config, a: ServeArgs) -> Res {
             node_agent,
             delay: Duration::from_secs(a.peak_delay.unwrap_or(2 * a.scrape_interval as u64)),
             base,
+            sweep_every: (a.sweep_interval > 0).then(|| Duration::from_secs(a.sweep_interval)),
         };
         let ad = admitter.clone();
         let w = watcher::Watcher::new(client.clone(), engine.clone(), Arc::new(move || ad.adapter()), view.clone(), wc);
         if a.no_leader_election {
-            tokio::spawn(w.watch_pods());
+            tokio::spawn(w.run_unelected());
         } else {
             let ns = a.lease_namespace.clone().or(k.lease_namespace.clone()).or(std::env::var("POD_NAMESPACE").ok()).unwrap_or_else(|| "default".into());
             let rx = leader::spawn(client.clone(), leader::LeaseConfig::new(ns, "rightsizer-watcher"));
@@ -581,7 +591,7 @@ pub async fn apply(cfg: &Config, file: &str, out_path: Option<PathBuf>, diff: bo
     engine.flush().await;
     let mode = runtime::render_mode(&all);
     let rendered = adapter
-        .render_with(&native, &RenderRequest { mode: mode.max(Mode::Recommend), decision_id: all.first().map(|(_, d)| d.id.to_string()), units: runtime::render_units(&all, mode), annotate: true, output: Output::TextEdits })
+        .render_with(&native, &RenderRequest { mode: mode.max(Mode::Recommend), decision_id: all.first().map(|(_, d)| d.id.to_string()), units: runtime::render_units(&all, mode), annotate: true, output: Output::TextEdits, namespace: env.namespace.clone() })
         .map_err(|e| Fail::other(e.to_string()))?;
     let new_text = match &rendered.patch {
         Patch::TextEdits { edits } => rightsizer_plugin::apply_text_edits(&text, edits).map_err(|e| Fail::other(e.to_string()))?,
@@ -636,8 +646,9 @@ pub async fn import(cfg: &Config, args: Vec<String>, out: Format) -> Res {
     }
     let e = Engine::builder(cfg.clone()).role(Role::Client).build().await.map_err(Fail::config)?;
     let (mut ins, mut dup) = (0, 0);
+    let mut imp = rightsizer_history::Importer::new();
     for r in &recs {
-        match e.store().put_run(r).await.map_err(Fail::other)? {
+        match imp.put_run(e.store().as_ref(), r).await.map_err(Fail::other)? {
             rightsizer_history::PutOutcome::Inserted => ins += 1,
             rightsizer_history::PutOutcome::Duplicate => dup += 1,
         }

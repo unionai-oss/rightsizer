@@ -178,18 +178,44 @@ fn literal_near(source: &str, token: &str) -> Option<u64> {
     let mut from = 0;
     while let Some(off) = source[from..].find(token) {
         let end = from + off + token.len();
-        let line_end = source[end..].find('\n').map(|i| end + i).unwrap_or(source.len());
-        let window_end = (end + NUMERIC_WINDOW).min(line_end);
-        // Literals must *start* inside the window but may extend past it.
-        // The first literal after the token, if it starts inside the window.
-        if let Some(&(start, n)) = literals_with_pos(&source[end..line_end]).first()
-            && end + start < window_end
-        {
+        // Only the window is scanned (a literal may extend past it, up to the
+        // line end): linear in the source, however long its lines.
+        if let Some(n) = first_literal_within(&source[end..], NUMERIC_WINDOW) {
             best = Some(best.map_or(n, |b| b.max(n)));
         }
         from = end;
     }
     best
+}
+
+/// The first literal of [`literals_with_pos`]`(s up to its first newline)`, if
+/// it starts before `window` (and before that newline).
+fn first_literal_within(s: &str, window: usize) -> Option<u64> {
+    let b = s.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+    let mut i = 0;
+    while i < b.len() && i < window && b[i] != b'\n' {
+        if b[i].is_ascii_digit() && (i == 0 || !(word(b[i - 1]) || b[i - 1] == b'.')) {
+            let mut j = i;
+            while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'_') {
+                j += 1;
+            }
+            let ok = j >= b.len() || !(word(b[j]) || b[j] == b'.');
+            if ok {
+                let mut n: u64 = 0;
+                for &c in &b[i..j] {
+                    if c.is_ascii_digit() {
+                        n = n.saturating_mul(10).saturating_add((c - b'0') as u64);
+                    }
+                }
+                return Some(n);
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    None
 }
 
 /// All integer literals (the tuner's `_NUM`).

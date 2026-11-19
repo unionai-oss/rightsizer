@@ -432,7 +432,9 @@ struct Inner {
     http: reqwest::Client,
     breaker: CircuitBreaker,
     exact: TtlCache<String, Estimate>,
-    inflight: Mutex<HashMap<String, SharedCall>>,
+    /// In-flight calls by exact key: (their deadline, flight id, the call).
+    inflight: Mutex<HashMap<String, (Instant, u64, SharedCall)>>,
+    flight_ids: AtomicU64,
     coalescer: OnceLock<mpsc::UnboundedSender<Job>>,
     max_batch: usize,
     axes: Vec<EstimateAxis>,
@@ -519,6 +521,7 @@ impl RemoteEstimator {
                 breaker: CircuitBreaker::new(cfg.breaker_threshold, cfg.breaker_cooldown),
                 exact: TtlCache::new(cfg.cache_ttl, cfg.cache_capacity),
                 inflight: Mutex::new(HashMap::new()),
+                flight_ids: AtomicU64::new(0),
                 coalescer: OnceLock::new(),
                 max_batch,
                 axes,
@@ -567,8 +570,12 @@ impl RemoteEstimator {
         if let Some(e) = i.exact.get(&key) {
             return Ok(e);
         }
-        let memo_key = i.cfg.memo.as_ref().map(|m| (m.clone(), MemoKey::new(ctx, m.grid(), i.cfg.policy_hash.clone())));
-        if let Some((m, k)) = &memo_key
+        let memo_key = i.cfg.memo.as_ref().map(|m| {
+            let k = MemoKey::new(ctx, m.grid(), i.cfg.policy_hash.clone());
+            let generation = m.generation(&k.workload_key);
+            (m.clone(), k, generation)
+        });
+        if let Some((m, k, _)) = &memo_key
             && let Some(e) = m.get(k)
         {
             return Ok(e);
@@ -576,26 +583,47 @@ impl RemoteEstimator {
         let shared = {
             let mut map = i.inflight.lock().unwrap_or_else(|p| p.into_inner());
             match map.get(&key) {
-                Some(s) => s.clone(),
-                None => {
+                // Join only a flight that runs (nearly) as long as this
+                // caller may wait; one with a much earlier deadline would
+                // hand us its timeout. The slack (a tenth of the budget, at
+                // most 1 s) lets near-simultaneous identical callers share.
+                Some((flight_deadline, _, s)) if *flight_deadline + (budget / 10).min(Duration::from_secs(1)) >= deadline => s.clone(),
+                _ => {
+                    let id = i.flight_ids.fetch_add(1, Ordering::Relaxed);
                     let this = self.clone();
                     let k = key.clone();
-                    let fut: BoxFuture<'static, Result<Estimate, EstimateError>> = async move {
+                    let call = async move {
                         let r = this.call_with_retry(rctx, deadline).await;
                         if let Ok(e) = &r {
                             this.inner.exact.insert(k.clone(), e.clone());
-                            if let Some((m, mk)) = memo_key
-                                && let Err(err) = m.put(mk, e)
+                            if let Some((m, mk, generation)) = memo_key
+                                && let Err(err) = m.put_at_generation(mk, e, generation)
                             {
                                 tracing::debug!(error = %err, "remote estimate not memoized");
                             }
                         }
-                        this.inner.inflight.lock().unwrap_or_else(|p| p.into_inner()).remove(&k);
+                        let mut map = this.inner.inflight.lock().unwrap_or_else(|p| p.into_inner());
+                        if map.get(&k).is_some_and(|(_, fid, _)| *fid == id) {
+                            map.remove(&k);
+                        }
                         r
-                    }
-                    .boxed();
+                    };
+                    // The call runs as its own task: a caller that gives up
+                    // (dropped by an outer budget) neither stalls the shared
+                    // call for later joiners nor leaves a half-open breaker
+                    // trial claimed forever. The call ends by `deadline`.
+                    let fut: BoxFuture<'static, Result<Estimate, EstimateError>> = match tokio::runtime::Handle::try_current() {
+                        Ok(h) => {
+                            let task = h.spawn(call);
+                            async move {
+                                task.await.unwrap_or_else(|e| Err(EstimateError::Failed { message: format!("remote call task: {e}"), retryable: false }))
+                            }
+                            .boxed()
+                        }
+                        Err(_) => call.boxed(),
+                    };
                     let s = fut.shared();
-                    map.insert(key.clone(), s.clone());
+                    map.insert(key.clone(), (deadline, id, s.clone()));
                     s
                 }
             }
@@ -664,7 +692,12 @@ fn spawn_coalescer(inner: Weak<Inner>) -> mpsc::UnboundedSender<Job> {
             }
             let Some(i) = inner.upgrade() else { break };
             tokio::spawn(async move {
-                let deadline = batch.iter().map(|j| j.deadline).min().unwrap_or_else(Instant::now);
+                let mut batch = batch;
+                // Callers that already gave up are not sent. The call runs to
+                // the latest member's deadline: each caller still times out
+                // on its own (`run`), and none is cut to the shortest budget.
+                batch.retain(|j| !j.tx.is_closed());
+                let Some(deadline) = batch.iter().map(|j| j.deadline).max() else { return };
                 let (ctxs, txs): (Vec<_>, Vec<_>) = batch.into_iter().map(|j| (j.ctx, j.tx)).unzip();
                 let results = Inner::send(&i, ctxs, deadline).await;
                 for (tx, r) in txs.into_iter().zip(results) {

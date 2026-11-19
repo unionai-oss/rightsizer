@@ -23,7 +23,10 @@
 //!   and the read runs as its own task: a caller that gives up (an expired
 //!   decision budget) does not cancel it, so the cache still fills and the
 //!   next decision is a hit. An invalidation while a read is in flight keeps
-//!   its (possibly stale) result out of the cache.
+//!   its (possibly stale) result out of the cache, and so does a write
+//!   through this cache ([`HistoryStore::put_run`]). A read that takes longer
+//!   than [`HISTORY_READ_TIMEOUT`] fails (store unreachable) instead of
+//!   holding every reader of the key.
 //! - **Refresh after invalidation:** [`CachedStore::invalidate_key`] (the
 //!   engine calls it after every outcome, to see records other processes
 //!   wrote) marks the entry stale rather than dropping it. The next read
@@ -50,6 +53,10 @@ use ulid::Ulid;
 /// How long a read of an invalidated key waits for its refresh before
 /// answering from the stale entry.
 pub const REFRESH_WAIT: Duration = Duration::from_millis(25);
+
+/// Deadline of one shared history read; past it the read is an error
+/// (the store counts as unreachable for SPEC §8.4).
+pub const HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The generation slot bumped by [`CachedStore::invalidate`] (no key looks like this).
 const ALL_KEYS: &str = "\u{0}all";
@@ -345,8 +352,19 @@ impl CachedStore {
             self.stale.clone(),
         );
         let (key2, k2) = (key.clone(), k.to_string());
+        let in_runtime = tokio::runtime::Handle::try_current().is_ok();
         let read = async move {
-            let r = inner.runs(&key2, depth).await;
+            // A hung store must not pin this flight (and every reader of the
+            // key that joins it) forever: past the deadline it is an error, so
+            // readers fall back to the cache within its TTL or demote.
+            let r = if in_runtime {
+                match tokio::time::timeout(HISTORY_READ_TIMEOUT, inner.runs(&key2, depth)).await {
+                    Ok(r) => r,
+                    Err(_) => Err(StoreError::Unreachable(format!("history read of {key2} timed out after {HISTORY_READ_TIMEOUT:?}"))),
+                }
+            } else {
+                inner.runs(&key2, depth).await
+            };
             if let Ok(v) = &r
                 && Self::generation(&gens, &k2) == generation
                 && let Ok(mut c) = runs.lock()
@@ -521,6 +539,13 @@ impl HistoryStore for CachedStore {
 
     async fn put_run(&self, rec: &RunRecord) -> Result<PutOutcome, StoreError> {
         let r = self.inner.put_run(rec).await?;
+        if r == PutOutcome::Inserted {
+            // A read in flight may have read the store before this write: keep
+            // its result out of the cache (and let the next read start anew),
+            // or the cache would hold history without our own record for up
+            // to the TTL (e.g. an OOM that must bump the next request).
+            self.bump_generation(&rec.key.to_string());
+        }
         if r == PutOutcome::Inserted
             && let Ok(mut g) = self.runs.lock()
         {

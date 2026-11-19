@@ -78,13 +78,15 @@ impl SlurmPlatform {
         }
         let (job, _node, grp) = inv.limits(account, user, None, None);
         let lim = job.min(&grp);
+        // `--cpus-per-task` is whole CPUs: decisions are made on that grid,
+        // so a 500m decision never renders (and signs) as a different value.
         let quota = (!lim.is_empty()).then(|| Quota {
             cpu: lim.cpu.map(|c| MilliCpu::cores(c.min(u32::MAX as u64 / 1000) as u32)),
             memory: lim.mem_mib.map(Bytes::mib),
             gpu_count: lim.gpus.map(|g| g as u32),
             ephemeral_storage: None,
         });
-        PlatformState { shapes, request_model: Default::default(), price: PriceModel::Packed, quota, floors: Requests::default() }
+        PlatformState { shapes, request_model: Default::default(), price: PriceModel::Packed, quota, floors: Requests::default(), cpu_granularity: Some(MilliCpu(1000)) }
     }
 }
 

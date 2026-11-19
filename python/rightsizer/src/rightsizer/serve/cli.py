@@ -20,7 +20,10 @@ import sys
 def _token(args: argparse.Namespace) -> str | None:
     if args.token_file:
         with open(args.token_file) as f:
-            return f.read().strip() or None
+            v = f.read().strip()
+        if not v:  # an unmounted or empty secret must not silently serve without auth
+            raise SystemExit(f"--token-file {args.token_file}: the file is empty")
+        return v
     if args.token_env:
         v = os.environ.get(args.token_env)
         if not v:

@@ -69,6 +69,11 @@ pub struct RenderRequest {
     /// Output form.
     #[serde(default)]
     pub output: Output,
+    /// The trusted namespace for documents that do not name one (`-n`); the
+    /// signed prior is bound to it. Ignored for admission requests (their
+    /// namespace wins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 fn yes() -> bool {
@@ -84,6 +89,7 @@ impl RenderRequest {
             units: decisions.iter().map(|(u, s)| UnitRender { unit: u.clone(), spec: s.clone(), ..Default::default() }).collect(),
             annotate: true,
             output: Output::Auto,
+            namespace: None,
         }
     }
 }
@@ -321,12 +327,20 @@ pub fn render(sub: &Submission, req: &RenderRequest, cx: &RenderCtx<'_>) -> Resu
         let v = &obj.value;
         let w = objects::workload(v).ok_or_else(|| PluginError::Unsupported("not a workload".into()))?;
         let locs = extract::locate(v, &w);
-        let existing = extract::signed_prior(v, cx.keys);
+        let ns = sub
+            .admission
+            .as_ref()
+            .and_then(|a| a.namespace.clone())
+            .or_else(|| req.namespace.clone())
+            .or_else(|| v.pointer("/metadata/namespace").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_else(|| "default".into());
+        let existing = extract::signed_prior(v, cx.keys, &ns);
         let annotations = objects::string_map(v, "/metadata/annotations");
         let mut plan = ObjectPlan { ops: Vec::new(), resource_ops: 0 };
         let mut applied: BTreeMap<String, ResourceSpec> = BTreeMap::new();
         let mut unit_ids: BTreeMap<String, String> = BTreeMap::new();
         let mut new_prior = existing.clone().unwrap_or_default();
+        new_prior.bind = extract::prior_identity(v, &ns);
         let mut ray_orig: BTreeMap<String, Option<String>> = BTreeMap::new();
         for d in &decisions {
             let (_, local) = extract::split_unit_id(&d.unit.0, multi);

@@ -387,7 +387,7 @@ async fn sbatch(cfg: &Config, rest: Vec<String>) -> Result<(), Fail> {
         let svc = crate::daemon::slurm_service(cfg).ok_or_else(|| Fail::config("--local needs [slurm] cluster and token_key_file"))?;
         let uid = rightsizer_plugin::server::current_uid().unwrap_or(u32::MAX);
         let who = svc.identity(uid);
-        let tenants: Vec<String> = cfg.serve.tenants_by_uid.get(&uid.to_string()).into_iter().chain(who.user.as_ref().and_then(|u| cfg.serve.tenants_by_uid.get(u))).flatten().cloned().collect();
+        let tenants: Vec<String> = cfg.serve.tenants_by_uid.get(&uid.to_string()).into_iter().chain(who.user.as_ref().filter(|u| u.as_str() != "http" && !u.bytes().all(|b| b.is_ascii_digit())).and_then(|u| cfg.serve.tenants_by_uid.get(u))).flatten().cloned().collect();
         Box::new(EngineDecider { engine, svc, who, tenants })
     } else {
         let sock = socket.or_else(|| cfg.serve.socket.clone()).unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET));
@@ -496,8 +496,9 @@ pub async fn import(cfg: &Config, args: Vec<String>, out: Format) -> Result<(), 
     let (mut inserted, mut dup) = (0usize, 0usize);
     let mut fresh = Vec::new();
     if !dry {
+        let mut imp = rightsizer_history::Importer::new();
         for r in &recs {
-            match e.store().put_run(r).await.map_err(Fail::other)? {
+            match imp.put_run(e.store().as_ref(), r).await.map_err(Fail::other)? {
                 rightsizer_history::PutOutcome::Inserted => {
                     inserted += 1;
                     fresh.push(r.clone());

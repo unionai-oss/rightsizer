@@ -35,7 +35,7 @@ from rightsizer_runtime.wire import (
 )
 
 from . import _units
-from ._errors import RightsizerError
+from ._errors import CONTROL_FLOW, RightsizerError
 from ._native import core
 from ._storage import apply_storage_options
 from .types import AXES, Code, Context, Decision, OutcomeReport, Resources, _axes
@@ -336,7 +336,9 @@ class Engine:
             att = self._attempt(attempt)
             out = self._core.attempt_decide(req, att.to_json()) if att is not None else self._core.decide(req)
             return Decision.from_dict(json.loads(out), context=ctx)
-        except Exception as e:  # S1
+        except BaseException as e:  # S1 (a pyo3 PanicException is a BaseException)
+            if isinstance(e, CONTROL_FLOW):
+                raise
             return _fallback(ctx, e, policy)
 
     async def adecide(self, ctx: Context, *, attempt: Any = None, **policy: Any) -> Decision:
@@ -351,7 +353,9 @@ class Engine:
             else:
                 out = await self._core.adecide(req)
             return Decision.from_dict(json.loads(out), context=ctx)
-        except Exception as e:  # S1
+        except BaseException as e:  # S1 (a pyo3 PanicException is a BaseException)
+            if isinstance(e, CONTROL_FLOW):
+                raise
             return _fallback(ctx, e, policy)
 
     def decide_group(self, ctxs: Sequence[Context], **policy: Any) -> List[Decision]:
@@ -359,7 +363,9 @@ class Engine:
         try:
             out = self._core.decide_group(json.dumps(_group_requests(ctxs, policy)))
             return [Decision.from_dict(d, context=c) for d, c in zip(json.loads(out), ctxs)]
-        except Exception as e:  # S1
+        except BaseException as e:  # S1 (a pyo3 PanicException is a BaseException)
+            if isinstance(e, CONTROL_FLOW):
+                raise
             return [_fallback(c, e, policy) for c in ctxs]
 
     async def adecide_group(self, ctxs: Sequence[Context], **policy: Any) -> List[Decision]:
@@ -367,7 +373,9 @@ class Engine:
         try:
             out = await self._core.adecide_group(json.dumps(_group_requests(ctxs, policy)))
             return [Decision.from_dict(d, context=c) for d, c in zip(json.loads(out), ctxs)]
-        except Exception as e:  # S1
+        except BaseException as e:  # S1 (a pyo3 PanicException is a BaseException)
+            if isinstance(e, CONTROL_FLOW):
+                raise
             return [_fallback(c, e, policy) for c in ctxs]
 
     # everything else (raises RightsizerError)
@@ -540,7 +548,9 @@ def outcome(decision: Union[Decision, RunRecord, Mapping[str, Any]], status: Any
     try:
         e = engine or default_engine()
         return e.outcome(decision, status, **measurements)
-    except Exception as ex:  # S1
+    except BaseException as ex:  # S1
+        if isinstance(ex, CONTROL_FLOW):
+            raise
         log.warning("rightsizer: outcome not recorded: %s", ex)
         return None
 
@@ -550,7 +560,9 @@ async def aoutcome(decision: Union[Decision, RunRecord, Mapping[str, Any]], stat
     try:
         e = engine or default_engine()
         return await e.aoutcome(decision, status, **measurements)
-    except Exception as ex:  # S1
+    except BaseException as ex:  # S1
+        if isinstance(ex, CONTROL_FLOW):
+            raise
         log.warning("rightsizer: outcome not recorded: %s", ex)
         return None
 

@@ -567,8 +567,9 @@ async fn history(cfg: &Config, action: HistoryCmd, out: Format) -> Res {
             }
             let e = engine(cfg, Role::Client).await?;
             let (mut inserted, mut dup) = (0, 0);
+            let mut imp = rightsizer_history::Importer::new();
             for r in &recs {
-                match e.store().put_run(r).await.map_err(Fail::other)? {
+                match imp.put_run(e.store().as_ref(), r).await.map_err(Fail::other)? {
                     rightsizer_history::PutOutcome::Inserted => inserted += 1,
                     rightsizer_history::PutOutcome::Duplicate => dup += 1,
                 }

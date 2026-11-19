@@ -658,6 +658,15 @@ impl Engine {
                 ph.push_str("(skip)");
             }
         }
+        // Estimators read the prior and the history (`rightsizer-trees/1`
+        // features do): an estimate computed for another prior, or before
+        // runs another process recorded, is not this context's estimate.
+        let r = &ctx.prior.spec.requests;
+        ph.push_str(&format!("|prior:{:?}/{:?}/{:?}", r.memory, r.cpu, r.gpu));
+        ph.push_str(&format!("|history:{}", ctx.history.len()));
+        if let Some(h) = ctx.history.first() {
+            ph.push_str(&format!("/{}/{}/{}/{:?}", h.invocation_id, h.attempt, h.started_at.timestamp_millis(), h.status));
+        }
         MemoKey::new(ctx, &self.inner.grid, &rightsizer_core::digest::sha256_hex(ph.as_bytes())[..16])
     }
 
@@ -748,7 +757,12 @@ impl Engine {
     pub(crate) async fn decide_context(&self, req: &DecideRequest, ctx: &WorkloadContext, r: &Resolved, chain: &EstimatorChain, opts: &DecideOpts, id: Ulid) -> Decision {
         let grid = &self.inner.grid;
         let eff = &r.effective;
-        let params = self.params(req, eff, opts.block_reductions);
+        let mut params = self.params(req, eff, opts.block_reductions);
+        // Exploration draws once per decision (SPEC §7.6): seeded by the
+        // decision id, which is logged, so a draw is reproducible. A constant
+        // seed would make the draw a per-key constant (a key explores on every
+        // run or never) and the logged propensity false.
+        params.seed = (id.0 as u64) ^ ((id.0 >> 64) as u64);
         let mut input = DecisionInput::new(ctx, None, grid, &req.state, &req.constraints, &params, eff.mode);
         input.id = id;
         input.group = group_of(req);
@@ -835,6 +849,7 @@ impl Engine {
         union.truncate(cfg.decision.history_limit.saturating_mul(reqs.len().max(1)));
         let opts = DecideOpts { history: Some(union), ..Default::default() };
         let mut best: Option<Decision> = None;
+        let mut own: Vec<Decision> = Vec::with_capacity(reqs.len());
         let mut min_mode = Mode::Enforce;
         for r in reqs {
             let chain = match self.chain_for(r).await {
@@ -847,16 +862,47 @@ impl Engine {
             min_mode = min_mode.min(d.mode);
             let size = |d: &Decision| (d.applied.requests.memory, d.applied.requests.cpu);
             if best.as_ref().is_none_or(|b| size(&d) > size(b)) {
-                best = Some(d);
+                best = Some(d.clone());
             }
+            own.push(d);
         }
         let Some(rep) = best else { return vec![] };
         let gid = reqs.iter().find_map(group_of);
+        // Demand = max across members, per axis. Each member keeps its own
+        // prior (attribution and limits use it), its hard holds (pins, S2)
+        // and its GPU, and is never below its own decision, which the rule
+        // checked against that member's prior (S3).
+        let group_mem = own.iter().filter_map(|d| d.applied.requests.memory).max();
+        let group_cpu = own.iter().filter_map(|d| d.applied.requests.cpu).max();
+        let group_rec_mem = own.iter().filter_map(|d| d.recommended.requests.memory).max();
+        let group_rec_cpu = own.iter().filter_map(|d| d.recommended.requests.cpu).max();
         let out: Vec<Decision> = reqs
             .iter()
-            .map(|r| {
+            .zip(own)
+            .map(|(r, mine)| {
                 let ctx = bare_context(r);
+                let hard = |a: Axis| mine.held.iter().any(|h| h.axis == a && h.reason.is_hard());
+                let mut target = mine.applied.requests.clone();
+                if !hard(Axis::Memory) {
+                    target.memory = max_opt(target.memory, group_mem.filter(|_| target.memory.is_some()));
+                }
+                if !hard(Axis::Cpu) {
+                    target.cpu = max_opt(target.cpu, group_cpu.filter(|_| target.cpu.is_some()));
+                }
                 let mut d = rep.clone();
+                d.prior = mine.prior.clone();
+                d.held = mine.held.clone();
+                d.applied = mine.applied.clone();
+                d.recommended = mine.recommended.clone();
+                // The group's recommendation is one per axis too (units in a group are sized identically).
+                if !hard(Axis::Memory) {
+                    d.recommended.requests.memory = max_opt(d.recommended.requests.memory, group_rec_mem.filter(|_| d.recommended.requests.memory.is_some()));
+                }
+                if !hard(Axis::Cpu) {
+                    d.recommended.requests.cpu = max_opt(d.recommended.requests.cpu, group_rec_cpu.filter(|_| d.recommended.requests.cpu.is_some()));
+                }
+                d.shape = mine.shape.clone();
+                set_applied(&mut d, target, &r.state);
                 d.key = ctx.key;
                 d.unit = ctx.unit;
                 d.group = gid.clone();
@@ -920,7 +966,14 @@ impl Engine {
             if d.mode == Mode::Enforce && changed && !req.dry_run {
                 let reduced = safety::reduced_incompressible(&d.applied.requests, &origin);
                 let now = self.now();
-                let caller = ladder.as_ref().is_some_and(|l| l.driver == LadderDriver::Caller);
+                // The attempt record is the ladder lease (SPEC §7.2) for every
+                // ladder that counts: a Caller ladder, or an Orchestrator
+                // ladder that knows it has the attempts to escalate. Without
+                // it, attempt 1's classified OOM trips the per-workload
+                // breaker before escalate-on-retry runs attempt 2.
+                let caller = ladder.as_ref().is_some_and(|l| {
+                    l.driver == LadderDriver::Caller || (l.driver == LadderDriver::Orchestrator && safety::ladder_counts(l, Some(&at)))
+                });
                 let rec = AttemptRecord {
                     v: rightsizer_core::WIRE_VERSION,
                     key: key.clone(),
@@ -967,9 +1020,29 @@ impl Engine {
                     let floor = safety::final_floor(r.origin_prior.memory, &history, &l, self.inner.config.history.allow_unverified_for_reductions);
                     mem = max_opt(mem, floor);
                 }
-                let target = Requests { memory: max_opt(mem, d.applied.requests.memory), cpu: max_opt(r.applied.cpu, d.applied.requests.cpu), ..d.applied.requests.clone() };
-                explanation = format!("attempt {}: ladder step {step} of attempt 1 (reduced), or the fresh decision if larger", at.attempt);
-                set_applied(&mut d, target);
+                let mut target = Requests { memory: max_opt(mem, d.applied.requests.memory), cpu: max_opt(r.applied.cpu, d.applied.requests.cpu), ..d.applied.requests.clone() };
+                // S4: a step above the ceiling would never schedule (a silent
+                // Pending). Clamp it, never below the origin prior or the
+                // fresh decision (the prior is the author's own ask).
+                let (ceiling, ..) = rightsizer_core::constraints::ceiling(&req.state, &req.constraints, origin.gpu, &self.inner.grid);
+                let cap = [Some(ceiling), r.origin_prior.memory, origin.memory, d.applied.requests.memory].into_iter().flatten().max();
+                let mut clamped = false;
+                if let (Some(m), Some(c)) = (target.memory, cap)
+                    && m > c
+                {
+                    target.memory = Some(c);
+                    clamped = true;
+                }
+                explanation = format!(
+                    "attempt {}: ladder step {step} of attempt 1 (reduced), or the fresh decision if larger{}",
+                    at.attempt,
+                    if clamped { format!("; clamped to the ceiling {}", rightsizer_core::units::format_k8s_bytes(cap.unwrap_or_default().0)) } else { String::new() }
+                );
+                if clamped && !d.advisories.iter().any(|a| matches!(a, Advisory::Clamped { axis: Axis::Memory, .. })) {
+                    d.advisories.push(Advisory::Clamped { axis: Axis::Memory, reason: "ladder".into() });
+                    self.inner.metrics.clamped.with_label_values(&["ladder"]).inc();
+                }
+                set_applied(&mut d, target, &req.state);
             }
             Ok(Some(r)) => {
                 d = self.decide_guarded(req, base.clone()).await;
@@ -979,13 +1052,13 @@ impl Engine {
                     ..d.applied.requests.clone()
                 };
                 explanation = format!("attempt {}: the fresh decision, never below attempt 1's request", at.attempt);
-                set_applied(&mut d, target);
+                set_applied(&mut d, target, &req.state);
             }
             Ok(None) | Err(_) => {
                 d = self.decide_guarded(req, blocked).await;
                 let target = Requests { memory: max_opt(origin.memory, d.applied.requests.memory), cpu: max_opt(origin.cpu, d.applied.requests.cpu), ..d.applied.requests.clone() };
                 explanation = format!("attempt {}: no attempt record; max(origin prior, a fresh decision with reductions disabled)", at.attempt);
-                set_applied(&mut d, target);
+                set_applied(&mut d, target, &req.state);
             }
         }
         d.explanation.push(explanation);
@@ -1357,8 +1430,21 @@ fn max_opt<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
     }
 }
 
-fn set_applied(d: &mut Decision, target: Requests) {
+fn set_applied(d: &mut Decision, mut target: Requests, state: &rightsizer_core::PlatformState) {
     if target != d.applied.requests {
+        // Catalog and Snap platforms render the shape, not the request: move
+        // the shape with the request, or a ladder step does not move up.
+        // No listed shape holds it: render the user's own form (the origin
+        // prior, which the ladder never goes past without a shape).
+        if d.shape.is_some() {
+            d.shape = rightsizer_core::decide::covering_shape(state, &target).map(|s| {
+                if matches!(state.request_model, rightsizer_core::RequestModel::Catalog { .. }) {
+                    target.memory = target.memory.map(|m| m.max(s.usable()));
+                    target.cpu = target.cpu.map(|c| c.max(s.cpu));
+                }
+                s.name.clone()
+            });
+        }
         let limits = apply_limits(&d.prior, &target);
         d.applied = ResourceSpec { requests: target, limits };
         // Memory was raised past the rule's choice: any memory hold no longer describes `applied`.

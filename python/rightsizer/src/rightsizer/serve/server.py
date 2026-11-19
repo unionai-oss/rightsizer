@@ -31,6 +31,7 @@ import inspect
 import json
 import logging
 import threading
+import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
@@ -41,6 +42,7 @@ from .errors import (
     BadRequest,
     EstimatorError,
     Insufficient,
+    Internal,
     NotFound,
     RateLimited,
     Unauthorized,
@@ -201,9 +203,9 @@ class Coalescer:
                     for j in js:
                         j.future.set_result(res[at:at + len(j.contexts)])
                         at += len(j.contexts)
-                except Exception as e:  # noqa: BLE001
-                    err = as_error(e)
-                    log.warning("estimate batch of %d failed: %s", len(ctxs), err.message)
+                except BaseException as e:  # noqa: BLE001 -- the coalescer thread must outlive any backend failure
+                    err = as_error(e) if isinstance(e, Exception) else Internal(f"{type(e).__name__} in the estimator")
+                    log.warning("estimate batch of %d failed: %s", len(ctxs), type(e).__name__)
                     for j in js:
                         j.future.set_exception(err)
                 finally:
@@ -212,6 +214,45 @@ class Coalescer:
 
 
 # ── the server ──────────────────────────────────────────────────────────
+
+
+def _json_default(o: Any) -> Any:
+    """NumPy scalars / arrays (an estimator's probabilities) as plain JSON values."""
+    if hasattr(o, "tolist"):
+        return o.tolist()
+    if hasattr(o, "item"):
+        return o.item()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
+def _dumps(payload: Any) -> bytes:
+    return json.dumps(payload, allow_nan=False, default=_json_default).encode()
+
+
+class _Server(ThreadingHTTPServer):
+    """``ThreadingHTTPServer`` with a bound on concurrent connections (one thread each):
+    a connection over ``max_connections`` is closed at once instead of getting a thread."""
+
+    daemon_threads = True
+
+    def __init__(self, addr: Any, handler: Any, max_connections: int):
+        self._slots = threading.BoundedSemaphore(max_connections)
+        super().__init__(addr, handler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
+            log.warning("connection limit reached; closing a new connection")
+            self.shutdown_request(request)
+            return
+        t = threading.Thread(target=self._serve_one, args=(request, client_address),
+                             name="rightsizer-serve-conn", daemon=True)
+        t.start()
+
+    def _serve_one(self, request: Any, client_address: Any) -> None:
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 def _filter_axes(est: Mapping, axes: Sequence[str] | None) -> dict:
@@ -232,7 +273,8 @@ class EstimatorServer:
 
     def __init__(self, estimator: Any = None, *, factory: Callable[[], Any] | None = None, host: str = "127.0.0.1", port: int = 8095, token: str | None = None,
                  batch_window_ms: float = 10.0, max_batch: int | None = None, max_pending: int = 1024,
-                 log_contexts: bool = False, max_body_bytes: int = 64 << 20, request_timeout_s: float = 600.0):
+                 log_contexts: bool = False, max_body_bytes: int = 64 << 20, request_timeout_s: float = 600.0,
+                 idle_timeout_s: float = 60.0, max_connections: int = 256, ready_ttl_s: float = 1.0):
         self.token = token
         self.batch_window_s = batch_window_ms / 1000.0
         self._max_batch = max_batch
@@ -240,6 +282,9 @@ class EstimatorServer:
         self.log_contexts = log_contexts
         self.max_body_bytes = max_body_bytes
         self.request_timeout_s = request_timeout_s
+        self.idle_timeout_s = idle_timeout_s
+        self.ready_ttl_s = ready_ttl_s
+        self._ready_until = 0.0
         self._lock = threading.Lock()
         self._estimator: Any = None
         self._coalescer: Coalescer | None = None
@@ -250,8 +295,7 @@ class EstimatorServer:
             self._install(as_estimator(estimator))
         else:
             threading.Thread(target=self._load, args=(factory,), name="rightsizer-serve-load", daemon=True).start()
-        self.httpd = ThreadingHTTPServer((host, port), self._handler())
-        self.httpd.daemon_threads = True
+        self.httpd = _Server((host, port), self._handler(), max_connections)
         self._thread: threading.Thread | None = None
 
     # lifecycle
@@ -322,15 +366,22 @@ class EstimatorServer:
 
     # protocol
 
-    def is_ready(self) -> bool:
+    def is_ready(self, cached: bool = False) -> bool:
+        """Whether the estimator is loaded and its backend answers. ``cached``: reuse a
+        positive answer for ``ready_ttl_s`` (the estimate path; ``/v1/health`` always probes),
+        so a request does not cost an extra backend health call."""
         est = self._estimator
         if est is None:
             return False
+        if cached and time.monotonic() < self._ready_until:
+            return True
         r = getattr(est, "ready", None)
         try:
-            return bool(r()) if callable(r) else True
+            ok = bool(r()) if callable(r) else True
         except Exception:  # noqa: BLE001
-            return False
+            ok = False
+        self._ready_until = time.monotonic() + self.ready_ttl_s if ok else 0.0
+        return ok
 
     def info(self) -> dict:
         est = self._estimator
@@ -359,9 +410,19 @@ class EstimatorServer:
                 raise BadRequest(f"'{where}' lacks {', '.join(missing)}")
             if not isinstance(c.get("platform"), dict) or not isinstance(c.get("key"), str):
                 raise BadRequest(f"'{where}': 'key' must be a string and 'platform' an object")
-            if int(c.get("v", 1) or 1) > 1:
-                raise Unsupported(f"'{where}': WorkloadContext v{c['v']} (this server reads v1)")
+            v = c.get("v", 1)
+            if v is None:
+                v = 1
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise BadRequest(f"'{where}': 'v' must be an integer")
+            if v > 1:
+                raise Unsupported(f"'{where}': WorkloadContext v{v} (this server reads v1)")
         grids = body.get("grids") or ([body["grid"]] if body.get("grid") else [])
+        if not isinstance(grids, list) or not all(isinstance(g, str) for g in grids):
+            raise BadRequest("'grids' must be an array of strings and 'grid' a string")
+        feats = body.get("features")
+        if feats is not None and not isinstance(feats, str):
+            raise BadRequest("'features' must be a string")
         bad = [g for g in grids if g not in info.get("grids", [])]
         if bad:
             raise Unsupported(f"grid {bad[0]!r} not served (grids: {info.get('grids')})")
@@ -381,6 +442,15 @@ class EstimatorServer:
                 raise Unsupported(f"none of axes {axes} is estimated (axes: {sorted(served)})")
         return ctxs, axes
 
+    def authorize(self, headers: Mapping[str, str]) -> None:
+        """Bearer auth; a no-op without a token. An empty token matches nothing."""
+        if self.token is None:
+            return
+        auth = headers.get("Authorization") or headers.get("authorization") or ""
+        given = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not given or not self.token or not hmac.compare_digest(given.encode(), self.token.encode()):
+            raise Unauthorized("missing or wrong bearer token")
+
     def handle(self, method: str, path: str, headers: Mapping[str, str], raw: bytes | None) -> tuple[int, Any]:
         path = path.split("?", 1)[0].rstrip("/")
         if method == "GET" and path == "/v1/health":
@@ -394,14 +464,10 @@ class EstimatorServer:
             if path in known:
                 return 405, BadRequest(f"{method} not allowed on {path}").body()
             raise NotFound(f"no route {method} {path}")
-        if self.token is not None:
-            auth = headers.get("Authorization") or headers.get("authorization") or ""
-            given = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-            if not given or not hmac.compare_digest(given.encode(), self.token.encode()):
-                raise Unauthorized("missing or wrong bearer token")
+        self.authorize(headers)
         if path == "/v1/info":
             return 200, self.info()
-        if not self.is_ready():
+        if not self.is_ready(cached=True):
             raise Unavailable(self.load_error or "backend not ready")
         try:
             body = json.loads(raw or b"")
@@ -428,9 +494,15 @@ class EstimatorServer:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
             server_version = "rightsizer-serve/1"
+            timeout = server.idle_timeout_s  # socket timeout: slow or idle clients do not hold a thread
 
             def _send(self, status: int, payload: Any) -> None:
-                data = json.dumps(payload, allow_nan=False).encode()
+                try:
+                    data = _dumps(payload)
+                except (TypeError, ValueError) as e:  # NaN/inf or a non-JSON value from the estimator
+                    log.warning("response not serializable: %s", e)
+                    status = 500
+                    data = _dumps(Internal(f"estimator returned a value that is not JSON: {e}").body())
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
@@ -445,17 +517,32 @@ class EstimatorServer:
                 try:
                     raw = None
                     if method == "POST":
-                        n = int(self.headers.get("Content-Length") or 0)
+                        if self.headers.get("Transfer-Encoding"):
+                            self.close_connection = True
+                            raise BadRequest("Transfer-Encoding is not supported; send Content-Length")
+                        cl = (self.headers.get("Content-Length") or "0").strip()
+                        if not cl.isdigit():
+                            self.close_connection = True
+                            raise BadRequest(f"invalid Content-Length {cl[:32]!r}")
+                        n = int(cl)
                         if n > server.max_body_bytes:
                             self.close_connection = True
                             raise BadRequest(f"body of {n} bytes exceeds {server.max_body_bytes}")
+                        path = self.path.split("?", 1)[0].rstrip("/")
+                        if path != "/v1/health":
+                            try:  # before reading the body: unauthenticated clients cost no read
+                                server.authorize(dict(self.headers.items()))
+                            except Unauthorized:
+                                self.close_connection = True
+                                raise
                         raw = self.rfile.read(n) if n else b""
                     status, payload = server.handle(method, self.path, dict(self.headers.items()), raw)
                 except EstimatorError as e:
                     status, payload = e.status, e.body()
                 except Exception as e:
                     err = as_error(e)
-                    log.exception("request failed")
+                    log.error("request failed: %s", type(e).__name__)  # no message: it may quote a context
+                    log.debug("request failed", exc_info=True)
                     status, payload = err.status, err.body()
                 self._send(status, payload)
                 log.info("%s %s %d %.1f ms", method, self.path.split("?", 1)[0], status,

@@ -66,9 +66,14 @@ impl TenantMap {
     /// The patterns that apply to a caller.
     pub fn patterns(&self, caller: &Caller, user: Option<&str>) -> Vec<String> {
         let mut v = Vec::new();
+        // Keys are uids (decimal), user names, and "http". A user *name*
+        // that reads as a uid ("1001") or is "http" would otherwise pick up
+        // the patterns meant for that uid or for HTTP callers, so such names
+        // are not looked up (their uid still is).
+        let name_ok = |u: &&str| !u.is_empty() && *u != "http" && !u.bytes().all(|b| b.is_ascii_digit());
         let keys: Vec<String> = match caller.transport {
             Transport::Http => vec!["http".into()],
-            _ => caller.uid.map(|u| u.to_string()).into_iter().chain(user.map(str::to_string)).collect(),
+            _ => caller.uid.map(|u| u.to_string()).into_iter().chain(user.filter(name_ok).map(str::to_string)).collect(),
         };
         for k in keys {
             if let Some(p) = self.by.get(&k) {
@@ -553,4 +558,25 @@ fn http_app(handler: Arc<dyn Handler>, daemon: Arc<Daemon>, opts: ServerOptions)
         async move { ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], d.engine.metrics().render()) }
     };
     axum::Router::new().route("/", post(rpc.clone())).route("/rpc", post(rpc)).route("/healthz", get(|| async { "ok\n" })).route("/metrics", get(metrics))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tenant_map_keys_are_not_confusable() {
+        let mut m = BTreeMap::new();
+        m.insert("1001".to_string(), vec!["slurm://c/admins".to_string()]);
+        m.insert("http".to_string(), vec!["k8s://*".to_string()]);
+        m.insert("alice".to_string(), vec!["slurm://c/ml".to_string()]);
+        let t = TenantMap::new(&m);
+        let unix = |uid| Caller { uid: Some(uid), gid: None, pid: None, transport: Transport::Unix };
+        assert_eq!(t.patterns(&unix(1001), Some("bob")), vec!["slurm://c/admins"]);
+        assert_eq!(t.patterns(&unix(1000), Some("alice")), vec!["slurm://c/ml"]);
+        // uid 2000 whose login name is "1001", and a local user named "http".
+        assert!(t.patterns(&unix(2000), Some("1001")).is_empty(), "a numeric user name got another uid's tenants");
+        assert!(t.patterns(&unix(2001), Some("http")).is_empty(), "a user named http got the HTTP tenants");
+        assert_eq!(t.patterns(&Caller::anonymous(Transport::Http), None), vec!["k8s://*"]);
+    }
 }

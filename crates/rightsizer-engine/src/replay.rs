@@ -321,8 +321,13 @@ fn run_prior(r: &RunRecord) -> Prior {
     Prior { spec: ResourceSpec { requests, limits }, ..Prior::default() }
 }
 
+/// Whether `h` had finished (and its outcome could be known) by `t`. A run
+/// of unknown duration is assumed to have run for the default duration (1 h,
+/// SPEC §5.5) rather than to have ended as it started: otherwise its outcome
+/// leaks into decisions for runs that started while it was still running.
 fn completed_before(h: &RunRecord, t: DateTime<Utc>) -> bool {
-    let end = h.started_at + chrono::Duration::milliseconds((h.duration_s.unwrap_or(0.0).max(0.0) * 1000.0) as i64);
+    let d = h.duration_s.filter(|d| d.is_finite()).unwrap_or(rightsizer_core::normalize::DEFAULT_DURATION_S);
+    let end = h.started_at + chrono::Duration::milliseconds((d.max(0.0) * 1000.0) as i64);
     h.started_at < t && end <= t
 }
 
@@ -428,7 +433,9 @@ impl Engine {
         let mut req = DecideRequest::for_context(ctx.clone());
         req.state = opts.state.clone();
         req.constraints = opts.constraints.clone();
-        req.policy = Policy { mode: Some(Mode::Recommend), ..opts.policy.clone() };
+        // No exploration: the replay is the policy's argmin, and stays
+        // deterministic (exploration is seeded per decision id).
+        req.policy = Policy { mode: Some(Mode::Recommend), exploration: Some(0.0), ..opts.policy.clone() };
         let r = Resolved {
             effective: Effective { mode: Mode::Recommend, demotions: vec![], reductions_blocked: None, skip_estimator: false },
             skip: vec![],

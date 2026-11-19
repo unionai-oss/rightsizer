@@ -9,7 +9,7 @@
 //! | code digest, tokens | sent | — |
 //! | full source | dropped | `send_source = true` |
 //! | input URIs | never present (salted hash only) | — |
-//! | column names, string scalars, labels | dropped (counts and kinds stay) | `send = ["columns", "strings", "labels", "labels:<key>"]` |
+//! | column names, string scalars (inputs and `manifest.extra`), labels | dropped (counts and kinds stay) | `send = ["columns", "strings", "labels", "labels:<key>"]` |
 //! | numeric scalars, sizes, rows, shapes, dtypes, parameter counts | sent | `redact = ["scalars", "sizes", "rows", "shapes", "dtypes", "params", "columns"]` |
 //! | history | sent, ≤ `history_limit` | `history_limit` |
 //!
@@ -154,6 +154,11 @@ pub fn redact_for_remote(ctx: &WorkloadContext, privacy: &Privacy) -> WorkloadCo
         code.source = None;
     }
     out.inputs = ctx.inputs.iter().map(|i| privacy.redact_input(i)).collect();
+    // Adapter extras are scalars too (e.g. the K8s container image, which
+    // names private registries): strings only with `send = ["strings"]`.
+    if !privacy.sends("strings") {
+        out.manifest.extra.retain(|_, v| !matches!(v, ScalarValue::Str(_)));
+    }
     out.labels = ctx.labels.iter().filter(|(k, _)| privacy.label_sent(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
     out.history.truncate(privacy.history_limit);
     for r in &mut out.history {

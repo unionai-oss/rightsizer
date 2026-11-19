@@ -317,7 +317,7 @@ impl Admitter {
         }
         let object_id = decisions.first().map(|(_, d)| d.id.to_string());
         let render = |m: Mode, ds: &[(Unit, Decision)]| {
-            adapter.render_with(&native, &RenderRequest { mode: m, decision_id: object_id.clone(), units: runtime::render_units(ds, m), annotate: true, output: Output::JsonPatch })
+            adapter.render_with(&native, &RenderRequest { mode: m, decision_id: object_id.clone(), units: runtime::render_units(ds, m), annotate: true, output: Output::JsonPatch, namespace: None })
         };
         let mut warnings = Vec::new();
         let mut result = String::new();
@@ -332,7 +332,10 @@ impl Admitter {
             }
             Err(e) => return Err(e.to_string()),
         };
-        let changed = rmode == Mode::Enforce && decisions.iter().any(|(u, d)| d.mode == Mode::Enforce && runtime::changes(u, d));
+        // Validate every enforced patch before it is emitted (plugins.md §2),
+        // not only when a decision differs from the prior: render may still
+        // write resources (S2 limits, Ray params, GPU type terms).
+        let changed = rmode == Mode::Enforce;
         if changed && !rendered.patch.is_none() {
             let now = Utc::now();
             match adapter.validate_at(&native, &rendered.patch, &env, now) {
@@ -347,7 +350,8 @@ impl Admitter {
                 Ok(()) => {
                     if !dry_run && let Some(id) = &object_id {
                         let _ = adapter.reserve(&native, &rendered.patch, &env, id, now);
-                        if let (Some(sl), Some((_, d))) = (&self.shared_ledger, decisions.first_mut())
+                        // On an enforced decision: other replicas refresh enforce decisions only.
+                        if let (Some(sl), Some((_, d))) = (&self.shared_ledger, decisions.iter_mut().find(|(_, d)| d.mode == Mode::Enforce))
                             && let Some(r) = sl.local_reservation(&ns, id)
                         {
                             d.explanation.push(crate::ledger_shared::encode(&r));
@@ -356,6 +360,17 @@ impl Admitter {
                     result = "patched".into();
                 }
             }
+        }
+        // S1: a patch the apiserver cannot apply or would reject fails the
+        // user's request whatever the failurePolicy; leave such objects alone.
+        if let Patch::JsonPatch { ops } = &rendered.patch
+            && !annotations_fit(&adapter, &native, ops)
+        {
+            tracing::warn!(namespace = %ns, "patch would exceed the apiserver's annotation size limit: admitted unchanged");
+            if let Some(id) = &object_id {
+                adapter.ledger().release(&ns, id);
+            }
+            return Ok(skip("annotation_size"));
         }
         if result.is_empty() {
             result = if rendered.patch.is_none() { "skipped:unchanged".into() } else { "annotated".into() };
@@ -402,6 +417,28 @@ impl Admitter {
             Err(e) => demote(decisions, PriorReason::Internal, &format!("finalize: {e}")),
         }
     }
+}
+
+/// The apiserver's limit on an object's annotations (keys + values), bytes.
+pub const ANNOTATION_LIMIT_BYTES: usize = 256 * 1024;
+
+fn annotation_bytes(meta: &Value) -> usize {
+    meta.get("annotations").and_then(Value::as_object).map(|m| m.iter().map(|(k, v)| k.len() + v.as_str().map(str::len).unwrap_or(0)).sum()).unwrap_or(0)
+}
+
+/// Whether the patched object's annotations (its own and every pod
+/// template's) stay within [`ANNOTATION_LIMIT_BYTES`]; false when the patch
+/// does not apply.
+fn annotations_fit(adapter: &K8sAdapter, native: &Native, ops: &[rightsizer_plugin::JsonPatchOp]) -> bool {
+    let Ok(sub) = adapter.parse(native) else { return false };
+    let Ok(patched) = crate::render::apply_patch(&sub, &Patch::JsonPatch { ops: ops.to_vec() }) else { return false };
+    patched.iter().all(|v| {
+        let top = v.get("metadata").map(annotation_bytes).unwrap_or(0) <= ANNOTATION_LIMIT_BYTES;
+        let templates = crate::objects::workload(v)
+            .map(|w| w.sites.iter().all(|s| v.pointer(&crate::edit::pointer(&s.meta_path)).map(annotation_bytes).unwrap_or(0) <= ANNOTATION_LIMIT_BYTES))
+            .unwrap_or(true);
+        top && templates
+    })
 }
 
 /// Count a decision this module wrote to the log (the denominator of

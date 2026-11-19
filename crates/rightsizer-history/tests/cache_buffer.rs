@@ -27,6 +27,8 @@ struct Flaky {
     reads: AtomicUsize,
     /// Latency of `runs`, ms.
     delay_ms: AtomicUsize,
+    /// Latency of `runs` after it has read the store, ms (the answer is as of the start).
+    delay_after_read_ms: AtomicUsize,
 }
 
 impl Flaky {
@@ -37,6 +39,7 @@ impl Flaky {
             reject: AtomicBool::new(false),
             reads: AtomicUsize::new(0),
             delay_ms: AtomicUsize::new(0),
+            delay_after_read_ms: AtomicUsize::new(0),
         })
     }
     fn set_down(&self, d: bool) {
@@ -70,7 +73,12 @@ impl HistoryStore for Flaky {
             tokio::time::sleep(Duration::from_millis(d as u64)).await;
         }
         self.check()?;
-        self.inner.runs(key, limit).await
+        let r = self.inner.runs(key, limit).await;
+        let d = self.delay_after_read_ms.load(Ordering::SeqCst);
+        if d > 0 {
+            tokio::time::sleep(Duration::from_millis(d as u64)).await;
+        }
+        r
     }
     async fn decisions(&self, f: &DecisionFilter) -> Result<Vec<Decision>, StoreError> {
         self.check()?;
@@ -355,4 +363,47 @@ async fn deferred_writes_are_queued_untried() {
     assert_eq!(w.flush().await, 2);
     assert_eq!(w.buffered(), 0);
     assert_eq!(inner.inner.runs(&k, 10).await.unwrap().len(), 1);
+}
+
+// ── adversarial review ──────────────────────────────────────────────────
+
+/// A write through the cache while a read of the same key is in flight
+/// (the read saw the store before the write) must not leave the cache
+/// without that record until the TTL: the next read sees it.
+#[tokio::test(start_paused = true)]
+async fn own_write_during_an_inflight_read_is_not_lost() {
+    let inner = Flaky::new();
+    let k = k1();
+    inner.put_run(&rec(&k, "a", 1, t(0))).await.unwrap();
+    inner.delay_after_read_ms.store(100, Ordering::SeqCst);
+    let c = Arc::new(CachedStore::new(inner.clone(), CacheOptions::default()));
+    let read = {
+        let (c, k) = (c.clone(), k.clone());
+        tokio::spawn(async move { c.history(&k, 10).await })
+    };
+    tokio::time::sleep(Duration::from_millis(10)).await; // the read has seen the store
+    c.put_run(&rec(&k, "oom", 1, t(10))).await.unwrap();
+    read.await.unwrap();
+    inner.delay_after_read_ms.store(0, Ordering::SeqCst);
+    let v = c.history(&k, 10).await;
+    assert_eq!(invs(v.records().unwrap()), ["oom#1", "a#1"], "{v:?}");
+}
+
+/// A store that never answers must not pin the shared read (and every
+/// later reader of the key) forever: the read times out and, with no
+/// cache entry, history is unavailable (the engine demotes).
+#[tokio::test(start_paused = true)]
+async fn a_hung_store_read_times_out() {
+    let inner = Flaky::new();
+    let k = k1();
+    inner.put_run(&rec(&k, "a", 1, t(0))).await.unwrap();
+    inner.delay_ms.store(24 * 3600 * 1000, Ordering::SeqCst);
+    let c = CachedStore::new(inner.clone(), CacheOptions::default());
+    let t0 = tokio::time::Instant::now();
+    let r = c.history(&k, 10).await;
+    assert!(r.is_unavailable(), "{r:?}");
+    assert!(t0.elapsed() <= Duration::from_secs(60), "{:?}", t0.elapsed());
+    // The next reader starts a new read instead of joining the hung one.
+    inner.delay_ms.store(0, Ordering::SeqCst);
+    assert!(matches!(c.history(&k, 10).await, HistoryRead::Fresh(v) if v.len() == 1));
 }

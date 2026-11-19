@@ -148,6 +148,12 @@ pub struct ObjectHistoryStore {
     skipped: AtomicU64,
 }
 
+/// Lease bookkeeping of one compaction run.
+struct LeaseGuard {
+    started: std::time::Instant,
+    last: std::time::Instant,
+}
+
 /// Write mode of [`ObjectHistoryStore`]'s blob layer.
 enum Mode {
     Overwrite,
@@ -278,24 +284,37 @@ impl ObjectHistoryStore {
 
     /// `PutMode::Update` emulation: hold `{path}.lock` (create-only), re-check
     /// the ETag, overwrite, release.
+    ///
+    /// The lock carries a unique token. A stale lock is broken only under a
+    /// second create-only lock and after re-checking that it is still the
+    /// stale one observed ([`Self::break_stale_lock`]); release deletes the
+    /// lock only if it still carries our token. Deleting unconditionally (the previous
+    /// scheme) let two waiters that both saw the same stale lock both end up
+    /// "holding" it, and a holder that outlived `lock_stale_after` delete its
+    /// successor's lock.
     async fn put_update_emulated(&self, path: &str, data: Vec<u8>, expected: UpdateVersion) -> Result<UpdateVersion, StoreError> {
         let lock = format!("{path}.lock");
-        let holder = serde_json::to_vec(&serde_json::json!({"holder": self.opts.holder, "at": Utc::now()})).unwrap_or_default();
+        let lock_path = Path::from(lock.as_str());
+        let token = self.next_ulid().to_string();
+        let holder = serde_json::to_vec(&serde_json::json!({"holder": self.opts.holder, "token": token, "at": Utc::now()})).unwrap_or_default();
         let mut delay = Duration::from_millis(2);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let r = self
                 .store
-                .put_opts(&Path::from(lock.as_str()), PutPayload::from(holder.clone()), PutOptions { mode: PutMode::Create, ..Default::default() })
+                .put_opts(&lock_path, PutPayload::from(holder.clone()), PutOptions { mode: PutMode::Create, ..Default::default() })
                 .await;
             match r {
                 Ok(_) => break,
                 Err(object_store::Error::AlreadyExists { .. }) => {
                     // Break a stale lock (its holder died).
-                    if let Ok(meta) = self.store.head(&Path::from(lock.as_str())).await {
-                        let age = Utc::now() - meta.last_modified;
-                        if age.to_std().unwrap_or_default() > self.opts.lock_stale_after {
-                            let _ = self.store.delete(&Path::from(lock.as_str())).await;
+                    if let Ok(g) = self.store.get(&lock_path).await {
+                        let age = Utc::now() - g.meta.last_modified;
+                        let stale = age.to_std().unwrap_or_default() > self.opts.lock_stale_after;
+                        if stale
+                            && let Ok(seen) = g.bytes().await
+                            && self.break_stale_lock(&lock_path, &seen).await
+                        {
                             continue;
                         }
                     }
@@ -326,8 +345,49 @@ impl ObjectHistoryStore {
             Ok(UpdateVersion { e_tag: r.e_tag, version: r.version })
         }
         .await;
-        let _ = self.store.delete(&Path::from(lock.as_str())).await;
+        // Release only our own lock.
+        if let Ok(g) = self.store.get(&lock_path).await
+            && let Ok(b) = g.bytes().await
+            && b.as_ref() == holder.as_slice()
+        {
+            let _ = self.store.delete(&lock_path).await;
+        }
         result
+    }
+
+    /// Delete the stale lock whose content is `seen`, under a create-only
+    /// "breaker" lock `{lock}.break`: only its holder deletes, and only after
+    /// re-reading the lock and finding the same stale content. A waiter that
+    /// saw the stale lock earlier but breaks later finds the new holder's
+    /// fresh lock and leaves it. `true` if this call deleted the lock.
+    async fn break_stale_lock(&self, lock_path: &Path, seen: &[u8]) -> bool {
+        let brk = Path::from(format!("{lock_path}.break"));
+        let mine = serde_json::to_vec(&serde_json::json!({"holder": self.opts.holder, "token": self.next_ulid().to_string()})).unwrap_or_default();
+        match self.store.put_opts(&brk, PutPayload::from(mine), PutOptions { mode: PutMode::Create, ..Default::default() }).await {
+            Ok(_) => {}
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                // Breaking takes milliseconds: a breaker lock this old is a crash.
+                if let Ok(meta) = self.store.head(&brk).await
+                    && (Utc::now() - meta.last_modified).to_std().unwrap_or_default() > self.opts.lock_stale_after * 2
+                {
+                    let _ = self.store.delete(&brk).await;
+                }
+                return false;
+            }
+            Err(_) => return false,
+        }
+        let mut broke = false;
+        if let Ok(g) = self.store.get(lock_path).await {
+            let age = (Utc::now() - g.meta.last_modified).to_std().unwrap_or_default();
+            if age > self.opts.lock_stale_after
+                && let Ok(b) = g.bytes().await
+                && b.as_ref() == seen
+            {
+                broke = self.store.delete(lock_path).await.is_ok();
+            }
+        }
+        let _ = self.store.delete(&brk).await;
+        broke
     }
 
     async fn list(&self, prefix: &str, offset: Option<&str>) -> Result<Vec<ObjectMeta>, StoreError> {
@@ -355,20 +415,38 @@ impl ObjectHistoryStore {
     }
 
     async fn get_many_with<T: serde::de::DeserializeOwned + Send>(&self, paths: Vec<String>, concurrency: usize) -> Result<Vec<(String, T)>, StoreError> {
-        let results: Vec<Result<Option<(String, T)>, StoreError>> = futures::stream::iter(paths)
+        Ok(self.get_many_detailed(paths, concurrency).await?.0)
+    }
+
+    /// [`Self::get_many_with`], also returning the paths skipped because their
+    /// wire version is not readable by this build (as opposed to corrupt or
+    /// deleted ones): compaction must neither delete those nor fold its
+    /// watermark past them (SPEC §13.2: a newer build, or this one after a
+    /// revert, still reads them).
+    async fn get_many_detailed<T: serde::de::DeserializeOwned + Send>(
+        &self,
+        paths: Vec<String>,
+        concurrency: usize,
+    ) -> Result<(Vec<(String, T)>, std::collections::HashSet<String>), StoreError> {
+        enum Got<T> {
+            Ok(String, T),
+            Unsupported(String),
+            Skipped,
+        }
+        let results: Vec<Result<Got<T>, StoreError>> = futures::stream::iter(paths)
             .map(|p| async move {
                 match self.get(&p).await? {
-                    None => Ok(None), // deleted between LIST and GET
+                    None => Ok(Got::Skipped), // deleted between LIST and GET
                     Some((b, _)) => match decode_versioned::<T>(&b, &p) {
-                        Ok(Some(t)) => Ok(Some((p, t))),
+                        Ok(Some(t)) => Ok(Got::Ok(p, t)),
                         Ok(None) => {
                             self.skip();
-                            Ok(None)
+                            Ok(Got::Unsupported(p))
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "skipping unreadable object");
                             self.skip();
-                            Ok(None)
+                            Ok(Got::Skipped)
                         }
                     },
                 }
@@ -377,26 +455,34 @@ impl ObjectHistoryStore {
             .collect()
             .await;
         let mut out = Vec::with_capacity(results.len());
+        let mut unsupported = std::collections::HashSet::new();
         for r in results {
-            if let Some(x) = r? {
-                out.push(x);
+            match r? {
+                Got::Ok(p, t) => out.push((p, t)),
+                Got::Unsupported(p) => {
+                    unsupported.insert(p);
+                }
+                Got::Skipped => {}
             }
         }
-        Ok(out)
+        Ok((out, unsupported))
     }
 
     // ── runs ────────────────────────────────────────────────────────────
 
     async fn read_pointer(&self, key: &WorkloadKey) -> Result<Option<(LatestPointer, UpdateVersion)>, StoreError> {
         let path = self.rel(&latest_rel(key));
-        self.get_json::<LatestPointer>(&path).await
+        // A pointer naming another key is not this key's (planted or a bug):
+        // ignore it, records and watermark alike.
+        Ok(self.get_json::<LatestPointer>(&path).await?.filter(|(p, _)| &p.key == key))
     }
 
     fn pointer_records(&self, p: &LatestPointer, path: &str) -> Vec<RunRecord> {
         let mut out = Vec::with_capacity(p.records.len());
         for v in &p.records {
             match decode_value::<RunRecord>(v.clone(), path) {
-                Ok(Some(r)) => out.push(r),
+                // A pointer only ever holds its own key's records.
+                Ok(Some(r)) if r.key == p.key => out.push(r),
                 _ => self.skip(),
             }
         }
@@ -426,8 +512,7 @@ impl ObjectHistoryStore {
     /// newest `limit + limit/4` shards above its watermark (shard ULIDs follow
     /// write time; the slack covers records written out of start order), so an
     /// uncompacted key costs at most that many GETs per read instead of one per
-    /// shard. Compaction and export read every shard
-    /// ([`Self::all_runs`]).
+    /// shard. A large `limit` reads every shard above the watermark.
     async fn newest_runs(&self, key: &WorkloadKey, limit: usize) -> Result<Vec<RunRecord>, StoreError> {
         let ptr = self.read_pointer(key).await?;
         let (mut records, watermark) = match &ptr {
@@ -441,19 +526,6 @@ impl ObjectHistoryStore {
         let got: Vec<(String, RunRecord)> = self.get_many_with(paths, HISTORY_READ_CONCURRENCY.max(self.opts.concurrency)).await?;
         records.extend(got.into_iter().map(|(_, r)| r).filter(|r| &r.key == key));
         Ok(merge_runs(records, limit))
-    }
-
-    /// Every record of `key` (pointer ∪ newer shards), deduplicated, newest first.
-    async fn all_runs(&self, key: &WorkloadKey) -> Result<Vec<RunRecord>, StoreError> {
-        let ptr = self.read_pointer(key).await?;
-        let (mut records, watermark) = match &ptr {
-            Some((p, _)) => (self.pointer_records(p, &self.rel(&latest_rel(key))), p.watermark),
-            None => (Vec::new(), None),
-        };
-        let shards = self.shard_list(key, watermark).await?;
-        let got: Vec<(String, RunRecord)> = self.get_many(shards.into_iter().map(|(_, p)| p).collect()).await?;
-        records.extend(got.into_iter().map(|(_, r)| r).filter(|r| &r.key == key));
-        Ok(merge_runs(records, usize::MAX))
     }
 
     // ── compaction lease ────────────────────────────────────────────────
@@ -506,7 +578,46 @@ impl ObjectHistoryStore {
         Ok(())
     }
 
+    /// Check that this process still holds the compaction lease and extend
+    /// it (conditional PUT on its ETag). Called before every destructive
+    /// phase of compaction and periodically during it, so a run that outlives
+    /// its lease, or whose lease was taken over, stops instead of racing the
+    /// new holder's snapshot rewrites and deletions. A no-op for dry runs.
+    async fn keep_lease(&self, opts: &CompactOptions, guard: &mut LeaseGuard, force: bool) -> Result<(), StoreError> {
+        if opts.dry_run {
+            return Ok(());
+        }
+        let every = self.opts.lease_ttl / 4;
+        if !force && guard.last.elapsed() < every {
+            return Ok(());
+        }
+        let now = opts.now + chrono::Duration::from_std(guard.started.elapsed()).unwrap_or_default();
+        let path = self.lease_path();
+        let holder = &self.opts.holder;
+        let Some((cur, ver)) = self.get_json::<CompactionLease>(&path).await? else {
+            return Err(StoreError::Conflict("compaction lease lost (released by another holder)".into()));
+        };
+        if &cur.holder != holder {
+            return Err(StoreError::Conflict(format!("compaction lease lost to {}", cur.holder)));
+        }
+        if cur.expires_at <= now {
+            return Err(StoreError::Conflict(format!("compaction lease expired at {}", cur.expires_at)));
+        }
+        let lease = CompactionLease {
+            expires_at: now + chrono::Duration::from_std(self.opts.lease_ttl).unwrap_or_else(|_| chrono::Duration::hours(1)),
+            ..cur
+        };
+        let data = serde_json::to_vec(&lease).map_err(|e| StoreError::Other(e.to_string()))?;
+        self.put(&path, data, Mode::Update(ver)).await.map_err(|e| match e {
+            StoreError::Conflict(m) => StoreError::Conflict(format!("compaction lease lost: {m}")),
+            e => e,
+        })?;
+        guard.last = std::time::Instant::now();
+        Ok(())
+    }
+
     async fn compact_inner(&self, opts: &CompactOptions, status: &mut CompactionStatus) -> Result<(), StoreError> {
+        let mut guard = LeaseGuard { started: std::time::Instant::now(), last: std::time::Instant::now() };
         let now = opts.now;
         let settle_cut = now - chrono::Duration::from_std(self.opts.settle).unwrap_or_default();
         let grace_cut = now - chrono::Duration::from_std(opts.grace).unwrap_or_default();
@@ -536,15 +647,25 @@ impl ObjectHistoryStore {
 
         // Visit each shard directory; then pointers without shards.
         let mut visited_pointers = std::collections::HashSet::new();
-        for (_dir, mut shards) in by_dir {
+        for (dir, mut shards) in by_dir {
+            self.keep_lease(opts, &mut guard, false).await?;
             shards.sort();
             status.keys += 1;
-            let got: Vec<(String, RunRecord)> = self.get_many(shards.iter().map(|(_, p)| p.clone()).collect()).await?;
-            let Some(key) = got.first().map(|(_, r)| r.key.clone()) else {
-                // Every shard unreadable: leave them for an operator.
+            let (got, unsupported): (Vec<(String, RunRecord)>, _) =
+                self.get_many_detailed(shards.iter().map(|(_, p)| p.clone()).collect(), self.opts.concurrency).await?;
+            // The directory's key is the one whose layout path *is* this
+            // directory: a record naming another key (planted with create-only
+            // credentials under a chosen ULID) must not decide which pointer
+            // this directory folds into, or the real records would be dropped
+            // and their shards deleted.
+            let Some(key) = got.iter().map(|(_, r)| &r.key).find(|k| self.rel(&run_dir_rel(k)) == dir).cloned() else {
+                // Every shard unreadable (or foreign): leave them for an operator.
                 remaining += shards.len() as u64;
                 continue;
             };
+            // Shards of a wire version this build cannot read: the watermark
+            // stays below the oldest of them and they are never deleted here.
+            let first_unsupported: Option<Ulid> = shards.iter().filter(|(_, p)| unsupported.contains(p)).map(|(id, _)| *id).min();
             let ptr_path = self.rel(&latest_rel(&key));
             visited_pointers.insert(ptr_path.clone());
             let shard_records: BTreeMap<String, RunRecord> = got.into_iter().filter(|(_, r)| r.key == key).collect();
@@ -560,7 +681,12 @@ impl ObjectHistoryStore {
                 all.extend(shards.iter().filter_map(|(_, p)| shard_records.get(p).cloned()));
                 let merged = merge_runs(all, usize::MAX);
                 let kept: Vec<RunRecord> = merged.iter().filter(|r| r.started_at >= age_cut).take(opts.keep_last).cloned().collect();
-                let new_wm = shards.iter().filter(|(id, _)| ulid_time(*id) <= settle_cut).map(|(id, _)| *id).max().max(old_wm);
+                let new_wm = shards
+                    .iter()
+                    .filter(|(id, _)| ulid_time(*id) <= settle_cut && first_unsupported.is_none_or(|u| *id < u))
+                    .map(|(id, _)| *id)
+                    .max()
+                    .max(old_wm);
                 let changed = new_wm != old_wm || kept != old_records;
                 if !changed || opts.dry_run {
                     if changed {
@@ -592,7 +718,7 @@ impl ObjectHistoryStore {
             // Shards older than both the watermark and the grace period go,
             // after their records land in the day's snapshot.
             for (id, path) in &shards {
-                let old = ulid_time(*id) < grace_cut && watermark.is_some_and(|w| *id <= w);
+                let old = ulid_time(*id) < grace_cut && watermark.is_some_and(|w| *id <= w) && !unsupported.contains(path);
                 if old {
                     if let Some(r) = shard_records.get(path) {
                         let day = r.started_at.date_naive();
@@ -653,10 +779,15 @@ impl ObjectHistoryStore {
             })
             .map(|(_, p)| p.clone())
             .collect();
-        let delete_decisions: Vec<String> =
-            decision_paths.iter().filter(|(id, _)| ulid_time(*id) < decision_cut).map(|(_, p)| p.clone()).collect();
+        let (decoded, unsupported_decisions) = self.get_many_detailed::<Decision>(to_snapshot, self.opts.concurrency).await?;
+        // Never delete what this build cannot read (and so cannot snapshot).
+        let delete_decisions: Vec<String> = decision_paths
+            .iter()
+            .filter(|(id, p)| ulid_time(*id) < decision_cut && !unsupported_decisions.contains(p))
+            .map(|(_, p)| p.clone())
+            .collect();
         let mut dwm = prev_dwm;
-        for (_, d) in self.get_many::<Decision>(to_snapshot).await? {
+        for (_, d) in decoded {
             if ulid_time(d.id) < grace_cut {
                 dwm = dwm.max(Some(d.id));
             }
@@ -666,10 +797,12 @@ impl ObjectHistoryStore {
 
         // ── snapshots: merge into each day's file, then delete what they cover.
         let age_day = age_cut.date_naive();
+        self.keep_lease(opts, &mut guard, true).await?;
         for ((tenant, day), rows) in snap {
             if day < age_day {
                 continue; // past retention: not worth a snapshot
             }
+            self.keep_lease(opts, &mut guard, false).await?;
             let path = self.rel(&format!("snapshots/{tenant}/{}.parquet", day.format("%Y-%m-%d")));
             status.snapshots += 1;
             if opts.dry_run {
@@ -686,6 +819,7 @@ impl ObjectHistoryStore {
         status.run_shards_deleted = delete_runs.len() as u64;
         status.decisions_deleted = delete_decisions.len() as u64;
         if !opts.dry_run {
+            self.keep_lease(opts, &mut guard, true).await?;
             self.delete_all(delete_runs).await?;
             self.delete_all(delete_decisions).await?;
         }
@@ -700,6 +834,7 @@ impl ObjectHistoryStore {
             .collect();
         status.snapshots_deleted = old_snaps.len() as u64;
         if !opts.dry_run {
+            self.keep_lease(opts, &mut guard, true).await?;
             self.delete_all(old_snaps).await?;
         }
 
@@ -714,6 +849,7 @@ impl ObjectHistoryStore {
             .collect();
         status.attempts_deleted = old_attempts.len() as u64;
         if !opts.dry_run {
+            self.keep_lease(opts, &mut guard, true).await?;
             self.delete_all(old_attempts).await?;
         }
         Ok(())
@@ -867,9 +1003,18 @@ impl HistoryStore for ObjectHistoryStore {
 
     async fn decision(&self, id: Ulid) -> Result<Option<Decision>, StoreError> {
         let day = ulid_time(id).format("%Y-%m-%d").to_string();
-        let name = format!("{day}/{id}.json");
-        let metas = self.list(&self.rel("decisions/"), None).await?;
-        for m in metas {
+        let name = format!("/{day}/{id}.json");
+        // Stream the LIST and stop at the first match: collecting the whole
+        // decision tree (30 d of decisions, millions of objects) into memory
+        // to find one id is unbounded.
+        let root = Path::from(self.rel("decisions"));
+        let mut stream = self.store.list(Some(&root));
+        while let Some(m) = stream.next().await {
+            let m = match m {
+                Ok(m) => m,
+                Err(object_store::Error::NotFound { .. }) => return Ok(None),
+                Err(e) => return Err(map_err(root.as_ref(), e)),
+            };
             let loc = m.location.to_string();
             if loc.ends_with(&name) {
                 return Ok(self.get_json::<Decision>(&loc).await?.map(|x| x.0).filter(|d| d.id == id));

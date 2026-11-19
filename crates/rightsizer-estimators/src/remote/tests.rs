@@ -386,3 +386,57 @@ async fn from_member_and_chain_build() {
     assert_eq!(endpoint("http://h/v1/", "info"), "http://h/v1/info");
     assert_eq!(endpoint("http://h", "estimate:batch"), "http://h/v1/estimate:batch");
 }
+
+/// A joiner whose own budget is longer than the in-flight call's must not
+/// inherit that call's (earlier) deadline and fail with its timeout.
+#[tokio::test]
+async fn single_flight_joiner_keeps_its_own_longer_deadline() {
+    let (mock, addr) = serve(1).await;
+    *mock.delay_ms.lock().unwrap() = 300;
+    let r = RemoteEstimator::connect(cfg(addr)).await.unwrap();
+    let c = ctx(77);
+    let short = r.estimate_within(&c, Some(Duration::from_millis(100)));
+    let long = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        r.estimate_within(&c, Some(Duration::from_secs(3))).await
+    };
+    let (a, b) = tokio::join!(short, long);
+    assert!(matches!(a, Err(EstimateError::Timeout(_))), "{a:?}");
+    assert!(b.is_ok(), "the 3 s caller got the 100 ms caller's timeout: {b:?}");
+}
+
+/// A caller dropped while it holds the breaker's half-open trial must not
+/// leave the breaker stuck (every later call failing fast forever).
+#[tokio::test]
+async fn cancelled_half_open_trial_does_not_wedge_the_breaker() {
+    let (mock, addr) = serve(1).await;
+    let mut c = cfg(addr);
+    c.breaker_threshold = 1;
+    c.breaker_cooldown = Duration::from_millis(20);
+    let r = RemoteEstimator::connect(c).await.unwrap();
+    mock.script.lock().unwrap().push_back(err(500, "boom", false));
+    assert!(r.estimate(&ctx(1)).await.is_err());
+    assert!(matches!(r.breaker_state(), BreakerState::Open { .. }));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    // The half-open trial's caller gives up (an outer budget) mid-call.
+    *mock.delay_ms.lock().unwrap() = 200;
+    let _ = tokio::time::timeout(Duration::from_millis(30), r.estimate_within(&ctx(2), Some(Duration::from_secs(2)))).await;
+    *mock.delay_ms.lock().unwrap() = 0;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let e = r.estimate(&ctx(3)).await;
+    assert!(e.is_ok(), "breaker wedged after a cancelled trial: {e:?} {:?}", r.breaker_state());
+}
+
+/// A coalesced batch must not cut every member to the shortest member's
+/// deadline: a caller with a 3 s budget batched with a 100 ms one must still
+/// get its answer.
+#[tokio::test]
+async fn coalesced_batch_does_not_inherit_the_shortest_deadline() {
+    let (mock, addr) = serve(16).await;
+    *mock.delay_ms.lock().unwrap() = 300;
+    let r = RemoteEstimator::connect(cfg(addr)).await.unwrap();
+    let (a, b) = (ctx(1_000_000), ctx(2_000_000));
+    let (ra, rb) = tokio::join!(r.estimate_within(&a, Some(Duration::from_millis(100))), r.estimate_within(&b, Some(Duration::from_secs(3))));
+    assert!(matches!(ra, Err(EstimateError::Timeout(_))), "{ra:?}");
+    assert!(rb.is_ok(), "the 3 s caller got the 100 ms caller's timeout: {rb:?}");
+}

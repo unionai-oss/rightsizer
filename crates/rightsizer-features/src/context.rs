@@ -31,7 +31,9 @@ pub async fn build_context(
     budget: ReadBudget,
     resolver: &dyn StoreResolver,
 ) -> WorkloadContext {
-    let opts = ReadOptions::new(budget).with_salt(privacy.salt.clone());
+    // `ReadOptions::new` reads `RIGHTSIZER_URI_SALT`; a privacy salt
+    // overrides it (in `build_context_with`), its absence does not erase it.
+    let opts = ReadOptions::new(budget);
     build_context_with(seed, key, unit, prior, platform, history, labels, privacy, &opts, resolver).await
 }
 
@@ -125,14 +127,30 @@ async fn resolve_code(c: &CodeRef, keep_source: bool, budget: Duration) -> Optio
             Some((code_info(text, lang, keep_source), Some(text.clone())))
         }
         CodeRef::Path { path } => {
-            let read = async {
-                let meta = tokio::fs::metadata(path).await.ok()?;
-                if meta.len() > MAX_CODE_FILE_BYTES {
+            // Regular files only, and never more than the cap: a device
+            // (`/dev/zero` reports length 0), FIFO or growing file would
+            // otherwise be read by a blocking thread the timeout cannot stop.
+            let p = path.clone();
+            let read = tokio::task::spawn_blocking(move || {
+                use std::io::Read as _;
+                // Checked before opening too: opening a FIFO blocks.
+                let pre = std::fs::metadata(&p).ok()?;
+                if !pre.is_file() {
                     return None;
                 }
-                tokio::fs::read_to_string(path).await.ok()
-            };
-            let text = tokio::time::timeout(budget, read).await.ok().flatten()?;
+                let f = std::fs::File::open(&p).ok()?;
+                let meta = f.metadata().ok()?;
+                if !meta.is_file() || meta.len() > MAX_CODE_FILE_BYTES {
+                    return None;
+                }
+                let mut buf = Vec::new();
+                f.take(MAX_CODE_FILE_BYTES + 1).read_to_end(&mut buf).ok()?;
+                if buf.len() as u64 > MAX_CODE_FILE_BYTES {
+                    return None;
+                }
+                String::from_utf8(buf).ok()
+            });
+            let text = tokio::time::timeout(budget, read).await.ok()?.ok().flatten()?;
             Some((code_info(&text, Language::from_path(path), keep_source), Some(text)))
         }
         CodeRef::Info { info } => {

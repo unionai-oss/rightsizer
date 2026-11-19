@@ -468,8 +468,10 @@ Prometheus importer come later and feed this code through `AdapterEnv`.
   K8s-alphabet suffix containing a digit (`-x7k2p`; `-train` is kept); then
   a CronJob `-<8–10 digit unix minutes>` suffix. A Job owned by a CronJob is
   keyed `cronjob/{owner}`. Flyte: labels `organization`/`project`/`domain`/
-  `task-name` (configurable; `default_org` when the org label is absent,
-  else not Flyte-keyed); the key goes on the first app container only.
+  `task-name` (configurable). The org label is trusted only when
+  `namespace_template` contains `{org}`; otherwise the org is
+  `default_org` (required; a different org label → not Flyte-keyed). The
+  key goes on the first app container only.
 - **Skip rules.** Pods owned by `Job`, `CronJob`, `JobSet`, `PyTorchJob`,
   `TrainJob`, `RayCluster`, `RayJob` → `AlreadySized`; owned by
   `ReplicaSet`/`StatefulSet`/`DaemonSet`/`ReplicationController`/`Workload`/
@@ -541,8 +543,13 @@ Prometheus importer come later and feed this code through `AdapterEnv`.
 - **Signed prior**: `base64url(JSON{v:1, kid, prior, defaulted?, ray?, sig})`,
   `sig = base64url(HMAC-SHA256(key[kid], canonical_json({v, kid, prior,
   defaulted?, ray?})))`. Key file: lines `kid:base64` (first is active), or
-  one bare base64 key (kid `k0`); keys ≥ 16 bytes. Not bound to object
-  identity (copying a genuine prior only makes the target look sized).
+  one bare base64 key (kid `k0`); keys ≥ 16 bytes. Bound to the object:
+  `bind = {namespace}/{Kind}/{base name}` is signed; extract/render accept
+  a prior only on that object (a copied prior is ignored, so it can neither
+  make another object look sized nor forge the origin used for
+  attribution). `rsz k8s restore` checks the signature only (it runs with
+  the user's credentials). `extract_all` returns sized units with the signed
+  origin as their prior (the watcher's `origin_prior`).
 - **Validation** (`Rejection.reason` = check; caller records
   `validation:<check>`, `validate::prior_reason`): `pod_spec` (unique
   container/volume names and mount paths, one `/dev/shm`, request ≤ limit,
@@ -613,8 +620,11 @@ kube-free (`cargo xtask deps-check` passes). New pure modules:
   key-value API, and an increase is only admitted together with a logged
   decision, so the reservation rides on the first decision's explanation
   (`reservation:{json}`); every replica re-reads the last 2 minutes of
-  enforce decisions every 3 s. Gap: two replicas can admit within one
-  refresh period. `MemoryLedger::get` added.
+  enforce decisions every 3 s. Two replicas can admit within one refresh period, so with
+  `--replicas N` (Helm passes `replicas`) each replica's not-yet-synced
+  increases plus a new one must fit 1/N of the headroom (`validate`,
+  `ReservationLedger::{unsynced, peers}`); a reservation is synced 6 s
+  after this replica first sees it in the log. `MemoryLedger::get` added.
 - **Render changes** (adapter): admission patches add the label
   `rightsizer.io/sized: "true"` to pod templates (and bare pods) so the
   watcher's informer and the node agent select server-side; the
@@ -644,10 +654,14 @@ kube-free (`cargo xtask deps-check` passes). New pure modules:
   after termination (`--peak-delay`), else for OOM `AtLeast(limit)`.
   `RunRecord.cpu_*` are **cores** (I had millicores first; seeding 150
   "cores" produced an 18-CPU decision). After each outcome the unit is
-  re-decided dry-run to warm the memo. Metrics:
+  re-decided dry-run to warm the memo. Decision ids read from annotations
+  are dropped when the log holds that id for another key
+  (`runtime::verified_decision_id`). Attempt = `(rank−1)·1000 + restart + 1`
+  (collision-free); runs already in the store are not re-sent after a
+  leader change. `Engine::sweep` runs every `--sweep-interval` (300 s)
+  while leading. Metrics:
   `rightsizer_watcher_lag_seconds`, `rightsizer_watcher_records_total{status,
-  peak_source}`, `rightsizer_watcher_leader`. **No engine lease sweep exists
-  yet** (integration point 5 above); the watcher does not call one.
+  peak_source}`, `rightsizer_watcher_leader`. 
 - **Prefetcher** (`cluster::prefetch`): bounded channel from the webhook;
   reads only URIs under `[k8s.inputs.allow]` (namespace or `"*"` → prefixes;
   additive engine config) with the features crate's readers and SSRF guard
@@ -1767,7 +1781,9 @@ Integration: `RSZ_IT_FLYTE=1 tests/integration/flyte/run.sh` (devbox; results in
   `sized()`), `_rs_code` (`rs.Code`, captured at decoration) and
   `_rs_measured`. Pickling goes through `__reduce_ex__` → `_rebuild_rightsized(base)`,
   so a dynamic class never has to be importable. Construction from an existing
-  task uses `cls(**init fields)`, falling back to the SDK's `_rebuild_as`.
+  task is a shallow copy with the class changed (`cls.__new__` + `__dict__`), not
+  `cls(**init fields)`: `flyte.extras.ContainerTask.__init__` does not take its
+  fields, and the generated dataclass `__init__` dropped `_cmd`/`_args`/… (review fix).
 - **`aio` is a plain `def`** returning a coroutine, so the stack is captured
   when the call is made. The captured *inherited* stack is re-entered with
   `flyte.custom_context` around the submission (the SDK reads the context when
@@ -1801,8 +1817,11 @@ Integration: `RSZ_IT_FLYTE=1 tests/integration/flyte/run.sh` (devbox; results in
   different `Image` object without harm.
 - **Deploy-time sizing** writes deploy records to
   `{prefix}/v1/flyte/deploys/{tenant}/{task}/{version}.json` (origin prior,
-  deployed spec, decision id) next to the engine's decision log; sized deploys
-  get version `rsz-<digest>`. The reconcile lease is
+  deployed spec, decision id) next to the engine's decision log. The deploy
+  version is the caller's or Flyte's derived one (code bundle + envs with the
+  sized tasks + images), read back from `flyte.deploy`'s result for the records
+  (review fix: an `rsz-<digest of the sizing>` version gave a code change the
+  previous deploy's version). The reconcile lease is
   `{prefix}/v1/flyte/reconcile/lease.json` (obstore conditional create /
   ETag update; local files: `O_EXCL`).
 - **Backfill** writes `flyte_remote` / `verified` records through

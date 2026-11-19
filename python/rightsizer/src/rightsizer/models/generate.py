@@ -107,15 +107,25 @@ class GenerativeModel:
         self.extra = dict(extra or {})
 
     def estimate_batch(self, contexts: Sequence[Mapping[str, Any]], axes: Sequence[str] | None = None) -> list:
-        from rightsizer.serve.errors import Insufficient
+        from rightsizer.serve.errors import Insufficient, as_error
 
         from . import prompting
+        from .pointer import _unrenderable
 
         out: list = []
         for c in contexts:
             t0 = time.monotonic()
-            texts = self.backend.generate(prompting.messages_from_context(c, **self.prompt_options), self.n,
-                                          temperature=self.temperature, max_tokens=self.max_tokens, **self.extra)
+            try:
+                msgs = prompting.messages_from_context(c, **self.prompt_options)
+            except Exception as e:  # noqa: BLE001 -- this context's slot only
+                out.append(_unrenderable(e))
+                continue
+            try:
+                texts = self.backend.generate(msgs, self.n, temperature=self.temperature,
+                                              max_tokens=self.max_tokens, **self.extra)
+            except Exception as e:  # noqa: BLE001
+                out.append(as_error(e))
+                continue
             est = empirical_estimate(texts, estimator=self.model_id, version=self.version, kind=self.kind, axes=axes,
                                      smoothing=self.smoothing,
                                      latency_ms=int((time.monotonic() - t0) * 1000))

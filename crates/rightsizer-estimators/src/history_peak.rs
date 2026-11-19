@@ -56,6 +56,21 @@ impl Default for HistoryPeakParams {
     }
 }
 
+impl HistoryPeakParams {
+    /// Reject parameters that would collapse estimates to the floor or undo
+    /// the OOM bump: margins and σ must be finite and positive, the bump
+    /// factor ≥ 1 and the additive bump ≥ 0.
+    pub fn validate(&self) -> Result<(), String> {
+        crate::common::check_params(&[
+            ("margin", self.margin, 0.0, false),
+            ("cpu_margin", self.cpu_margin, 0.0, false),
+            ("sigma", self.sigma, 0.0, false),
+            ("bump_factor", self.bump_factor, 1.0, true),
+            ("bump_add_mib", self.bump_add_mib, 0.0, true),
+        ])
+    }
+}
+
 /// The `history-peak` estimator.
 pub struct HistoryPeak {
     info: EstimatorInfo,
@@ -275,5 +290,33 @@ mod tests {
         let Some(AxisEstimate::Quantiles { q }) = e.duration_s else { panic!() };
         assert_eq!(q.len(), 3);
         assert_eq!(q[1], (0.5, 30.0));
+    }
+}
+
+#[cfg(test)]
+mod oom_without_peak {
+    use super::*;
+    use crate::test_util::*;
+    use rightsizer_core::grid::GridAxis;
+    use rightsizer_core::normalize::normalize_axis;
+    use rightsizer_core::*;
+
+    /// An OOM-killed run whose importer could not sample a peak still proves
+    /// demand ≥ its memory limit (SPEC §5.7 `AtLeast(limit …)`); dropping it
+    /// lets the estimate sit below the size that just OOMed.
+    #[tokio::test]
+    async fn oom_without_a_peak_bounds_demand_by_its_limit() {
+        let ok = record("a", RunStatus::Succeeded, Some(Measurement::exact(gib(1.0))), None);
+        let mut oom = record("b", RunStatus::OomKilled, None, None);
+        oom.requested = Some(ResourceSpec {
+            requests: Requests { memory: Some(Bytes::gib(4)), ..Default::default() },
+            limits: Limits { memory: Some(Bytes::gib(4)), ..Default::default() },
+        });
+        let ctx = ctx_with(vec![], vec![oom.clone(), ok.clone()]);
+        for est in [&HistoryPeak::default() as &dyn Estimator, &crate::rules_sized::RulesSized::default()] {
+            let e = est.estimate(&ctx).await.unwrap();
+            let d = normalize_axis(e.memory.as_ref().unwrap(), &Grid::rs_grid_v1(), GridAxis::Memory, 0.35, "m").unwrap();
+            assert!(d.cdf(gib(4.0)) < 1e-6, "{}: P(D ≤ 4Gi limit that OOMed) = {}", est.info().id, d.cdf(gib(4.0)));
+        }
     }
 }

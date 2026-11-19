@@ -326,3 +326,10 @@ async fn validate_limits_and_shapes() {
     let n = document("#!/bin/sh\n#SBATCH -p gpu --gres=gpu:a100:3 --mem=1000\n");
     assert_eq!(a.validate(&n, &Patch::None, &e).await.unwrap_err().reason, "quota");
 }
+
+#[test]
+fn platform_state_renders_whole_cpus() {
+    // Slurm renders --cpus-per-task in whole CPUs: decisions are made on that grid.
+    let st = rightsizer_slurm::platform::SlurmPlatform::state_with(&settings(), "mlteam", Some("alice"));
+    assert_eq!(st.cpu_granularity, Some(rightsizer_core::MilliCpu(1000)));
+}

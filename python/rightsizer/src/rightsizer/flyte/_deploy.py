@@ -15,8 +15,10 @@
    ``{prefix}/v1/flyte/deploys/{tenant}/{task}/{version}.json`` maps the task
    name and deploy version to it, so run-time sizing and the webhook can
    attribute against the origin prior;
-5. ``flyte.deploy``. Sized deploys get version ``rsz-<digest>`` unless one is
-   given; ``restore=True`` deploys from source unchanged.
+5. ``flyte.deploy``. The version is the caller's or, by default, the one Flyte
+   derives (code bundle, environments with the sized tasks swapped in, images),
+   so a code change always deploys a new version; the deploy records use the
+   versions Flyte reports. ``restore=True`` deploys from source unchanged.
 
 ``reconcile`` (``rsz flyte reconcile --schedule 5m``) is a singleton (a
 lease object created with a conditional PUT, renewed each round). Each round
@@ -179,8 +181,13 @@ def _digest(plans: List[Tuple[str, Any, Any, Any]]) -> str:
 
 
 def plan_deploy(*envs: Any, allow_reductions: Optional[bool] = None) -> List[Tuple[Any, str, Any, Any, Any]]:
-    """``[(env, task name, original, decision, merged)]`` for every changed task."""
-    store = _store()
+    """``[(env, task name, original, decision, merged)]`` for every changed task
+    (none, logged, when there is no history store: the deploy is then from source, S1)."""
+    try:
+        store = _store()
+    except Exception as e:  # S1: deploy unchanged
+        log.warning("rightsizer: deploy-time sizing unavailable, deploying from source: %s", e)
+        return []
     if allow_reductions is None:
         allow_reductions = reconcile_active(store)
     out = []
@@ -212,7 +219,9 @@ def deploy(*envs: Any, version: Optional[str] = None, restore: bool = False, rec
     if not plans:
         log.info("rightsizer: no task changes at deploy; deploying from source")
         return flyte.deploy(*envs, version=version, dry_run=dry_run, **kw)
-    version = version or f"rsz-{_digest([(n, t, d, m) for _e, n, t, d, m in plans])}"
+    # Not a version of our own: a digest of the sizing alone would give a code change the
+    # version of the previous deploy (Flyte's derived version covers code, envs and images).
+    label = version or f"rsz-{_digest([(n, t, d, m) for _e, n, t, d, m in plans])}"
     swapped = []
     try:
         for env, name, t, d, merged in plans:
@@ -227,16 +236,60 @@ def deploy(*envs: Any, version: Optional[str] = None, restore: bool = False, rec
             store = _store()
             from rightsizer_runtime.record import split_key, tenant_path
 
+            versions = _deployed_versions(result)
             for _env, name, t, d, merged in plans:
+                version = versions.get(name) or label
                 platform, tenant, _ = split_key(d.key)
                 rec = {"v": 1, "task": name, "version": version, "decision_id": d.id, "key": d.key,
                        "origin_prior": to_spec(t.resources).to_dict(), "deployed": to_spec(merged).to_dict(),
                        "at": format_timestamp(utcnow()), "reductions": any(
                            (to_spec(merged).requests.memory or 0) < (to_spec(t.resources).requests.memory or 0) for _ in [0])}
-                store.put(f"{DEPLOYS}/{tenant_path(platform, tenant)}/{name}/{version}.json", json.dumps(rec).encode())
+                store.put(_deploy_record_path(platform, tenant, name, version), json.dumps(rec).encode())
         except Exception as e:  # the deploy happened; attribution falls back to the deployed value
             log.warning("rightsizer: deploy record not written: %s", e)
     return result
+
+
+def _path_segment(s: Any) -> str:
+    """One store path segment: a version or task name may not climb out of the prefix."""
+    out = "".join(ch if (ch.isalnum() or ch in "._-") else "-" for ch in str(s))
+    return out if out.strip(".") else "-"
+
+
+def _deploy_record_path(platform: str, tenant: str, task: Any, version: Any) -> str:
+    from rightsizer_runtime.record import tenant_path
+
+    return f"{DEPLOYS}/{tenant_path(platform, tenant)}/{_path_segment(task)}/{_path_segment(version)}.json"
+
+
+def _deployed_versions(result: Any) -> Dict[str, str]:
+    """``{task name: version}`` from what ``flyte.deploy`` returned (``DeployedTask`` specs)."""
+    out: Dict[str, str] = {}
+    seen: set = set()
+
+    def walk(o: Any, depth: int = 0) -> None:
+        if o is None or depth > 6 or id(o) in seen or isinstance(o, (str, bytes, int, float)):
+            return
+        seen.add(id(o))
+        spec = getattr(o, "deployed_task", None)
+        tid = getattr(getattr(spec, "task_template", None), "id", None)
+        if tid is not None and getattr(tid, "name", None) and getattr(tid, "version", None):
+            out[str(tid.name)] = str(tid.version)
+            return
+        if isinstance(o, dict):
+            items: Any = o.values()
+        elif isinstance(o, (list, tuple, set)):
+            items = o
+        else:
+            items = [getattr(o, a, None) for a in ("envs", "deployed_entities")]
+        for x in items:
+            walk(x, depth + 1)
+
+    try:
+        walk(result)
+    except Exception as e:
+        log.debug("rightsizer: deployed versions: %s", e)
+    return out
 
 
 def deploy_records(store: Any = None) -> List[Dict[str, Any]]:
@@ -294,7 +347,7 @@ def reconcile_once(envs: List[Any], *, holder: str, store: Any = None, dry_run: 
                 from rightsizer_runtime.record import split_key, tenant_path
 
                 platform, tenant, _ = split_key(r["key"])
-                store.put(f"{DEPLOYS}/{tenant_path(platform, tenant)}/{r['task']}/{r['version']}.json", json.dumps(r2).encode())
+                store.put(_deploy_record_path(platform, tenant, r["task"], r["version"]), json.dumps(r2).encode())
     return {"lease": True, "mode_ceiling": ceiling, "open_breakers": sorted(k for k in open_keys if k), "restored": restored}
 
 

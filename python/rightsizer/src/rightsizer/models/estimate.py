@@ -38,10 +38,15 @@ def normalize_axes(axes: Sequence[str] | None) -> list[str] | None:
 
 
 def _norm(p: Sequence[float]) -> list[float]:
-    s = float(sum(x for x in p if x > 0))
+    """Normalize; NaN, negative and infinite entries are refused (an infinite one
+    would turn every other cell into 0 or NaN)."""
+    q = [float(x) for x in p]
+    if any(math.isnan(x) or math.isinf(x) for x in q):
+        raise ValueError("probabilities are not finite")
+    s = float(sum(x for x in q if x > 0))
     if not s > 0:
         raise ValueError("probabilities sum to zero")
-    return [max(float(x), 0.0) / s for x in p]
+    return [max(x, 0.0) / s for x in q]
 
 
 def _onehot(n: int, i: int) -> list[float]:

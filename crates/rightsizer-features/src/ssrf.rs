@@ -7,8 +7,8 @@
 //! `169.254.169.254` — and `fe80::/10`), unique-local (`fc00::/7`, which
 //! includes AWS's `fd00:ec2::254`), site-local (`fec0::/10`), unspecified
 //! (`0.0.0.0/8`, `::`), multicast, broadcast/reserved (`240/4`), benchmarking
-//! (`198.18/15`), IETF protocol assignments (`192.0.0.0/24`), and IPv4-mapped
-//! / NAT64 / 6to4 IPv6 forms of any of these.
+//! (`198.18/15`), IETF protocol assignments (`192.0.0.0/24`), NAT64 local-use
+//! (`64:ff9b:1::/48`), and IPv4-mapped / NAT64 / 6to4 IPv6 forms of any of these.
 //!
 //! The check runs twice: [`SsrfGuard::check_url`] before any request (on
 //! literal IPs and on every address the host resolves to: one bad address
@@ -103,6 +103,10 @@ fn forbidden_v6(ip: Ipv6Addr) -> bool {
         return true;
     }
     if (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 {
+        return true;
+    }
+    // NAT64 local-use (64:ff9b:1::/48, RFC 8215): translator-local by definition.
+    if s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1 {
         return true;
     }
     // NAT64 (64:ff9b::/96) and IPv4-compatible (::/96) embed an IPv4 address.

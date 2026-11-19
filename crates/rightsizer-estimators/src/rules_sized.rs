@@ -151,6 +151,33 @@ impl Default for RulesSizedParams {
 }
 
 impl RulesSizedParams {
+    /// Reject parameters that would collapse estimates to the floor, make
+    /// the cold law decrease with input size, or undo the OOM bump.
+    pub fn validate(&self) -> Result<(), String> {
+        crate::common::check_params(&[
+            ("margin", self.margin, 0.0, false),
+            ("warm_sigma", self.warm_sigma, 0.0, false),
+            ("cold_sigma", self.cold_sigma, 0.0, false),
+            ("cpu_margin", self.cpu_margin, 0.0, false),
+            ("cpu_sigma", self.cpu_sigma, 0.0, false),
+            ("cold_cpu_cores", self.cold_cpu_cores, 0.0, false),
+            ("cold_cpu_sigma", self.cold_cpu_sigma, 0.0, false),
+            ("bump_factor", self.bump_factor, 1.0, true),
+            ("bump_add_mib", self.bump_add_mib, 0.0, true),
+        ])?;
+        for (name, c) in self.cold.iter().map(|(f, c)| (format!("cold.{f:?}"), c)).chain(std::iter::once(("cold_default".to_string(), &self.cold_default))) {
+            crate::common::check_params(&[
+                (&format!("{name}.base_mib"), c.base_mib, 0.0, true),
+                (&format!("{name}.k"), c.k, 0.0, true),
+                (&format!("{name}.exponent"), c.exponent, 0.0, true),
+            ])?;
+            if c.base_mib <= 0.0 && c.k <= 0.0 {
+                return Err(format!("{name}: base_mib and k are both 0"));
+            }
+        }
+        Ok(())
+    }
+
     fn bump(&self) -> Bump {
         Bump { factor: self.bump_factor, add_bytes: self.bump_add_mib * MIB }
     }

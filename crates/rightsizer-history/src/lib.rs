@@ -326,6 +326,43 @@ pub fn dedup_key(r: &RunRecord) -> (String, String, u32, String) {
     (r.key.to_string(), r.invocation_id.clone(), r.attempt, serde_json::to_string(&r.source).unwrap_or_default())
 }
 
+/// Bulk importer: deduplicates against a key's **whole** stored history, not
+/// only the newest records a backend's write-time check looks at. Importers
+/// re-read platform accounting over overlapping windows, so a re-import must
+/// report (and skip) every record already stored — callers run attribution
+/// and breakers only for `Inserted` records.
+#[derive(Default)]
+pub struct Importer {
+    seen: std::collections::HashMap<String, std::collections::HashSet<(String, String, u32, String)>>,
+}
+
+/// How many stored records per key an [`Importer`] reads for deduplication.
+pub const IMPORT_DEDUP_DEPTH: usize = 100_000;
+
+impl Importer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert `rec` unless an identical record (same dedup key) is stored or
+    /// was already imported in this batch.
+    pub async fn put_run(&mut self, store: &dyn HistoryStore, rec: &RunRecord) -> Result<PutOutcome, StoreError> {
+        let k = rec.key.to_string();
+        if !self.seen.contains_key(&k) {
+            let existing = store.runs(&rec.key, IMPORT_DEDUP_DEPTH).await?;
+            self.seen.insert(k.clone(), existing.iter().map(dedup_key).collect());
+        }
+        let dk = dedup_key(rec);
+        let seen = self.seen.get_mut(&k).expect("inserted above");
+        if seen.contains(&dk) {
+            return Ok(PutOutcome::Duplicate);
+        }
+        let out = store.put_run(rec).await?;
+        seen.insert(dk);
+        Ok(out)
+    }
+}
+
 /// Order run records newest first: `started_at` descending, then attempt
 /// descending, then invocation id (deterministic across backends).
 pub fn sort_newest_first(v: &mut [RunRecord]) {

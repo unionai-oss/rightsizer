@@ -173,6 +173,13 @@ pub struct PlatformState {
     /// Platform minimums.
     #[serde(default)]
     pub floors: Requests,
+    /// The smallest CPU step the platform can render (`None`: any millicore).
+    /// Slurm's `--cpus-per-task` and Ray's integer `num_cpus` are whole CPUs
+    /// (`1000`): CPU candidates round up to a multiple, the ceiling rounds
+    /// down, so the decision is exactly what the adapter renders. A
+    /// Guaranteed prior with whole CPUs (static CPU manager) implies `1000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_granularity: Option<MilliCpu>,
 }
 
 /// A schedulable node shape (SPEC §5.4).

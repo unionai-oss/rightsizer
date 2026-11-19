@@ -278,3 +278,53 @@ fn malformed_patches_are_rejected() {
     assert!(a.validate_at(&n, &bad, &env(), t0()).is_err());
     assert_eq!(a.validate_at(&n, &Patch::None, &env(), t0()), Ok(()));
 }
+
+/// A ledger shared by `peers` replicas whose reservations reach the others
+/// only after a refresh: the ones not yet seen elsewhere are `unsynced`.
+struct PeerLedger {
+    peers: u64,
+    unsynced: rightsizer_k8s::resources::Totals,
+}
+
+impl rightsizer_k8s::ReservationLedger for PeerLedger {
+    fn reserve(&self, _r: rightsizer_k8s::Reservation) {}
+    fn release(&self, _namespace: &str, _id: &str) {}
+    fn reserved(&self, _namespace: &str, _now: DateTime<Utc>) -> (rightsizer_k8s::resources::Totals, rightsizer_k8s::resources::Totals) {
+        (self.unsynced.clone(), Default::default())
+    }
+    fn unsynced(&self, _namespace: &str, _now: DateTime<Utc>) -> (rightsizer_k8s::resources::Totals, rightsizer_k8s::resources::Totals) {
+        (self.unsynced.clone(), Default::default())
+    }
+    fn peers(&self) -> u64 {
+        self.peers
+    }
+}
+
+/// Two webhook replicas can each admit an increase before either sees the
+/// other's reservation (the shared ledger syncs through the decision log).
+/// Each replica may then use only its share of the remaining headroom for
+/// increases that are not yet visible to the others.
+#[test]
+fn concurrent_replicas_split_the_quota_headroom() {
+    let s = K8sSettings { resource_quotas: vec![quota("100Gi", "60Gi")], ..settings() };
+    let env: AdapterEnv = s.to_env(None);
+    // 40Gi remaining; the Job's pod asks 16Gi → 30Gi (+14Gi).
+    let n = job_admission();
+    let d = [decision(BUILD, None, Some(30 * 1024))];
+    let single = K8sAdapter::new(s.clone()).with_keys(keys()).with_ledger(Arc::new(PeerLedger { peers: 1, unsynced: Default::default() }));
+    let p = single.render_with(&n, &RenderRequest::enforce(&d)).unwrap().patch;
+    assert_eq!(single.validate_at(&n, &p, &env, t0()), Ok(()));
+    // Two replicas, nothing pending: +14Gi > (40 − 16) / 2 = 12Gi: rejected.
+    let two = K8sAdapter::new(s.clone()).with_keys(keys()).with_ledger(Arc::new(PeerLedger { peers: 2, unsynced: Default::default() }));
+    assert_eq!(two.validate_at(&n, &p, &env, t0()).unwrap_err().reason, check::RESOURCE_QUOTA);
+    // A smaller increase within the share is fine: +8Gi ≤ 12Gi.
+    let small = [decision(BUILD, None, Some(24 * 1024))];
+    let ps = two.render_with(&n, &RenderRequest::enforce(&small)).unwrap().patch;
+    assert_eq!(two.validate_at(&n, &ps, &env, t0()), Ok(()));
+    // ... unless this replica already has +5Gi not yet visible to the other one
+    // (5 + 8 > 12; the old check passed: 24 ≤ 40 − 5).
+    let busy = K8sAdapter::new(s.clone())
+        .with_keys(keys())
+        .with_ledger(Arc::new(PeerLedger { peers: 2, unsynced: rightsizer_k8s::resources::Totals { memory: Bytes::gib(5).0, ..Default::default() } }));
+    assert_eq!(busy.validate_at(&n, &ps, &env, t0()).unwrap_err().reason, check::RESOURCE_QUOTA);
+}

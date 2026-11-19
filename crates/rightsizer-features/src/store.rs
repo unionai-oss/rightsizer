@@ -43,7 +43,7 @@ impl HfRef {
         if parts.is_empty() || parts.len() > 2 || !parts.iter().all(|p| ok(p)) {
             return None;
         }
-        if !revision.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) || revision.is_empty() {
+        if !revision.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) || revision.is_empty() || revision == "." || revision == ".." {
             return None;
         }
         Some(HfRef { repo: repo.to_string(), revision: revision.to_string() })

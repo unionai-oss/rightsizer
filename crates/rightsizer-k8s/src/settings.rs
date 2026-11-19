@@ -30,7 +30,11 @@ pub struct FlyteSettings {
     pub domain_label: String,
     /// Pod label carrying the task name.
     pub task_label: String,
-    /// Org used when the pod has no org label (`None`: such pods are not Flyte-keyed).
+    /// The org of this cluster's Flyte pods. Unless `namespace_template`
+    /// contains `{org}`, this is the only org a pod can be keyed under (the
+    /// org label is user-settable and not bound by the namespace); `None`
+    /// then means no pod is Flyte-keyed. With `{org}` in the template it is
+    /// the default for pods without an org label.
     pub default_org: Option<String>,
 }
 

@@ -84,6 +84,19 @@ impl Bump {
     }
 }
 
+/// Check `(name, value, min, inclusive)` parameters: finite and `> min`
+/// (`≥ min` when inclusive).
+pub(crate) fn check_params(checks: &[(&str, f64, f64, bool)]) -> Result<(), String> {
+    for &(name, v, min, inclusive) in checks {
+        let ok = v.is_finite() && if inclusive { v >= min } else { v > min };
+        if !ok {
+            let op = if inclusive { "≥" } else { ">" };
+            return Err(format!("params: {name} = {v} must be finite and {op} {min}"));
+        }
+    }
+    Ok(())
+}
+
 /// Whether a record can be learned from at all (SPEC §5.7: `Cached` runs are
 /// excluded). Trust is *not* checked: `Unverified` records are usable for
 /// estimation; trust gates floors, anchors and S3(b) only (SPEC §8.2).
@@ -104,7 +117,18 @@ pub fn memory_obs(r: &RunRecord, overhead_median: f64) -> Option<Obs> {
     if !learnable(r) {
         return None;
     }
-    let m = r.memory_peak.filter(finite_pos)?;
+    let m = match r.memory_peak.filter(finite_pos) {
+        Some(m) => m,
+        // An OOM kill without a sampled peak still proves demand ≥ the memory
+        // limit it was killed at (SPEC §5.7: `AtLeast(limit or last sample)`;
+        // the request when no limit is recorded, e.g. Slurm's `--mem`).
+        None if r.status == RunStatus::OomKilled => {
+            let spec = r.requested.as_ref()?;
+            let limit = spec.limits.memory.or(spec.requests.memory).filter(|b| b.0 > 0)?;
+            Measurement { value: limit.0 as f64, censor: Censor::AtLeast, resolution_s: None }
+        }
+        None => return None,
+    };
     let censor = if r.status == RunStatus::OomKilled { Censor::AtLeast } else { m.censor };
     Some(Obs { value: (m.value - overhead_median.max(0.0)).max(MIN_MEMORY_DEMAND), censor })
 }

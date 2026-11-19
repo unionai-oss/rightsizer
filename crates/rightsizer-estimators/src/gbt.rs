@@ -121,6 +121,16 @@ impl Estimator for Gbt {
         let Some(model) = &self.model else {
             return Err(EstimateError::Insufficient("gbt: no model configured".into()));
         };
+        // The evaluator computes `features-v1` only; a model of another schema
+        // would be fed vectors whose names may mean something else (SPEC §9).
+        // An unlabeled model (`features` empty) is read as `features-v1`.
+        if !model.features.is_empty() && model.features != rightsizer_features::FEATURES_VERSION {
+            return Err(EstimateError::Unsupported(format!(
+                "gbt: model features {:?}, this build computes {:?}",
+                model.features,
+                rightsizer_features::FEATURES_VERSION
+            )));
+        }
         let feats = features_v1(ctx, model.feature_names.iter().map(String::as_str));
         let x = model.vector(&feats);
         let mut e = Estimate::empty(Provenance {
@@ -200,6 +210,19 @@ mod tests {
         let Some(AxisEstimate::Quantiles { q }) = &e.memory else { panic!() };
         assert_eq!(q[1].1, 4096.0 * mib);
         assert!(e.novelty.is_none());
+    }
+
+    /// A model trained on another feature schema must not be evaluated on
+    /// `features-v1` vectors (names may match with other meanings; SPEC §9:
+    /// "models trained on another version get it, or a 409").
+    #[tokio::test]
+    async fn refuses_a_model_of_another_feature_schema() {
+        let json = model_json().replace("\"features\":\"features-v1\"", "\"features\":\"features-v2\"");
+        assert!(json.contains("features-v2"));
+        let gbt = Gbt::new(TreeModel::from_json(&json).unwrap(), None);
+        let ctx = ctx_with(vec![InputMeta::blob("x", 1 << 30)], vec![]);
+        let e = gbt.estimate(&ctx).await;
+        assert!(matches!(e, Err(EstimateError::Unsupported(_))), "{e:?}");
     }
 
     #[tokio::test]

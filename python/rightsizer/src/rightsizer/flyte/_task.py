@@ -32,6 +32,7 @@ from rightsizer_runtime.env import ATTEMPT_ENV, DECISION_ENV, DecisionEnv
 from rightsizer_runtime.policy import InvocationPolicy, PolicyStack
 from rightsizer_runtime.wire import AttemptContext, Confidence, Mode, OutcomeSource, RunStatus, Trust, new_ulid
 
+from .._errors import CONTROL_FLOW
 from ..types import Code, Context, Decision, Input
 from . import _engine as _eng
 from ._classify import classify
@@ -81,6 +82,24 @@ def _task_context() -> Any:
     if not ctx.is_task_context() or ctx.is_in_trace():
         return None
     return ctx.data.task_context
+
+
+def _safe_classify(exc: BaseException) -> RunStatus:
+    """``classify`` that never raises (an exception with a broken ``__str__`` must not replace
+    the task's own error)."""
+    try:
+        return classify(exc)
+    except Exception as e:
+        log.debug("rightsizer: classification failed: %s", e)
+        return RunStatus.FAILED
+
+
+def _in_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
 
 
 def _flyte_version() -> str:
@@ -232,12 +251,14 @@ class RightsizedMixin:
         base_aio = super().aio  # type: ignore[misc]
         try:
             reason = self._rs_delegate_reason()
-            if reason is not None:
-                return base_aio(*args, **kwargs)
-            stack = self._rs_stack()
-            inherited = captured_stack()
+            if reason is None:
+                stack = self._rs_stack()
+                inherited = captured_stack()
         except Exception as e:  # S1
             log.warning("rightsizer: %s: delegating unchanged: %s", getattr(self, "name", "?"), e)
+            reason = "error"
+        # The delegated call runs outside the guard: its own errors are the user's.
+        if reason is not None:
             return base_aio(*args, **kwargs)
         return self._rs_arun(stack, inherited, args, kwargs)
 
@@ -245,12 +266,19 @@ class RightsizedMixin:
         base_call = super().__call__  # type: ignore[misc]
         try:
             reason = self._rs_delegate_reason()
-            if reason is not None:
-                return base_call(*args, **kwargs)
-            stack = self._rs_stack()
-            inherited = captured_stack()
+            if reason is None and getattr(self, "_call_as_synchronous", False) and _in_event_loop():
+                # The SDK rejects a blocking call of a sync task from async code; let it, without
+                # a blocking decision on the loop or a spurious Failed outcome.
+                reason = "blocking call in an event loop"
+            if reason is None:
+                stack = self._rs_stack()
+                inherited = captured_stack()
         except Exception as e:  # S1
             log.warning("rightsizer: %s: delegating unchanged: %s", getattr(self, "name", "?"), e)
+            reason = "error"
+        # The delegated call runs outside the guard: a task error raised by it must not be
+        # caught here and the task submitted (or, outside a task context, run) a second time.
+        if reason is not None:
             return base_call(*args, **kwargs)
         if getattr(self, "_call_as_synchronous", False):
             return self._rs_run_sync(stack, inherited, args, kwargs)
@@ -383,7 +411,9 @@ class RightsizedMixin:
         except asyncio.TimeoutError:
             _eng.counters["budget_expired"] += 1
             return Decision.prior_for(plan.ctx, "budget", "python-side deadline", plan.mode)
-        except Exception as e:  # S1
+        except BaseException as e:  # S1 (incl. pyo3's PanicException)
+            if isinstance(e, CONTROL_FLOW):
+                raise
             _eng.counters["fallbacks"] += 1
             return _fallback(plan.ctx, e, {"mode": plan.mode})
 
@@ -398,7 +428,9 @@ class RightsizedMixin:
                 d = eng.decide(plan.ctx, attempt=at, **plan.policy)
                 _note(d, plan, t0)
                 return d
-        except Exception as e:  # S1
+        except BaseException as e:  # S1 (incl. pyo3's PanicException)
+            if isinstance(e, CONTROL_FLOW):
+                raise
             _eng.counters["fallbacks"] += 1
             return _fallback(plan.ctx, e, {"mode": plan.mode})
 
@@ -432,6 +464,13 @@ class RightsizedMixin:
             return plan.allow_gpu_type_change
         return False
 
+    def _rs_should_escalate_safe(self, d: Decision, plan: _Plan, status: RunStatus, attempt: int) -> bool:
+        try:
+            return self._rs_should_escalate(d, plan, status, attempt)
+        except Exception as e:  # S1: the task's own error propagates
+            log.warning("rightsizer: escalation check failed: %s", e)
+            return False
+
     async def _rs_arun(self, stack: PolicyStack, inherited: PolicyStack, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         base_aio = super().aio  # type: ignore[misc]
         try:
@@ -458,9 +497,9 @@ class RightsizedMixin:
             except (asyncio.CancelledError, KeyboardInterrupt):
                 raise
             except BaseException as exc:
-                status = classify(exc)
+                status = _safe_classify(exc)
                 await _aoutcome(self._rs_record(d, plan, copy, status, at, inv, attempt, t0))
-                if self._rs_should_escalate(d, plan, status, attempt):
+                if self._rs_should_escalate_safe(d, plan, status, attempt):
                     log.info("rightsizer: %s attempt %d %s; escalating", getattr(self, "name", "?"), attempt, status.value)
                     attempt += 1
                     continue
@@ -495,9 +534,9 @@ class RightsizedMixin:
             except KeyboardInterrupt:
                 raise
             except BaseException as exc:
-                status = classify(exc)
+                status = _safe_classify(exc)
                 _outcome(self._rs_record(d, plan, copy, status, at, inv, attempt, t0))
-                if self._rs_should_escalate(d, plan, status, attempt):
+                if self._rs_should_escalate_safe(d, plan, status, attempt):
                     attempt += 1
                     continue
                 raise
@@ -647,7 +686,9 @@ async def _aoutcome(rec: Any) -> None:
     try:
         eng = _eng.get_engine()
         await eng.aoutcome(rec)
-    except Exception as e:  # S1
+    except BaseException as e:  # S1
+        if isinstance(e, CONTROL_FLOW):
+            raise
         _log_once("outcome", "rightsizer: outcome not recorded: %s", e)
 
 
@@ -656,7 +697,9 @@ def _outcome(rec: Any) -> None:
         return
     try:
         _eng.get_engine().outcome(rec)
-    except Exception as e:  # S1
+    except BaseException as e:  # S1
+        if isinstance(e, CONTROL_FLOW):
+            raise
         _log_once("outcome", "rightsizer: outcome not recorded: %s", e)
 
 
@@ -754,10 +797,6 @@ def _rebuild_rightsized(base: type) -> Any:
     return cls.__new__(cls)
 
 
-def _init_fields(task: Any) -> Dict[str, Any]:
-    return {f.name: getattr(task, f.name) for f in dataclasses.fields(task) if f.init and f.name not in _RS_FIELD_NAMES}
-
-
 def _code_for(task: Any) -> Optional[Code]:
     fn = getattr(task, "func", None)
     if fn is None:
@@ -776,13 +815,14 @@ def _as_rightsized(task: Any, policy: Any, *, measured: bool) -> Any:
             f"rs.flyte.rightsize must be the outermost decorator, over a Flyte task (@env.task); got {type(task).__name__}"
         )
     cls = rightsized_class(type(task))
-    try:
-        new = cls(**_init_fields(task))
-    except TypeError:
-        # A plugin class whose __init__ does not take its dataclass fields: rebuild the SDK's way.
-        from flyte._task import _rebuild_as
-
-        new = _rebuild_as(task, cls)
+    # A shallow copy with the class changed, not ``cls(**fields)``: a class whose ``__init__``
+    # does not take its dataclass fields (``flyte.extras.ContainerTask`` keeps ``_cmd``,
+    # ``_args``, ... outside them) would lose that state through the generated ``__init__``.
+    new = cls.__new__(cls)
+    new.__dict__.update(task.__dict__)
+    new._rs_pins = frozenset()
+    new._rs_bypass = False
+    new._rs_invocation = ()
     new._rs_policy = policy
     new._rs_code = _code_for(task)
     new._rs_measured = measured

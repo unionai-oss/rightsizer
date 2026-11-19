@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 
+import asyncio as _asyncio
+
+# Exceptions that are control flow, not rightsizer failures: S1 guards re-raise them and
+# contain everything else, including pyo3's ``PanicException`` (a ``BaseException``).
+CONTROL_FLOW = (KeyboardInterrupt, SystemExit, GeneratorExit, _asyncio.CancelledError)
+
+
 class RightsizerError(Exception):
     """A rightsizer operation failed.
 
@@ -37,4 +44,4 @@ class Rejection(Exception):
         return out
 
 
-__all__ = ["Insufficient", "Rejection", "RightsizerError"]
+__all__ = ["CONTROL_FLOW", "Insufficient", "Rejection", "RightsizerError"]

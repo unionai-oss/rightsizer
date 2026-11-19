@@ -4,6 +4,17 @@
   "description": "Live platform state, given to the decision rule only (plugins.md §2).",
   "type": "object",
   "properties": {
+    "cpu_granularity": {
+      "description": "The smallest CPU step the platform can render (`None`: any millicore).\nSlurm's `--cpus-per-task` and Ray's integer `num_cpus` are whole CPUs\n(`1000`): CPU candidates round up to a multiple, the ceiling rounds\ndown, so the decision is exactly what the adapter renders. A\nGuaranteed prior with whole CPUs (static CPU manager) implies `1000`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MilliCpu"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "floors": {
       "description": "Platform minimums.",
       "$ref": "#/$defs/Requests",

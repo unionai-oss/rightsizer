@@ -66,7 +66,20 @@ pub fn enrich_request(req: &mut Value) {
 pub fn exchange(socket: &Path, timeout: Duration, request: &[u8]) -> Result<Vec<u8>, ClientError> {
     let deadline = Instant::now() + timeout;
     let left = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(ClientError::Deadline);
-    let mut s = UnixStream::connect(socket)?;
+    // connect(2) on a Unix socket blocks while the listener's backlog is
+    // full (a wedged or stopped daemon), and std has no connect timeout:
+    // connect on a thread and stop waiting at the deadline, so `sbatch`
+    // is never held up for longer than the deadline (S1). The helper exits
+    // right after, taking the thread with it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = socket.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(UnixStream::connect(path));
+    });
+    let mut s = match rx.recv_timeout(left()?) {
+        Ok(r) => r?,
+        Err(_) => return Err(ClientError::Deadline),
+    };
     s.set_write_timeout(Some(left()?))?;
     let mut line = request.to_vec();
     while line.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {

@@ -368,3 +368,228 @@ async fn breaker_paths_carry_the_platform_and_read_the_legacy_layout() {
     assert!(!s.breaker_get(&scope).await.unwrap().is_open());
     assert_eq!(s.breaker_list().await.unwrap().len(), 1);
 }
+
+// ── adversarial review: compaction safety ──────────────────────────────
+
+/// A shard planted in another key's directory (create-only credentials
+/// suffice) under the oldest ULID must not make compaction fold the
+/// directory into the planted key's pointer and delete the real records.
+#[tokio::test]
+async fn compaction_derives_the_key_from_the_directory_not_a_planted_shard() {
+    let d = tempfile::tempdir().unwrap();
+    let s = ObjectHistoryStore::local(d.path(), op()).unwrap();
+    let victim = k1();
+    let now = Utc::now();
+    for i in 0..3 {
+        s.put_run(&rec(&victim, &format!("v{i}"), 1, now - Duration::minutes(10 - i))).await.unwrap();
+    }
+    // The attacker's record, in the victim's directory, older than every real shard.
+    let attacker = k2();
+    let planted = rec(&attacker, "evil", 1, now - Duration::days(1));
+    let id = Ulid::from_parts((now - Duration::days(1)).timestamp_millis() as u64, 1);
+    let dir = d.path().join(format!("v1/runs/k8s/c1/ns/{}", victim.hash()));
+    std::fs::write(dir.join(format!("{id}.json")), serde_json::to_vec(&planted).unwrap()).unwrap();
+
+    s.compact(&CompactOptions::at(now + Duration::days(2))).await.unwrap();
+    let v = s.runs(&victim, 10).await.unwrap();
+    assert_eq!(v.len(), 3, "the victim's history survives compaction: {:?}", invs(&v));
+    assert!(s.runs(&attacker, 10).await.unwrap().is_empty(), "the planted record is not the attacker's history either");
+}
+
+/// Shards of a wire version this build cannot read (a newer build wrote
+/// them, or this build is a revert) are neither deleted nor folded under
+/// the watermark: the newer build still reads them (SPEC §13.2).
+#[tokio::test]
+async fn compaction_keeps_shards_it_cannot_read() {
+    let d = tempfile::tempdir().unwrap();
+    let s = ObjectHistoryStore::local(d.path(), op()).unwrap();
+    let k = k1();
+    let now = Utc::now();
+    s.put_run(&rec(&k, "old", 1, now - Duration::hours(3))).await.unwrap();
+    let mut future = serde_json::to_value(rec(&k, "future", 1, now - Duration::hours(2))).unwrap();
+    future["v"] = 99.into();
+    let fid = Ulid::from_parts((now - Duration::hours(2)).timestamp_millis() as u64, 1);
+    let dir = d.path().join(format!("v1/runs/k8s/c1/ns/{}", k.hash()));
+    let fpath = dir.join(format!("{fid}.json"));
+    std::fs::write(&fpath, serde_json::to_vec(&future).unwrap()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    s.put_run(&rec(&k, "new", 1, now)).await.unwrap();
+
+    s.compact(&CompactOptions::at(now + Duration::days(2))).await.unwrap();
+    assert!(fpath.exists(), "an unreadable-version shard is not deleted");
+    let ptr: LatestPointer =
+        serde_json::from_slice(&std::fs::read(d.path().join(format!("v1/latest/k8s/c1/ns/{}.json", k.hash()))).unwrap()).unwrap();
+    assert!(ptr.watermark.is_none_or(|w| w < fid), "the watermark stays below it: {:?} vs {fid}", ptr.watermark);
+    // This build still reads its own records.
+    let v = s.runs(&k, 10).await.unwrap();
+    assert_eq!(invs(&v), ["new#1", "old#1"]);
+}
+
+/// A pointer naming another key is ignored (records and watermark).
+#[tokio::test]
+async fn pointers_of_another_key_are_ignored() {
+    let d = tempfile::tempdir().unwrap();
+    let s = ObjectHistoryStore::local(d.path(), op()).unwrap();
+    let (k, other) = (k1(), k2());
+    s.put_run(&rec(&k, "mine", 1, Utc::now())).await.unwrap();
+    let p = LatestPointer {
+        v: 1,
+        key: other.clone(),
+        watermark: Some(Ulid::from_parts((Utc::now() + Duration::days(1)).timestamp_millis() as u64, 0)),
+        records: vec![serde_json::to_value(rec(&other, "foreign", 1, Utc::now())).unwrap()],
+        updated_at: Utc::now(),
+    };
+    let path = d.path().join(format!("v1/latest/k8s/c1/ns/{}.json", k.hash()));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&p).unwrap()).unwrap();
+    assert_eq!(invs(&s.runs(&k, 10).await.unwrap()), ["mine#1"]);
+}
+
+/// An object store that runs a hook on the first LIST under a prefix.
+struct Hooked {
+    inner: Arc<object_store::memory::InMemory>,
+    prefix: String,
+    #[allow(clippy::type_complexity)]
+    hook: std::sync::Mutex<Option<Box<dyn FnOnce(&object_store::memory::InMemory) + Send>>>,
+}
+
+impl std::fmt::Debug for Hooked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Hooked")
+    }
+}
+
+impl std::fmt::Display for Hooked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Hooked")
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for Hooked {
+    async fn put_opts(
+        &self,
+        l: &object_store::path::Path,
+        p: object_store::PutPayload,
+        o: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(l, p, o).await
+    }
+    async fn put_multipart_opts(
+        &self,
+        l: &object_store::path::Path,
+        o: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(l, o).await
+    }
+    async fn get_opts(&self, l: &object_store::path::Path, o: object_store::GetOptions) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(l, o).await
+    }
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+        self.inner.delete_stream(locations)
+    }
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        if prefix.is_some_and(|p| p.as_ref().starts_with(&self.prefix))
+            && let Some(h) = self.hook.lock().unwrap().take()
+        {
+            h(&self.inner);
+        }
+        self.inner.list(prefix)
+    }
+    async fn list_with_delimiter(&self, prefix: Option<&object_store::path::Path>) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        o: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, o).await
+    }
+}
+
+/// A compaction whose lease is taken over while it runs (it outlived its
+/// TTL) stops before rewriting snapshots or deleting anything, instead of
+/// racing the new holder.
+#[tokio::test]
+async fn compaction_stops_when_its_lease_is_taken_over() {
+    use object_store::{ObjectStore as _, ObjectStoreExt as _};
+    let inner = Arc::new(object_store::memory::InMemory::new());
+    let now = Utc::now();
+    let hooked = Arc::new(Hooked { inner: inner.clone(), prefix: "v1/runs".into(), hook: std::sync::Mutex::new(None) });
+    let s = ObjectHistoryStore::with_options(hooked.clone(), "", "memory://", ObjectStoreOptions { holder: "me".into(), ..op() });
+    let k = k1();
+    for i in 0..5 {
+        s.put_run(&rec(&k, &format!("r{i}"), 1, now - Duration::minutes(10 - i))).await.unwrap();
+    }
+    // Armed now: the compaction's own LIST of the run shards fires it,
+    // i.e. the lease is taken over after this compaction acquired it.
+    *hooked.hook.lock().unwrap() = Some(Box::new(move |m: &object_store::memory::InMemory| {
+        let lease = serde_json::json!({
+            "v": 1, "holder": "intruder", "acquired_at": now + Duration::days(2), "expires_at": now + Duration::days(30)
+        });
+        futures::executor::block_on(m.put(&object_store::path::Path::from("v1/compaction/lease.json"), serde_json::to_vec(&lease).unwrap().into()))
+            .unwrap();
+    }));
+    let r = s.compact(&CompactOptions::at(now + Duration::days(2))).await;
+    assert!(matches!(&r, Err(StoreError::Conflict(m)) if m.contains("lease")), "{r:?}");
+    let left: Vec<_> = futures::TryStreamExt::try_collect::<Vec<_>>(inner.list(Some(&object_store::path::Path::from("v1/runs"))))
+        .await
+        .unwrap();
+    assert_eq!(left.len(), 5, "nothing deleted by a compaction that lost its lease");
+    let snaps: Vec<_> = futures::TryStreamExt::try_collect::<Vec<_>>(inner.list(Some(&object_store::path::Path::from("v1/snapshots"))))
+        .await
+        .unwrap();
+    assert!(snaps.is_empty(), "no snapshot written");
+}
+
+/// Two waiters that both find the same stale lock must not both take it:
+/// N concurrent takeovers of an expired compaction lease behind a stale
+/// lock object still have exactly one winner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn breaking_a_stale_lock_admits_one_writer() {
+    for round in 0..40 {
+        let d = tempfile::tempdir().unwrap();
+        let opts = ObjectStoreOptions { lock_stale_after: std::time::Duration::from_secs(30), ..op() };
+        let s = Arc::new(ObjectHistoryStore::local(d.path(), opts).unwrap());
+        let now = Utc::now();
+        let ttl = std::time::Duration::from_secs(60);
+        s.acquire_compaction_lease("A", now, ttl).await.unwrap();
+        // A crashed writer's lock on the lease, a minute old.
+        let lock = d.path().join("v1/compaction/lease.json.lock");
+        std::fs::write(&lock, b"{\"holder\":\"dead\"}").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        let later = now + Duration::hours(3);
+        let barrier = Arc::new(tokio::sync::Barrier::new(24));
+        let tasks: Vec<_> = (0..24)
+            .map(|i| {
+                let (s, b) = (s.clone(), barrier.clone());
+                tokio::spawn(async move {
+                    b.wait().await;
+                    s.acquire_compaction_lease(&format!("T{i}"), later, ttl).await
+                })
+            })
+            .collect();
+        let mut wins = Vec::new();
+        for (i, t) in tasks.into_iter().enumerate() {
+            match t.await.unwrap() {
+                Ok(_) => wins.push(i),
+                Err(StoreError::Conflict(_)) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(wins.len(), 1, "round {round}: winners {wins:?}");
+    }
+}

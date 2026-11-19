@@ -51,6 +51,8 @@ spec:
             - serve
             - --http-listen=0.0.0.0:{{ .Values.webhook.metricsPort }}
             - --scrape-interval={{ .Values.watcher.scrapeIntervalSeconds }}
+            # Each replica gets its share of quota headroom for increases not yet synced (kubernetes.md §3.4).
+            - --replicas={{ .Values.replicas }}
             {{- if not .Values.watcher.enabled }}
             - --no-watcher
             {{- end }}

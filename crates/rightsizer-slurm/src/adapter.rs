@@ -195,7 +195,7 @@ pub fn account_of(job: &SbatchJob, env: &AdapterEnv, s: &SlurmSettings) -> Strin
 
 /// Accelerator of a gres type: the site table, else the partition's only
 /// GPU type (untyped requests), else unknown.
-fn accel_of(ty: Option<&str>, s: &SlurmSettings, part: Option<&PartitionInfo>) -> AcceleratorId {
+pub(crate) fn accel_of(ty: Option<&str>, s: &SlurmSettings, part: Option<&PartitionInfo>) -> AcceleratorId {
     let map = s.accelerators();
     let ty = ty.map(str::to_string).or_else(|| {
         let mut types: Vec<String> =

@@ -189,11 +189,27 @@ fn decision_marker(c: &Value) -> Option<Option<String>> {
     None
 }
 
-/// The signed prior of an object, when present and valid.
-pub fn signed_prior(object: &Value, keys: Option<&SigningKeys>) -> Option<SignedPrior> {
+/// The identity a signed prior is bound to: `{namespace}/{kind}/{base name}`
+/// (generated suffixes stripped, so a generate-named pod keeps its prior
+/// once the apiserver names it; the UID does not exist yet at admission).
+pub fn prior_identity(object: &Value, namespace: &str) -> Option<String> {
+    let w = objects::workload(object)?;
+    let base = keys::base_name(&w.name, w.generate_name.as_deref());
+    if base.is_empty() {
+        return None;
+    }
+    Some(format!("{namespace}/{}/{base}", w.kind.name()))
+}
+
+/// The signed prior of an object, when present, valid and bound to this
+/// object in `namespace` (a genuine prior copied from another object is
+/// not ours here).
+pub fn signed_prior(object: &Value, keys: Option<&SigningKeys>, namespace: &str) -> Option<SignedPrior> {
     let a = objects::string_map(object, "/metadata/annotations");
     let v = a.get(prior::PRIOR_ANNOTATION)?;
-    prior::verify(v, keys?).ok()
+    let sp = prior::verify(v, keys?).ok()?;
+    let id = prior_identity(object, namespace)?;
+    (sp.bind.as_deref() == Some(id.as_str())).then_some(sp)
 }
 
 fn str_val(v: Option<&Value>) -> Option<String> {
@@ -340,7 +356,7 @@ pub fn extract_object(v: &Value, doc: Option<usize>, cx: &ExtractCtx<'_>) -> Res
         }
     }
     // Our own prior (reinvocation) vs another layer's decision id.
-    let signed = signed_prior(v, cx.keys);
+    let signed = signed_prior(v, cx.keys, cx.namespace);
     if annotations.contains_key(DECISION_ID) && signed.is_none() && !cx.include_sized {
         return Ok(skip(tenant, SkipReason::AlreadySized { decision_id: annotations.get(DECISION_ID).cloned() }));
     }
@@ -427,6 +443,17 @@ pub fn extract_object(v: &Value, doc: Option<usize>, cx: &ExtractCtx<'_>) -> Res
             }
         }
         resources::default_requests_from_limits(&mut effective);
+        // A sized unit (watcher, restore, explain): the origin is what the
+        // author wrote, from our signed prior, not what we applied.
+        if let Some(orig) = signed.as_ref().and_then(|sp| sp.prior.get(&loc.local_id)) {
+            let (shm, gpu) = (effective.requests.shm, effective.requests.gpu);
+            effective = orig.clone();
+            resources::default_requests_from_limits(&mut effective);
+            // Held axes rightsizer never writes (shm from the pod spec, pod-level GPUs).
+            effective.requests.shm = effective.requests.shm.or(shm);
+            effective.requests.gpu = effective.requests.gpu.or(gpu);
+            defaulted = signed.as_ref().and_then(|sp| sp.defaulted.get(&loc.local_id)).copied().unwrap_or(AxisSet::empty());
+        }
         let prior = Prior { spec: effective.clone(), defaulted, qos };
 
         // Seed.

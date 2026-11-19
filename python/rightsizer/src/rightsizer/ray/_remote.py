@@ -79,6 +79,11 @@ class _RsOptions:
         return self._inner.bind(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
+        # Only reached for missing attributes. Dunders and our own slots are not
+        # delegated: copy/pickle probe ``__setstate__`` & co. on an instance
+        # whose ``_inner`` is not set yet (infinite recursion otherwise).
+        if name.startswith("__") or name in ("_inner", "_pins"):
+            raise AttributeError(name)
         return getattr(self._inner, name)
 
 
@@ -103,6 +108,11 @@ class RightsizedRemoteFunction(RemoteFunction):
             from rightsizer_runtime.ray_child import make_task_function
 
             function = make_task_function(user_fn, None)
+            # Only a wrapper accepts the hidden keyword: functions returned
+            # unwrapped (async generators, a user ``_rightsizer`` parameter)
+            # must never receive it (Ray would reject the call, or the user's
+            # ``**kwargs`` would see it).
+            self._rs_measure = function is not user_fn and bool(getattr(function, "__rightsizer_task__", False))
         super().__init__(language, function, function_descriptor, task_options)
 
     # -- the code reference, computed once per definition --

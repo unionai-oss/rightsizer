@@ -39,6 +39,9 @@ use serde::{Deserialize, Serialize};
 use crate::EstimateAxis;
 use crate::common::cells;
 
+/// The generation slot bumped by [`Memo::clear`] (no workload key looks like this).
+const ALL_WORKLOADS: &str = "\u{0}all";
+
 /// A bounded TTL map. Thread-safe; values are cloned out.
 pub struct TtlCache<K, V> {
     inner: Mutex<HashMap<K, (Instant, V)>>,
@@ -178,6 +181,8 @@ struct MemoEntry {
 pub struct Memo {
     entries: Mutex<HashMap<MemoKey, MemoEntry>>,
     inflight: Mutex<HashMap<MemoKey, Arc<OnceCell<MemoAnswer>>>>,
+    /// Invalidation generations by workload key (and [`ALL_WORKLOADS`]).
+    generations: Mutex<HashMap<String, u64>>,
     grid: Grid,
     point_sigma: f64,
     ttl: Duration,
@@ -199,6 +204,7 @@ impl Memo {
         Memo {
             entries: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
+            generations: Mutex::new(HashMap::new()),
             grid,
             point_sigma: rightsizer_core::normalize::POINT_SIGMA,
             ttl,
@@ -257,7 +263,14 @@ impl Memo {
     /// Store an answer (its estimate normalized). Answers with `any_error`
     /// are not stored (errors are retried next time); neither is an estimate
     /// that does not normalize. Returns the answer as stored.
-    pub fn put_answer(&self, k: MemoKey, mut answer: MemoAnswer) -> MemoAnswer {
+    pub fn put_answer(&self, k: MemoKey, answer: MemoAnswer) -> MemoAnswer {
+        let generation = self.generation(&k.workload_key);
+        self.put_answer_at_generation(k, answer, generation)
+    }
+
+    /// [`Memo::put_answer`], stored only if `k`'s workload was not
+    /// invalidated since `generation`.
+    pub fn put_answer_at_generation(&self, k: MemoKey, mut answer: MemoAnswer, generation: u64) -> MemoAnswer {
         if answer.any_error {
             return answer;
         }
@@ -270,13 +283,24 @@ impl Memo {
                 }
             }
         }
-        self.insert(k, answer.clone());
+        self.insert_at_generation(k, answer.clone(), generation);
         answer
     }
 
     fn insert(&self, k: MemoKey, answer: MemoAnswer) {
+        let generation = self.generation(&k.workload_key);
+        self.insert_at_generation(k, answer, generation)
+    }
+
+    fn insert_at_generation(&self, k: MemoKey, answer: MemoAnswer, generation: u64) {
         let now = self.clock.now();
         let mut m = self.lock();
+        // Checked under the entries lock, which invalidation also takes
+        // after bumping: either the bump is seen here, or the entry inserted
+        // here is removed by the invalidation's retain.
+        if self.generation(&k.workload_key) != generation {
+            return;
+        }
         if m.len() >= self.capacity && !m.contains_key(&k) {
             let ttl = self.ttl;
             m.retain(|_, e| elapsed(now, e.at) < ttl);
@@ -304,10 +328,11 @@ impl Memo {
             g.entry(k.clone()).or_insert_with(|| Arc::new(OnceCell::new())).clone()
         };
         let mut ran = false;
+        let generation = self.generation(&k.workload_key);
         let answer = cell
             .get_or_init(|| {
                 ran = true;
-                async { self.put_answer(k.clone(), compute().await) }
+                async move { self.put_answer_at_generation(k.clone(), compute().await, generation) }
             })
             .await
             .clone();
@@ -320,13 +345,43 @@ impl Memo {
         (answer, false)
     }
 
+    /// The invalidation generation of a workload key: bumped by
+    /// [`Memo::invalidate_workload`] and [`Memo::clear`]. A caller that
+    /// captures it before computing stores with [`Memo::put_at_generation`],
+    /// so an estimate computed from history older than an invalidation is
+    /// never stored.
+    pub fn generation(&self, workload_key: &str) -> u64 {
+        let g = self.generations.lock().unwrap_or_else(|p| p.into_inner());
+        g.get(workload_key).copied().unwrap_or(0).wrapping_add(g.get(ALL_WORKLOADS).copied().unwrap_or(0))
+    }
+
+    /// [`Memo::put`] unless `k`'s workload was invalidated since `generation`
+    /// was read (then normalized and returned, but not stored).
+    pub fn put_at_generation(&self, k: MemoKey, est: &Estimate, generation: u64) -> Result<Estimate, NormalizeError> {
+        let n = normalized_estimate(est, &self.grid, self.point_sigma)?;
+        self.insert_at_generation(k, MemoAnswer { estimate: Some(n.clone()), skipped: Vec::new(), any_error: false }, generation);
+        Ok(n)
+    }
+
+    fn bump(&self, workload_key: &str) {
+        let mut g = self.generations.lock().unwrap_or_else(|p| p.into_inner());
+        let e = g.entry(workload_key.to_string()).or_insert(0);
+        *e = e.wrapping_add(1);
+    }
+
     /// Drop every entry of a workload key (any unit), e.g. after an outcome.
+    /// Computations in flight for it are not joined by later callers and
+    /// their answers are not stored.
     pub fn invalidate_workload(&self, workload_key: &str) {
+        self.bump(workload_key);
+        self.inflight.lock().unwrap_or_else(|p| p.into_inner()).retain(|k, _| k.workload_key != workload_key);
         self.lock().retain(|k, _| k.workload_key != workload_key);
     }
 
     /// Drop everything.
     pub fn clear(&self) {
+        self.bump(ALL_WORKLOADS);
+        self.inflight.lock().unwrap_or_else(|p| p.into_inner()).clear();
         self.lock().clear();
     }
 
@@ -394,6 +449,45 @@ mod tests {
         assert!((probs.iter().sum::<f32>() - 1.0).abs() < 1e-6);
         assert_eq!(stored.duration_s, e.duration_s);
         assert_eq!(memo.get(&k), Some(stored));
+    }
+
+    /// An outcome (invalidation) that lands while an estimate computed from
+    /// the older history is in flight must not let that stale estimate be
+    /// stored, or every later decision reuses pre-outcome (e.g. pre-OOM)
+    /// sizing until the TTL.
+    #[tokio::test]
+    async fn invalidation_during_compute_keeps_the_stale_answer_out() {
+        let g = Grid::rs_grid_v1();
+        let memo = Arc::new(Memo::new(g.clone(), Memo::DEFAULT_TTL, 100));
+        let ctx = ctx_with(vec![InputMeta::blob("x", 1_000_000_000)], vec![]);
+        let k = memo.key(&ctx, "p");
+        let mut e = Estimate::empty(Provenance { estimator: "x".into(), version: "1".into(), ..Default::default() });
+        e.memory = Some(AxisEstimate::Point { value: gib(1.0) });
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let m2 = memo.clone();
+        let (k2, e2) = (k.clone(), e.clone());
+        let h = tokio::spawn(async move {
+            m2.get_or_compute(&k2, || async move {
+                let _ = started_tx.send(());
+                let _ = go_rx.await;
+                MemoAnswer { estimate: Some(e2), skipped: vec![], any_error: false }
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        memo.invalidate_workload(&k.workload_key);
+        go_tx.send(()).unwrap();
+        let (answer, hit) = h.await.unwrap();
+        assert!(!hit && answer.estimate.is_some(), "the caller still gets its answer");
+        assert!(memo.get_answer(&k).is_none(), "stale answer stored after invalidation");
+        // Remote-style put with a captured generation.
+        let gen0 = memo.generation(&k.workload_key);
+        memo.invalidate_workload(&k.workload_key);
+        memo.put_at_generation(k.clone(), &e, gen0).unwrap();
+        assert!(memo.get_answer(&k).is_none());
+        memo.put_at_generation(k.clone(), &e, memo.generation(&k.workload_key)).unwrap();
+        assert!(memo.get_answer(&k).is_some());
     }
 
     #[test]

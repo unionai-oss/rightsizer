@@ -120,6 +120,32 @@ pub fn s3b_evidence(history: &[RunRecord], digest: Option<&str>, b_now: Option<u
     Evidence { ok: weight + 1e-9 >= p.min_history as f64, weight, fitting, qualifying }
 }
 
+/// S3(b) on the GPU-memory axis: a smaller device (a GPU type change) is an
+/// incompressible reduction, so it needs the same evidence as memory, on
+/// `gpu_memory_peak`: measured successes whose GPU peak (`Exact` or
+/// `AtMost`) × `scale` × headroom (by resolution and digest) fits the
+/// device; coarse peaks count ½ (SPEC §2.3).
+pub fn s3b_gpu_evidence(history: &[RunRecord], digest: Option<&str>, b_now: Option<u64>, device: Bytes, p: &S3Params) -> Evidence {
+    let mut weight = 0.0;
+    let mut fitting = 0;
+    let mut qualifying = 0;
+    for rec in history.iter().filter(|r| {
+        r.status == RunStatus::Succeeded && r.status_confidence == Confidence::Observed && trusted(r, p.allow_unverified)
+    }) {
+        let Some(peak) = rec.gpu_memory_peak.filter(|m| matches!(m.censor, Censor::Exact | Censor::AtMost)) else { continue };
+        if !peak.value.is_finite() || peak.value < 0.0 {
+            continue;
+        }
+        qualifying += 1;
+        let req = peak.value * scale(b_now, rec.input_bytes()) * headroom(peak.resolution_s, !same_digest(rec, digest));
+        if req <= device.0 as f64 {
+            fitting += 1;
+            weight += if is_coarse(peak.resolution_s) { 0.5 } else { 1.0 };
+        }
+    }
+    Evidence { ok: weight + 1e-9 >= p.min_history as f64, weight, fitting, qualifying }
+}
+
 /// Whether a ladder counts for S3(a) (SPEC §7.2): a `Caller` ladder always;
 /// an `Orchestrator` ladder only when `max_attempts` is known and
 /// `max_attempts − 1 ≥ max_steps`.

@@ -97,7 +97,7 @@ rc, sets, calls = run({ mem = "64G" }, "sbatch", resp("enforce", { mem = "24G" }
 H.eq(#calls, 0, "skipped within 60 s")
 now = now + 31
 s = { mem = "64G" }
-rc, sets, calls = run(s, "sbatch", resp("enforce", { mem = "24G" }))
+rc, sets, calls = run(s, "sbatch", resp("enforce", { mem = "24G" }, "TOK"))
 H.eq(#calls, 1, "called after 60 s"); H.eq(s.mem, "24G", "applied after recovery")
 -- A runner that throws: still SUCCESS, unchanged.
 os.remove(neg)
@@ -107,8 +107,25 @@ H.eq(rc, 0, "runner error SUCCESS"); H.eq(#sets, 0, "runner error unchanged")
 -- Bare DecideResult (no JSON-RPC envelope) is accepted.
 os.remove(neg)
 s = { mem = "64G" }
-run(s, "sbatch", json.encode({ mode = "enforce", patch = { kind = "options", options = { mem = "32G" } } }))
+run(s, "sbatch", json.encode({ mode = "enforce", token = "TOK", patch = { kind = "options", options = { mem = "32G" } } }))
 H.eq(s.mem, "32G", "bare result")
+-- Enforce without a (well-formed) token: nothing is applied (no marker, no change).
+for i, t in ipairs({ json.null, "", "A,B", "A B" }) do
+  os.remove(neg)
+  s = { mem = "64G" }
+  rc, sets = run(s, "sbatch", json.encode({ mode = "enforce", token = t, patch = { kind = "options", options = { mem = "32G" } } }))
+  H.eq(s.mem, "64G", "no token " .. i .. " unchanged"); H.eq(#sets, 0, "no token " .. i .. " no writes")
+end
+-- The negative-cache marker is never written through a planted symlink.
+os.remove(neg)
+local victim = os.tmpname()
+local vf = io.open(victim, "w"); vf:write("precious\n"); vf:close()
+os.execute("ln -s " .. cli.shell_quote(victim) .. " " .. cli.shell_quote(neg))
+run({ mem = "64G" }, "sbatch", "not json")
+H.eq(H.read(victim), "precious\n", "symlinked marker: target untouched")
+local nf = io.open(neg, "r"); local mark = nf and nf:read("*l"); if nf then nf:close() end
+H.eq(tonumber(mark), now, "symlinked marker replaced by our own file")
+os.remove(victim); os.remove(neg)
 H.eq(cli.shell_quote("a'b"), "'a'\\''b'", "shell quoting")
 -- popen runner against a fake helper script.
 local helper = os.tmpname()

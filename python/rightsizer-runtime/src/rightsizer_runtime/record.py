@@ -41,6 +41,7 @@ from .wire import RunRecord, WireError, canonical_key, new_ulid, parse_ulid, par
 log = logging.getLogger("rightsizer.runtime.record")
 
 DEFAULT_BUFFER_SIZE = 10_000
+DEFAULT_PUT_TIMEOUT_S = 15.0  # one remote PUT; a hung store must not hang the task (S1)
 KEY_HASH_HEX_LEN = 32  # rightsizer_core::WorkloadKey::hash
 LAYOUT_VERSION = "v1"
 
@@ -176,6 +177,10 @@ class RunRecordWriter:
         (without platform). Per-call ``tenant=`` overrides it.
     buffer_size:
         Maximum buffered records awaiting retry (SPEC §8.4: 10k).
+    put_timeout_s:
+        Longest a remote (fsspec) PUT may block the caller; a PUT still running
+        then is treated as failed and buffered (rewriting a shard is idempotent).
+        ``None`` waits forever. Local writes are not bounded.
     fs:
         An fsspec filesystem to use instead of resolving ``uri`` (tests).
     """
@@ -189,6 +194,7 @@ class RunRecordWriter:
         buffer_size: int = DEFAULT_BUFFER_SIZE,
         fs: Any = None,
         ulid_factory: Callable[[], str] = new_ulid,
+        put_timeout_s: Optional[float] = DEFAULT_PUT_TIMEOUT_S,
     ):
         self.uri = uri
         self.tenant = tenant
@@ -201,6 +207,7 @@ class RunRecordWriter:
         self._backend_error: Optional[str] = None
         self._storage_options = storage_options
         self._fs = fs
+        self.put_timeout_s = put_timeout_s
 
     def _get_backend(self) -> Any:
         if self._backend is None:
@@ -228,7 +235,27 @@ class RunRecordWriter:
             return False
 
     def _put(self, rel: str, data: bytes) -> None:
-        self._get_backend().put(rel, data)
+        backend = self._get_backend()
+        if self.put_timeout_s is None or isinstance(backend, LocalBackend):
+            backend.put(rel, data)
+            return
+        # A daemon thread bounds how long a hung object store can block the task's own
+        # return (the record is written in the task's ``finally``).
+        box: Dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                backend.put(rel, data)
+            except BaseException as e:  # noqa: BLE001 - reported to the caller below
+                box["error"] = e
+
+        t = threading.Thread(target=run, name="rightsizer-record-put", daemon=True)
+        t.start()
+        t.join(self.put_timeout_s)
+        if t.is_alive():
+            raise TimeoutError(f"RunRecord PUT did not finish within {self.put_timeout_s:g} s")
+        if "error" in box:
+            raise box["error"]
 
     def _put_or_buffer(self, rel: str, data: bytes) -> bool:
         try:
@@ -287,6 +314,7 @@ class RunRecordWriter:
 
 __all__ = [
     "DEFAULT_BUFFER_SIZE",
+    "DEFAULT_PUT_TIMEOUT_S",
     "FsspecBackend",
     "LocalBackend",
     "RunRecordWriter",

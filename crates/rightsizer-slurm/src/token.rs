@@ -593,16 +593,28 @@ impl KeyRing {
     pub fn save(&self, path: &Path) -> Result<(), TokenError> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::MetadataExt;
         self.check()?;
         let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        let tmp = dir.join(format!(".{}.tmp-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("key"), std::process::id()));
-        let io = |e: std::io::Error| TokenError::Io(e.to_string());
-        {
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).map_err(io)?;
-            f.write_all(self.to_text().as_bytes()).map_err(io)?;
-            f.sync_all().map_err(io)?;
+        let tmp = dir.join(format!(".{}.tmp-{}-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("key"), std::process::id(), Ulid::generate()));
+        // Rotation rewrites the file in place: keep its owner and group, or
+        // a `rotate-key` run as root would leave a root-owned 0600 file that
+        // SlurmUser (job_submit.lua) or the daemon's user can no longer read.
+        let owner = std::fs::metadata(path).ok().map(|m| (m.uid(), m.gid()));
+        let written = (|| {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            if let Some((uid, gid)) = owner {
+                std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
+            }
+            f.write_all(self.to_text().as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(TokenError::Io(format!("{}: {e}", path.display())));
         }
-        std::fs::rename(&tmp, path).map_err(io)
+        Ok(())
     }
 
     /// The active key.
@@ -610,8 +622,16 @@ impl KeyRing {
         self.keys.iter().find(|k| k.state == KeyState::Active).ok_or_else(|| TokenError::NoKey("no active key".into()))
     }
 
-    /// Sign with the active key.
+    /// Sign with the active key. Claims with a control character in a
+    /// string field are refused: `canonical` joins its lines with `\n`, so
+    /// a newline inside a TRES value could make two different resource
+    /// sets canonicalize alike (and no real `job_desc` carries one).
     pub fn sign(&self, c: &TokenClaims) -> Result<String, TokenError> {
+        let r = &c.resources;
+        let fields = [Some(c.account.as_str()), r.tres_per_node.as_deref(), r.tres_per_job.as_deref(), r.tres_per_task.as_deref(), r.tres_per_socket.as_deref(), r.mem_per_tres.as_deref()];
+        if fields.iter().flatten().any(|f| f.chars().any(char::is_control)) {
+            return Err(TokenError::Malformed("control character in a signed field"));
+        }
         Ok(self.active()?.sign(c))
     }
 
@@ -696,6 +716,51 @@ mod tests {
             decision_id: Ulid::from_string("01JDZ7Q4W8M7C9B5V3N2X1Y0ZA").unwrap(),
             expiry: 1_800_000_000,
         }
+    }
+
+    #[test]
+    fn newlines_in_tres_cannot_alias_another_resource_set() {
+        // Two different resource sets with the same canonical text, because a
+        // newline inside a TRES value forges a line of its own.
+        let signed = JobDescResources { tres_per_node: Some("x=1\ntres_per_job=mem=5".into()), ..Default::default() };
+        let other = JobDescResources { tres_per_node: Some("x=1".into()), tres_per_job: Some("mem=5\ntres_per_job=-".into()), ..Default::default() };
+        assert_ne!(signed, other);
+        assert_eq!(signed.canonical(), other.canonical());
+        // So the signer refuses control characters: no token for `signed` exists to replay on `other`.
+        let mut c = claims();
+        c.resources = signed;
+        assert!(ring().sign(&c).is_err(), "a token was signed over a newline-bearing TRES value");
+        c.resources = JobDescResources::default();
+        c.account = "ml\nteam".into();
+        assert!(ring().sign(&c).is_err());
+        assert!(ring().sign(&claims()).is_ok());
+    }
+
+    #[test]
+    fn save_keeps_the_key_files_owner_and_group() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("rsz-key-{}", Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rightsizer.key");
+        let mut r = KeyRing::generate().unwrap();
+        r.save(&path).unwrap();
+        // Hand the file to another group of ours (as `chgrp slurm` would).
+        let dir_gid = std::fs::metadata(&dir).unwrap().gid();
+        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
+        let other = String::from_utf8_lossy(&groups.stdout).split_whitespace().filter_map(|g| g.parse::<u32>().ok()).find(|g| *g != dir_gid);
+        let Some(gid) = other else {
+            eprintln!("only one group: skipping");
+            return;
+        };
+        assert!(std::process::Command::new("chgrp").arg(gid.to_string()).arg(&path).status().unwrap().success());
+        r.rotate(RotateStep::Stage).unwrap();
+        r.save(&path).unwrap();
+        let m = std::fs::metadata(&path).unwrap();
+        assert_eq!(m.gid(), gid, "rotation changed the key file's group");
+        assert_eq!(m.mode() & 0o777, 0o600);
+        assert_eq!(KeyRing::load(&path).unwrap(), r);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "temp file left behind");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn input(c: &TokenClaims) -> VerifyInput<'_> {

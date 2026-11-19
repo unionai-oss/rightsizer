@@ -92,6 +92,13 @@ pub struct SignedPrior {
     /// Original KubeRay `rayStartParams` values rightsizer may change, by unit id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ray: BTreeMap<String, BTreeMap<String, Option<String>>>,
+    /// The object this prior belongs to: `{namespace}/{kind}/{base name}`
+    /// ([`crate::extract::prior_identity`]). A genuine prior copied onto
+    /// another object (another namespace or workload) does not verify there,
+    /// so it can neither make that object look sized nor supply a forged
+    /// origin for outcome attribution (SPEC §2.3 S5, §8.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<String>,
 }
 
 #[derive(Serialize)]

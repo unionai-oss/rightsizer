@@ -117,27 +117,60 @@ class RaySettings:
     _shapes: Optional[Tuple[float, str, List[Dict[str, Any]]]] = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
+    _refreshing: bool = False
+
     def shapes(self) -> Tuple[str, List[Dict[str, Any]]]:
-        """``(source, shapes)``: source is ``autoscaler``, ``config`` or ``none``."""
+        """``(source, shapes)``: source is ``autoscaler``, ``config`` or ``none``.
+
+        Reading the autoscaler can take GCS round trips (``get_cluster_status``
+        waits up to 2 s), which must not land on a ``.remote()`` call: once a
+        value is cached, an expired one is returned as is while one background
+        thread refreshes it (only the very first resolution is inline).
+        """
         now = time.monotonic()
         cached = self._shapes
-        if cached is not None and now - cached[0] < AUTOSCALER_TTL_S:
+        if cached is not None:
+            if now - cached[0] >= AUTOSCALER_TTL_S:
+                self._refresh_in_background()
             return cached[1], cached[2]
         with self._lock:
             cached = self._shapes
-            if cached is not None and now - cached[0] < AUTOSCALER_TTL_S:
+            if cached is not None:
                 return cached[1], cached[2]
-            auto = autoscaler_shapes()
-            if auto:
-                out = ("autoscaler", auto)
-            elif self.config_shapes:
-                out = ("config", list(self.config_shapes))
-            else:
-                out = ("none", [])
-            # Cache "none" only once Ray is up (a later call may see the autoscaler).
-            if out[0] != "none" or _ray_initialized():
-                self._shapes = (now, out[0], out[1])
-            return out
+            return self._resolve_shapes()
+
+    def _resolve_shapes(self) -> Tuple[str, List[Dict[str, Any]]]:
+        now = time.monotonic()
+        auto = autoscaler_shapes()
+        if auto:
+            out = ("autoscaler", auto)
+        elif self.config_shapes:
+            out = ("config", list(self.config_shapes))
+        else:
+            out = ("none", [])
+        # Cache "none" only once Ray is up (a later call may see the autoscaler).
+        if out[0] != "none" or _ray_initialized():
+            self._shapes = (now, out[0], out[1])
+        return out
+
+    def _refresh_in_background(self) -> None:
+        with self._lock:
+            if self._refreshing:
+                return
+            self._refreshing = True
+
+        def run() -> None:
+            try:
+                self._resolve_shapes()
+            except Exception as e:  # pragma: no cover - autoscaler_shapes never raises
+                log.debug("rightsizer.ray: shapes refresh failed: %s", e)
+            finally:
+                self._refreshing = False
+
+        try:
+            threading.Thread(target=run, name="rightsizer-ray-shapes", daemon=True).start()
+        except Exception:  # pragma: no cover
+            self._refreshing = False
 
 
 _lock = threading.Lock()

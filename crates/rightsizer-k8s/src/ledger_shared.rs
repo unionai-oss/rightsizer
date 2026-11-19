@@ -55,17 +55,37 @@ pub fn decode(line: &str) -> Option<Reservation> {
     })
 }
 
+/// How long after a local reservation first shows up in this replica's
+/// remote set it counts as visible to every replica (each refreshes on its
+/// own 3 s timer): two refresh periods.
+const SETTLE_S: i64 = 6;
+
 /// Local + remote reservations.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SharedLedger {
     local: MemoryLedger,
     remote: Mutex<HashMap<String, Reservation>>,
+    /// When each remote id was first seen here.
+    first_seen: Mutex<HashMap<String, DateTime<Utc>>>,
+    /// Replicas admitting concurrently.
+    peers: std::sync::atomic::AtomicU64,
+}
+
+impl Default for SharedLedger {
+    fn default() -> Self {
+        SharedLedger { local: MemoryLedger::default(), remote: Mutex::default(), first_seen: Mutex::default(), peers: std::sync::atomic::AtomicU64::new(1) }
+    }
 }
 
 impl SharedLedger {
     /// A ledger.
     pub fn new() -> Arc<Self> {
         Arc::new(SharedLedger::default())
+    }
+
+    /// Set the number of webhook replicas admitting concurrently (≥ 1).
+    pub fn set_peers(&self, n: u64) {
+        self.peers.store(n.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// A local reservation (to publish it).
@@ -75,10 +95,21 @@ impl SharedLedger {
 
     /// Replace the remote set (from the decision log).
     pub fn set_remote(&self, rs: Vec<Reservation>) {
+        self.set_remote_at(rs, Utc::now());
+    }
+
+    /// Replace the remote set, seen at `now`.
+    pub fn set_remote_at(&self, rs: Vec<Reservation>, now: DateTime<Utc>) {
         if let Ok(mut m) = self.remote.lock() {
             m.clear();
             for r in rs {
                 m.insert(format!("{}/{}", r.namespace, r.id), r);
+            }
+            if let Ok(mut f) = self.first_seen.lock() {
+                f.retain(|k, _| m.contains_key(k));
+                for k in m.keys() {
+                    f.entry(k.clone()).or_insert(now);
+                }
             }
         }
     }
@@ -90,7 +121,7 @@ impl SharedLedger {
         let ds = engine.store().decisions(&f).await.map_err(|e| e.to_string())?;
         let rs: Vec<Reservation> = ds.iter().filter(|d| d.key.platform == "k8s").flat_map(|d| d.explanation.iter().filter_map(|l| decode(l))).collect();
         let n = rs.len();
-        self.set_remote(rs);
+        self.set_remote_at(rs, now);
         Ok(n)
     }
 
@@ -129,6 +160,22 @@ impl ReservationLedger for SharedLedger {
         }
         (r, l)
     }
+    fn unsynced(&self, namespace: &str, now: DateTime<Utc>) -> (Totals, Totals) {
+        let (mut r, mut l) = (Totals::default(), Totals::default());
+        let items = self.local.live(namespace, now);
+        let seen = self.first_seen.lock().map(|f| f.clone()).unwrap_or_default();
+        for x in items {
+            let settled = seen.get(&format!("{namespace}/{}", x.id)).is_some_and(|t| now - *t >= Duration::seconds(SETTLE_S));
+            if !settled {
+                r = r.add(&x.requests);
+                l = l.add(&x.limits);
+            }
+        }
+        (r, l)
+    }
+    fn peers(&self) -> u64 {
+        self.peers.load(std::sync::atomic::Ordering::Relaxed).max(1)
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +195,20 @@ mod tests {
         l.reserve(r.clone());
         assert_eq!(l.reserved("ml", now).0.memory, 1 << 30, "local and remote copies of one id count once");
         assert_eq!(l.reserved("other", now).0.memory, 0);
+    }
+
+    #[test]
+    fn local_reservations_are_unsynced_until_every_replica_refreshed() {
+        let now = Utc::now();
+        let l = SharedLedger::default();
+        l.set_peers(2);
+        assert_eq!(ReservationLedger::peers(&l), 2);
+        let r = Reservation { namespace: "ml".into(), id: "01J".into(), requests: Totals { memory: 1 << 30, ..Default::default() }, limits: Totals::default(), at: now };
+        l.reserve(r.clone());
+        assert_eq!(l.unsynced("ml", now).0.memory, 1 << 30, "not in the log yet");
+        l.set_remote_at(vec![r.clone()], now + Duration::seconds(3));
+        assert_eq!(l.unsynced("ml", now + Duration::seconds(4)).0.memory, 1 << 30, "others may not have refreshed yet");
+        assert_eq!(l.unsynced("ml", now + Duration::seconds(10)).0.memory, 0);
+        assert_eq!(l.reserved("ml", now + Duration::seconds(10)).0.memory, 1 << 30);
     }
 }

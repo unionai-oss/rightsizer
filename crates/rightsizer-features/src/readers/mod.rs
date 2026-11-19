@@ -291,8 +291,25 @@ impl<'a> Fetch<'a> {
             return Ok(Bytes::new());
         }
         self.remaining -= len;
-        let b = self.store.get_range(path, range).await?;
-        Ok(b)
+        // Stream the body and stop at `len`: a server may send a 206 whose
+        // (chunked) body runs past its Content-Range, or a short one. Neither
+        // is trusted: more bytes than asked are never buffered, and a body of
+        // the wrong length is malformed (readers index into it).
+        let opts = object_store::GetOptions::new().with_range(Some(range));
+        let mut stream = self.store.get_opts(path, opts).await?.into_stream();
+        let want = usize::try_from(len).map_err(|_| FeatureError::TooLarge(self.budget))?;
+        let mut buf: Vec<u8> = Vec::with_capacity(want);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.len() > want - buf.len() {
+                return Err(FeatureError::Malformed { format: "range", message: format!("body exceeds the {len} bytes asked") });
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        if buf.len() != want {
+            return Err(FeatureError::Malformed { format: "range", message: format!("short body: {} of {len} bytes", buf.len()) });
+        }
+        Ok(Bytes::from(buf))
     }
 
     /// HEAD (not counted: no body bytes).

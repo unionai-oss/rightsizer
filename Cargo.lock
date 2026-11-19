@@ -3172,6 +3172,7 @@ dependencies = [
  "pretty_assertions",
  "rightsizer-core",
  "rightsizer-engine",
+ "rightsizer-history",
  "rightsizer-plugin",
  "serde",
  "serde_json",

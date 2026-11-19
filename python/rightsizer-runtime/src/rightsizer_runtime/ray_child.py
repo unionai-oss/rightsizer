@@ -93,8 +93,18 @@ def make_task_function(fn: Callable[..., Any], key: Optional[str] = None) -> Cal
     checks ``inspect.isgeneratorfunction``); async generators are returned
     unwrapped (not measured).
     """
-    if inspect.isasyncgenfunction(fn) or getattr(fn, "__rightsizer_task__", False):
+    if inspect.isasyncgenfunction(fn) or inspect.iscoroutinefunction(fn) or getattr(fn, "__rightsizer_task__", False):
+        # ``async def``: returned unwrapped, so Ray's own definition-time
+        # ``ValueError`` still applies (a sync wrapper would hide the coroutine
+        # function from Ray and fail at run time instead).
         return fn
+    try:
+        if META_KWARG in inspect.signature(fn).parameters:
+            # The user's own ``_rightsizer`` parameter: wrapping would swallow
+            # its value. Such functions run unmeasured (and get no meta).
+            return fn
+    except (TypeError, ValueError):
+        pass
     static_key = key
 
     # The bodies reference only builtins and closure cells (no module

@@ -37,7 +37,7 @@ impl Fake {
 D="{d}"
 n=$(( $(cat "$D/count" 2>/dev/null || echo 0) + 1 )); echo $n > "$D/count"
 printf '%s\n' "$@" > "$D/argv.$n"
-for a in "$@"; do case "$a" in -*|:) ;; *) [ -f "$a" ] && cp "$a" "$D/script.$n" && echo "$a" > "$D/path.$n";; esac; done
+for a in "$@"; do case "$a" in -*|:) ;; *) [ -f "$a" ] && cp "$a" "$D/script.$n" && echo "$a" > "$D/path.$n" && ls -ld "$a" "$(dirname "$a")" | cut -c1-10 > "$D/perms.$n";; esac; done
 echo "${{RIGHTSIZER_DECIDED:-}}" > "$D/decided.$n"
 [ {sbatch_exit} -ne 0 ] && {{ echo "sbatch: error: boom" >&2; exit {sbatch_exit}; }}
 echo "Submitted batch job $n"
@@ -174,6 +174,10 @@ async fn enforce_edits_a_temp_copy_and_attaches_a_token() {
     let p = PathBuf::from(f.read("path.1").trim());
     assert_eq!(p.file_name().unwrap(), "train.sh");
     assert!(!p.exists());
+    // The copy (scripts can hold secrets) is private to the user, like a mkstemp file.
+    let mut perms: Vec<String> = f.read("perms.1").lines().map(str::to_string).collect();
+    perms.sort();
+    assert_eq!(perms, vec!["-rw-------", "drwx------"], "temp script copy is readable by others");
     assert_eq!(std::fs::read_to_string(f.path().join("train.sh")).unwrap(), SCRIPT, "the user's file is untouched");
     let argv = f.argv(1);
     assert_eq!(&argv[argv.len() - 2..], &["--epochs", "3"]);

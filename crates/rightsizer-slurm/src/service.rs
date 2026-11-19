@@ -343,7 +343,10 @@ impl SlurmService {
         settings.watch = p.watch;
         let requested = parsed.job.components.first().and_then(|c| c.value("account")).map(str::to_string);
         let account = self.account_for(requested.as_deref(), who.user.as_deref());
-        let cluster = settings.cluster_name(&p.env);
+        // The cluster is the daemon's own, never the caller's `env.cluster`:
+        // the shim's env is not trusted for identity, and the cluster is part
+        // of the tenant (history, policy, tenants_by_uid patterns).
+        let cluster = settings.cluster_name(&AdapterEnv::default());
         let env = AdapterEnv {
             cluster: Some(cluster.clone()),
             principal: who.user.clone(),
@@ -365,7 +368,9 @@ impl SlurmService {
         };
         let mut token = None;
         if c.mode == Mode::Enforce && !c.patch.is_none() {
-            if !batch {
+            if !batch || p.dry_run {
+                // salloc/srun cannot be attributed; a dry run's decisions are
+                // not recorded, so nothing may be signed for them.
                 c.patch = Default::default();
             } else {
                 let ids: Vec<Ulid> = c.decisions.iter().map(|d| d.id).collect();
@@ -407,8 +412,16 @@ impl SlurmService {
             }
             decisions.push(d);
         }
+        let settings = self.settings();
         for (k, c) in parsed.job.components.iter().enumerate() {
             let d = decisions.get(k).unwrap_or(&decisions[0]);
+            // The same workload: a ladder step changes memory (and the array
+            // range), never the key, so a decision id cannot be borrowed to
+            // attest some other job of the account.
+            let suffix = crate::keys::key_suffix(&parsed.job, k).0;
+            if d.key.platform != "slurm" || suffix != d.key.suffix {
+                return Err(ServiceError::Invalid(format!("component {k}: workload {suffix:?} is not the workload of decision {} ({})", d.id, d.key)));
+            }
             let r = CompResources::of(c);
             let mem = r.mem_per_node().map(|b| b.0);
             let (applied, prior) = (d.applied.requests.memory.map(|b| b.0), d.prior.spec.requests.memory.map(|b| b.0));
@@ -427,6 +440,15 @@ impl SlurmService {
                 && (dc.0 as u64).div_ceil(1000).max(1) != cpu
             {
                 return Err(ServiceError::Invalid(format!("component {k}: {cpu} CPUs differ from decision {} ({}m)", d.id, dc.0)));
+            }
+            // GPUs unchanged from the decision (count per node and type).
+            let gpu = r.gpu.as_ref().map(|g| {
+                let part = settings.inventory.partition(r.partition.as_deref());
+                (crate::adapter::accel_of(g.gpu_type.as_deref(), &settings, part), r.gpus_per_node().unwrap_or(g.count).max(1))
+            });
+            let want = d.applied.requests.gpu.as_ref().map(|g| (g.accel, g.count));
+            if gpu != want {
+                return Err(ServiceError::Invalid(format!("component {k}: GPUs {gpu:?} differ from decision {} ({want:?})", d.id)));
             }
         }
         let account = decisions[0].key.tenant.as_str().split('/').nth(1).map(unescape_segment).unwrap_or_default();

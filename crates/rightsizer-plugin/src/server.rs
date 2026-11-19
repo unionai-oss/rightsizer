@@ -118,11 +118,17 @@ pub struct ServerOptions {
     pub default_deadline_ms: Option<u32>,
     /// Upper bound on any request's deadline.
     pub max_deadline_ms: u32,
+    /// Open Unix-socket connections per peer uid. Every connection can
+    /// buffer a line of up to `max_line` bytes and run `max_concurrent`
+    /// requests, so without a bound one local user could exhaust the
+    /// daemon's memory for everyone; connections over the limit are closed
+    /// at once (the shims then fall back: S1).
+    pub max_connections_per_uid: usize,
 }
 
 impl Default for ServerOptions {
     fn default() -> Self {
-        ServerOptions { max_concurrent: 64, max_line: rpc::MAX_LINE, default_deadline_ms: Some(30_000), max_deadline_ms: 300_000 }
+        ServerOptions { max_concurrent: 64, max_line: rpc::MAX_LINE, default_deadline_ms: Some(30_000), max_deadline_ms: 300_000, max_connections_per_uid: 64 }
     }
 }
 
@@ -300,13 +306,23 @@ pub fn bind_unix(path: &Path, mode: u32) -> std::io::Result<tokio::net::UnixList
             Err(_) => std::fs::remove_file(path)?,
         }
     }
-    if let Some(dir) = path.parent()
-        && !dir.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(dir)?;
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    // Bind under a fresh random name, chmod that, then rename it into
+    // place: `set_permissions` follows symlinks, so chmod-ing `path` after
+    // binding it would let anyone who can write the directory swap in a
+    // symlink between the two calls and have a file of the daemon's (its
+    // key file, say) made 0666. rename(2) replaces whatever is at `path`
+    // (a stale socket, a planted symlink) without following it.
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "sock".into());
+    let tag = ulid::Ulid::generate().to_string();
+    let tmp = dir.join(format!(".{name}.{}", &tag[tag.len() - 8..]));
+    let l = tokio::net::UnixListener::bind(&tmp)?;
+    let placed = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = placed {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    let l = tokio::net::UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
     Ok(l)
 }
 
@@ -345,6 +361,7 @@ pub fn peer_of(s: &tokio::net::UnixStream) -> Caller {
 /// Removes the socket file on exit.
 pub async fn serve_unix(listener: tokio::net::UnixListener, path: PathBuf, handler: Arc<dyn Handler>, opts: ServerOptions, mut shutdown: watch::Receiver<bool>, grace: Duration) {
     let mut conns = tokio::task::JoinSet::new();
+    let per_uid: Arc<Mutex<HashMap<Option<u32>, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     loop {
         if *shutdown.borrow() {
             break;
@@ -353,8 +370,17 @@ pub async fn serve_unix(listener: tokio::net::UnixListener, path: PathBuf, handl
             a = listener.accept() => match a {
                 Ok((stream, _)) => {
                     let caller = peer_of(&stream);
+                    let Some(slot) = ConnSlot::take(&per_uid, caller.uid, opts.max_connections_per_uid.max(1)) else {
+                        tracing::warn!(uid = ?caller.uid, limit = opts.max_connections_per_uid, "too many connections from this uid: closing");
+                        drop(stream);
+                        continue;
+                    };
                     let (r, w) = stream.into_split();
-                    conns.spawn(serve_connection(r, w, handler.clone(), caller, opts.clone(), shutdown.clone()));
+                    let fut = serve_connection(r, w, handler.clone(), caller, opts.clone(), shutdown.clone());
+                    conns.spawn(async move {
+                        let _slot = slot;
+                        fut.await
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "accept failed");
@@ -369,6 +395,36 @@ pub async fn serve_unix(listener: tokio::net::UnixListener, path: PathBuf, handl
     let _ = std::fs::remove_file(&path);
     let _ = tokio::time::timeout(grace, async { while conns.join_next().await.is_some() {} }).await;
     conns.abort_all();
+}
+
+/// One open connection counted against its uid's limit (released on drop).
+struct ConnSlot {
+    map: Arc<Mutex<HashMap<Option<u32>, usize>>>,
+    uid: Option<u32>,
+}
+
+impl ConnSlot {
+    fn take(map: &Arc<Mutex<HashMap<Option<u32>, usize>>>, uid: Option<u32>, max: usize) -> Option<Self> {
+        let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+        let n = m.entry(uid).or_insert(0);
+        if *n >= max {
+            return None;
+        }
+        *n += 1;
+        Some(ConnSlot { map: map.clone(), uid })
+    }
+}
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.uid) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&self.uid);
+            }
+        }
+    }
 }
 
 /// Serve one request body (HTTP): one JSON-RPC message (or a batch array)
@@ -542,6 +598,57 @@ mod tests {
         let b = serve_body(br#"[{"jsonrpc":"2.0","id":1,"method":"echo"},{"jsonrpc":"2.0","id":2,"method":"echo"}]"#, Arc::new(Echo), Caller::anonymous(Transport::Http), ServerOptions::default()).await.unwrap();
         assert_eq!(b.as_array().unwrap().len(), 2);
         assert!(serve_body(br#"{"jsonrpc":"2.0","method":"echo"}"#, Arc::new(Echo), Caller::anonymous(Transport::Http), ServerOptions::default()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn connections_per_uid_are_bounded() {
+        let dir = tempfile_dir();
+        let path = dir.join("c.sock");
+        let l = bind_unix(&path, 0o600).unwrap();
+        let (tx, rx) = watch::channel(false);
+        let opts = ServerOptions { max_connections_per_uid: 2, ..Default::default() };
+        let srv = tokio::spawn(serve_unix(l, path.clone(), Arc::new(Echo), opts, rx, Duration::from_secs(1)));
+        async fn echo(s: tokio::net::UnixStream) -> Option<String> {
+            let mut br = tokio::io::BufReader::new(s);
+            br.get_mut().write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"echo\"}\n").await.ok()?;
+            let mut line = String::new();
+            let n = tokio::time::timeout(Duration::from_secs(2), br.read_line(&mut line)).await.ok()?.ok()?;
+            (n > 0).then_some(line)
+        }
+        // Two idle connections (a slow-loris user) hold this uid's slots.
+        let a = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let b = tokio::net::UnixStream::connect(&path).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let third = tokio::net::UnixStream::connect(&path).await.unwrap();
+        assert_eq!(echo(third).await, None, "a third connection from the same uid was served");
+        // A slot frees when a connection closes.
+        drop(a);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let again = tokio::net::UnixStream::connect(&path).await.unwrap();
+        assert!(echo(again).await.is_some_and(|l| l.contains("result")));
+        drop(b);
+        tx.send(true).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(3), srv).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn bind_never_chmods_through_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile_dir();
+        let secret = dir.join("key");
+        std::fs::write(&secret, "k").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // A symlink planted where the socket goes is replaced, not followed.
+        let path = dir.join("s.sock");
+        std::os::unix::fs::symlink(&secret, &path).unwrap();
+        let _l = bind_unix(&path, 0o666).unwrap();
+        assert_eq!(std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777, 0o600);
+        let m = std::fs::symlink_metadata(&path).unwrap();
+        assert!(!m.file_type().is_symlink());
+        assert_eq!(m.permissions().mode() & 0o777, 0o666);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "no temp socket left behind");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn tempfile_dir() -> PathBuf {

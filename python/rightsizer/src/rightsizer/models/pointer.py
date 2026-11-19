@@ -141,7 +141,12 @@ def softmax_t(z, t: float):
     import numpy as np
 
     x = np.asarray(z, dtype=np.float64) / t
-    x = x - x.max()
+    if np.isnan(x).any():
+        raise ValueError("logits are NaN (non-finite hidden states from the backend?)")
+    top = x == np.inf
+    if top.any():  # the limit of softmax: uniform over the +inf logits
+        return top / top.sum()
+    x = x - x.max()  # all -inf is impossible to normalize: NaN, caught by build_estimate
     e = np.exp(x)
     return e / e.sum()
 
@@ -151,6 +156,13 @@ class Prepared:
     ids: list[int]
     positions: list[int]  # [last, *axis0 options, *axis1 options, ...]
     sizes: list[int]
+
+
+def _unrenderable(e: BaseException) -> Any:
+    """The slot error for a context the prompt builder cannot read."""
+    from rightsizer.serve.errors import BadRequest
+
+    return BadRequest(f"context cannot be rendered as a prompt ({type(e).__name__})")
 
 
 class PointerModel:
@@ -237,18 +249,32 @@ class PointerModel:
     def estimate_batch(self, contexts: Sequence[Mapping[str, Any]], axes: Sequence[str] | None = None) -> list[dict]:
         from . import prompting
 
+        from rightsizer.serve.errors import Internal
+
         t0 = time.monotonic()
-        msgs = [prompting.messages_from_context(c, **self.prompt_options) for c in contexts]
-        probs = self.probabilities_batch(msgs)
+        # Contexts from different clients share a batch: one that cannot be rendered
+        # fails its own slot only (and its message quotes no context values).
+        out: list = [None] * len(contexts)
+        msgs, at = [], []
+        for i, c in enumerate(contexts):
+            try:
+                msgs.append(prompting.messages_from_context(c, **self.prompt_options))
+                at.append(i)
+            except Exception as e:  # noqa: BLE001
+                out[i] = _unrenderable(e)
+        probs = self.probabilities_batch(msgs) if msgs else []
         ms = int(math.ceil((time.monotonic() - t0) * 1000 / max(1, len(contexts))))
-        out = []
-        for c, p in zip(contexts, probs):
+        for i, p in zip(at, probs):
+            c = contexts[i]
             platform = prompting.tuner_platform(c)
             overhead = prompting.FLYTE_RUNTIME_MIB * 2**20 if platform == "flyte" else 0.0
-            out.append(build_estimate(
-                p, self.release.options, estimator=self.release.repo, version=self.release.commit, kind=self.kind,
-                gpu_threshold=self.release.config.get("gpu_threshold"), axes=axes, memory_basis=self.memory_basis,
-                memory_overhead_bytes=overhead, latency_ms=ms))
+            try:
+                out[i] = build_estimate(
+                    p, self.release.options, estimator=self.release.repo, version=self.release.commit, kind=self.kind,
+                    gpu_threshold=self.release.config.get("gpu_threshold"), axes=axes, memory_basis=self.memory_basis,
+                    memory_overhead_bytes=overhead, latency_ms=ms)
+            except ValueError as e:
+                out[i] = Internal(f"no estimate: {e}")
         return out
 
     def info(self, max_batch: int = 32) -> dict:

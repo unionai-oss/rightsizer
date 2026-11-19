@@ -199,12 +199,22 @@ struct Submission {
 
 /// Write `script` under a fresh temp directory with the original's file name.
 fn temp_script(cfg: &WrapperConfig, original: Option<&str>, script: &str) -> std::io::Result<(PathBuf, PathBuf)> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let base = cfg.tmp_dir.clone().unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&base)?;
+    // A fresh directory of our own (0700; `create`, not `create_dir_all`,
+    // so a pre-existing path is an error) and a 0600 file: the script can
+    // hold credentials and the default temp dir is shared.
     let dir = base.join(format!("rsz-sbatch-{}", Ulid::generate()));
-    std::fs::create_dir_all(&dir)?;
+    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     let name = original.and_then(|p| Path::new(p).file_name()).and_then(|n| n.to_str()).unwrap_or("sbatch").to_string();
     let path = dir.join(name);
-    std::fs::write(&path, script)?;
+    let written = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).and_then(|mut f| f.write_all(script.as_bytes()));
+    if let Err(e) = written {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
     Ok((dir, path))
 }
 
@@ -550,7 +560,13 @@ pub async fn run(args: &[String], stdin_script: Option<String>, decider: &dyn De
         step += 1;
         let p = match parse_native(&current) {
             Ok(p) => p,
-            Err(_) => return out,
+            Err(_) => {
+                for (key, _) in &units {
+                    let _ = decider.close_lease(key, &invocation, status).await;
+                }
+                out.exit_code = 1;
+                return out;
+            }
         };
         let mut changes = Vec::new();
         for (k, ((_, d), a)) in units.iter().zip(applied.iter_mut()).enumerate() {
@@ -574,6 +590,9 @@ pub async fn run(args: &[String], stdin_script: Option<String>, decider: &dyn De
             Ok(n) => n,
             Err(e) => {
                 out.messages.push(format!("rightsizer: cannot escalate ({e})"));
+                for (key, _) in &units {
+                    let _ = decider.close_lease(key, &invocation, status).await;
+                }
                 out.exit_code = 1;
                 return out;
             }

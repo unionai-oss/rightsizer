@@ -97,6 +97,10 @@ pub fn render_units(decisions: &[(Unit, Decision)], mode: Mode) -> Vec<UnitRende
         .iter()
         .filter_map(|(u, d)| {
             let spec = match (mode, d.mode) {
+                // Nothing to change: no requests to write (render minimal). The
+                // effective prior may hold LimitRange defaults the object does
+                // not declare; writing them would be an unasked-for change.
+                (Mode::Enforce, Mode::Enforce) if !changes(u, d) => rightsizer_core::ResourceSpec::default(),
                 (Mode::Enforce, Mode::Enforce) => d.applied.clone(),
                 (Mode::Enforce, _) => return None,
                 _ => d.recommended.clone(),
@@ -135,4 +139,22 @@ pub fn decision_ids(object: &Value) -> (Option<String>, BTreeMap<String, String>
         }
     }
     (obj, per)
+}
+
+/// A decision id read from an object's annotations (user-settable) for an
+/// outcome of `key`: kept unless the log holds that decision for another
+/// workload. Another tenant's (or workload's) decision id copied onto an
+/// object must not join this outcome to that decision: the engine looks
+/// decisions up by id alone for attribution, saved-hours and breaker
+/// recovery (SPEC §2.3 S5, §8.2). An id the log does not know (not flushed
+/// yet, or made up) joins nothing and is kept.
+pub async fn verified_decision_id(engine: &rightsizer_engine::Engine, id: Option<ulid::Ulid>, key: &rightsizer_core::WorkloadKey) -> Option<ulid::Ulid> {
+    let id = id?;
+    match engine.store().decision(id).await {
+        Ok(Some(d)) if d.key != *key => {
+            tracing::warn!(decision = %id, decision_key = %d.key, outcome_key = %key, "decision id of another workload ignored for the join");
+            None
+        }
+        _ => Some(id),
+    }
 }

@@ -40,6 +40,18 @@ LOG2_MIB = ("log2", 1048576.0)
 _LGB_MISSING = {"None": "none", "Zero": "zero", "NaN": "nan"}
 
 
+def finite_threshold(t: float) -> float:
+    """A split threshold JSON can carry. sklearn writes ``+inf`` for a split that sends
+    every non-missing value left (NaN alone goes right); the largest finite double
+    keeps that for every finite ``x``. NaN thresholds are refused."""
+    t = float(t)
+    if math.isnan(t):
+        raise ExportError("NaN split threshold")
+    if math.isinf(t):
+        return math.copysign(1.7976931348623157e308, t)
+    return t
+
+
 class ExportError(ValueError):
     """The model cannot be represented in ``rightsizer-trees/1``."""
 
@@ -134,7 +146,7 @@ def _sklearn_trees(model: Any, n_features: int, where: str) -> tuple[float, list
                 raise ExportError(f"{where}: node {i} has a child before it")
             out.append({
                 "feature": int(n["feature_idx"]),
-                "threshold": float(n[thr]),
+                "threshold": finite_threshold(n[thr]),
                 "left": left,
                 "right": right,
                 "default_left": bool(n["missing_go_to_left"]),
@@ -195,7 +207,7 @@ def _lgb_flatten(tree: dict, where: str) -> list[dict]:
             raise ExportError(f"{where}: unknown missing_type {n.get('missing_type')!r}")
         node = {
             "feature": int(n["split_feature"]),
-            "threshold": float(n["threshold"]),
+            "threshold": finite_threshold(n["threshold"]),
             "left": -1,
             "right": -1,
             "default_left": bool(n.get("default_left", True)),
