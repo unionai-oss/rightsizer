@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rightsizer.fullname" . }}
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: {{- include "rightsizer.selector" . | nindent 6 }}
+      app.kubernetes.io/component: webhook
+  template:
+    metadata:
+      labels: {{- include "rightsizer.selector" . | nindent 8 }}
+        app.kubernetes.io/component: webhook
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{ end }}
+    spec:
+      serviceAccountName: {{ include "rightsizer.fullname" . }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      affinity:
+        {{- with .Values.affinity }}{{ toYaml . | nindent 8 }}{{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {{- include "rightsizer.selector" . | nindent 20 }}
+                    app.kubernetes.io/component: webhook
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: rsz
+          image: {{ include "rightsizer.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - webhook
+            - serve
+            - --http-listen=0.0.0.0:{{ .Values.webhook.metricsPort }}
+            - --scrape-interval={{ .Values.watcher.scrapeIntervalSeconds }}
+            # Each replica gets its share of quota headroom for increases not yet synced (kubernetes.md §3.4).
+            - --replicas={{ .Values.replicas }}
+            {{- if not .Values.watcher.enabled }}
+            - --no-watcher
+            {{- end }}
+            {{- if .Values.nodeAgent.enabled }}
+            - --node-agent-namespace={{ .Release.Namespace }}
+            - --node-agent-port={{ .Values.nodeAgent.port }}
+            - --node-agent-selector=app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=node-agent
+            - --node-agent-token-file=/etc/rightsizer/node-agent/token
+            {{- end }}
+          env:
+            - {name: RIGHTSIZER_CONFIG, value: /etc/rightsizer/config/rightsizer.toml}
+            - {name: RSZ_LOG, value: "info,kube=warn,hyper=warn"}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            {{- if or .Values.history.postgres.url .Values.history.postgres.existingSecret }}
+            - name: RIGHTSIZER__HISTORY__URI
+              valueFrom:
+                secretKeyRef: {name: {{ include "rightsizer.historySecret" . }}, key: url}
+            {{- end }}
+            {{- with .Values.history.env }}{{ toYaml . | nindent 12 }}{{ end }}
+          ports:
+            - {name: https, containerPort: {{ .Values.webhook.port }}}
+            - {name: metrics, containerPort: {{ .Values.webhook.metricsPort }}}
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/rightsizer/config, readOnly: true}
+            - {name: tls, mountPath: /etc/rightsizer/tls, readOnly: true}
+            - {name: keys, mountPath: /etc/rightsizer/keys, readOnly: true}
+            {{- if .Values.nodeAgent.enabled }}
+            - {name: node-agent-token, mountPath: /etc/rightsizer/node-agent, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap: {name: {{ include "rightsizer.fullname" . }}}
+        - name: tls
+          secret: {secretName: {{ include "rightsizer.tlsSecret" . }}}
+        - name: keys
+          secret: {secretName: {{ include "rightsizer.keySecret" . }}}
+        {{- if .Values.nodeAgent.enabled }}
+        - name: node-agent-token
+          secret: {secretName: {{ include "rightsizer.nodeAgentTokenSecret" . }}, items: [{key: token, path: token}]}
+        {{- end }}

@@ -1,0 +1,49 @@
+[package]
+name = "rightsizer-engine"
+description = "Orchestration for rightsizer: config, context building, estimator chain, memo, single-flight, budgets, mode/breaker resolution, decision logging, outcome ingestion."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["object-store", "sqlite"]
+object-store = ["rightsizer-history/object-store"]
+sqlite = ["rightsizer-history/sqlite"]
+postgres = ["rightsizer-history/postgres"]
+remote = ["rightsizer-estimators/remote"]
+s3 = ["rightsizer-history/s3", "rightsizer-features/s3"]
+gcs = ["rightsizer-history/gcs", "rightsizer-features/gcs"]
+azure = ["rightsizer-history/azure", "rightsizer-features/azure"]
+http = ["rightsizer-features/http"]
+
+[dependencies]
+rightsizer-core.workspace = true
+rightsizer-features.workspace = true
+rightsizer-estimators.workspace = true
+rightsizer-history.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+toml.workspace = true
+humantime-serde.workspace = true
+tracing.workspace = true
+prometheus.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+criterion.workspace = true
+
+[[bench]]
+name = "engine"
+harness = false

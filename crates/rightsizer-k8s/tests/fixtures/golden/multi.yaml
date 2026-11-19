@@ -1,0 +1,43 @@
+# Bundle applied by CI.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: train-config
+  namespace: ml
+data:
+  config.yaml: |
+    lr: 0.001
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-small
+  namespace: ml
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: train
+          image: ghcr.io/acme/train:1.0
+          resources:
+            requests:
+              cpu: 2
+              memory: 4Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-large
+  namespace: ml
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: train
+          image: ghcr.io/acme/train:1.0
+          resources:
+            requests:
+              cpu: 12
+              memory: 48Gi

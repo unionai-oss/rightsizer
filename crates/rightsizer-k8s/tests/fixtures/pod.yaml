@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  generateName: notebook-export-
+  namespace: ml
+  labels:
+    app: notebook-export
+spec:
+  initContainers:
+    - name: fetch
+      image: busybox:1.36
+      command: ["sh", "-c", "wget -O /work/model.bin http://models/model.bin"]
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}
+    - name: proxy
+      image: envoyproxy/envoy:v1.31.0
+      restartPolicy: Always
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {memory: 256Mi}
+  containers:
+    - name: export
+      image: ghcr.io/acme/export:2.0
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
+        limits:
+          cpu: "2"
+          memory: 8Gi

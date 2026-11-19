@@ -1,0 +1,7 @@
+Cluster|Account|User|Partition|GrpTRES|MaxTRES|MaxTRESPerNode|QOS|Def QOS
+rsz-it|root||||||normal|
+rsz-it|root|root|||||normal|
+rsz-it|mlteam||||||normal|
+rsz-it|mlteam|alice||cpu=4,mem=4G|cpu=2,gres/gpu=2,mem=2000M||normal|
+rsz-it|vision||||||normal|
+rsz-it|vision|alice|||||normal|

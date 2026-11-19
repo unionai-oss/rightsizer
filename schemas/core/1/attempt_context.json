@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AttemptContext",
+  "description": "The current attempt, as an orchestrator publishes it (SPEC §7.2).",
+  "type": "object",
+  "properties": {
+    "attempt": {
+      "description": "1-based.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "invocation_id": {
+      "description": "Stable across attempts of one task instance.",
+      "type": "string"
+    },
+    "max_attempts": {
+      "description": "`None`: unknown → no ladder.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "v": {
+      "description": "Wire version (1).",
+      "type": "integer",
+      "format": "uint16",
+      "default": 1,
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "invocation_id",
+    "attempt"
+  ]
+}

@@ -1,0 +1,1 @@
+{"native": {"kind": "object", "value": {"Job": {"ID": "train", "Namespace": "ml", "TaskGroups": [{"Name": "trainer", "Tasks": [{"Name": "main", "Resources": {"CPU": 2000, "MemoryMB": 8192}}]}]}}}, "patch": {"kind": "text_edits", "edits": [{"start": 0, "end": 1, "replacement": "x"}]}}

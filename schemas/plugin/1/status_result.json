@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatusResult",
+  "description": "`status` result.",
+  "type": "object",
+  "properties": {
+    "caller": {
+      "description": "Extension: the caller as the daemon sees it (uid, tenants)."
+    },
+    "decide_latency_ms": {
+      "description": "Extension: `decide` latency over the last requests, ms (p50, p99, max, count).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LatencySummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fleet_breaker": {
+      "description": "Fleet breaker.",
+      "$ref": "#/$defs/BreakerState"
+    },
+    "kinds": {
+      "description": "Extension: adapters served (built-in and plugins).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mode_ceiling": {
+      "description": "Fleet `mode_ceiling`, if readable.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Mode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "plugins": {
+      "description": "Loaded plugins by kind.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "protocol": {
+      "description": "Protocol.",
+      "type": "string"
+    },
+    "requests": {
+      "description": "Extension: requests served since start.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
+    },
+    "store_reachable": {
+      "description": "Store reachable.",
+      "type": "boolean"
+    },
+    "version": {
+      "description": "Daemon version.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol",
+    "version",
+    "fleet_breaker",
+    "store_reachable"
+  ],
+  "$defs": {
+    "BreakerState": {
+      "description": "A breaker's state.",
+      "oneOf": [
+        {
+          "description": "Not tripped.",
+          "type": "string",
+          "const": "closed"
+        },
+        {
+          "description": "Tripped: enforce demotes to recommend.",
+          "type": "string",
+          "const": "open"
+        },
+        {
+          "description": "Per-workload only: recovered in shadow; the next enforced decision is a trial.",
+          "type": "string",
+          "const": "half_open"
+        }
+      ]
+    },
+    "LatencySummary": {
+      "description": "Latency percentiles.",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Samples.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max": {
+          "description": "Max, ms.",
+          "type": "number",
+          "format": "double"
+        },
+        "p50": {
+          "description": "Median, ms.",
+          "type": "number",
+          "format": "double"
+        },
+        "p99": {
+          "description": "99th percentile, ms.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "count",
+        "p50",
+        "p99",
+        "max"
+      ]
+    },
+    "Mode": {
+      "description": "Mode, ordered `off < observe < recommend < enforce` (SPEC §4).",
+      "oneOf": [
+        {
+          "description": "Do nothing.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Record outcomes only.",
+          "type": "string",
+          "const": "observe"
+        },
+        {
+          "description": "Decide and record, change nothing.",
+          "type": "string",
+          "const": "recommend"
+        },
+        {
+          "description": "Apply under the safety contract.",
+          "type": "string",
+          "const": "enforce"
+        }
+      ]
+    }
+  }
+}

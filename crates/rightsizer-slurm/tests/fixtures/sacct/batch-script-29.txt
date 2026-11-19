@@ -1,0 +1,9 @@
+Batch Script for 29
+--------------------------------------------------------------------------------
+#!/bin/bash
+#SBATCH --job-name=multistep
+#SBATCH --ntasks=2
+#SBATCH --mem=400M
+#RIGHTSIZER key=train-small
+srun python3 -c "b=bytearray(60*2**20); import time; time.sleep(12)"
+python3 -c "b=bytearray(30*2**20); import time; time.sleep(6)"

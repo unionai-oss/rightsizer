@@ -1,0 +1,32 @@
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: mpi-bench
+  namespace: ml
+spec:
+  minAvailable: 3
+  schedulerName: volcano
+  maxRetry: 2
+  tasks:
+    - name: launcher
+      replicas: 1
+      template:
+        spec:
+          containers:
+            - name: mpi
+              image: ghcr.io/acme/mpi-bench:1.0
+              resources:
+                requests: {cpu: "1", memory: 2Gi}
+    - name: worker
+      replicas: 2
+      template:
+        spec:
+          containers:
+            - name: mpi
+              image: ghcr.io/acme/mpi-bench:1.0
+              resources:
+                requests: {cpu: "16", memory: 64Gi}
+            - name: metrics
+              image: prom/node-exporter:v1.8.0
+              resources:
+                requests: {cpu: 50m, memory: 32Mi}

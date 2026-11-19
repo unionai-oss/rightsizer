@@ -17,6 +17,7 @@ Prior art: [`model-factory-resource-tuner`](https://github.com/unionai-oss/model
 | [launchers.md](launchers.md) | SkyPilot and dstack |
 | [orchestrators.md](orchestrators.md) | Metaflow, Airflow; notes on Kubeflow Pipelines, Dagster, Prefect, Argo |
 | [managed-ml.md](managed-ml.md) | Vertex AI, Azure ML, Databricks, Cloud Batch/Run, Snowflake |
+| [models.md](models.md) | serving model-factory models (Hugging Face) through vLLM, SGLang or transformers behind the Estimator Protocol |
 | [REVIEW-LOG.md](REVIEW-LOG.md) | design and review rounds |
 
 Section references like "kubernetes.md §3.4" point into the sibling
@@ -140,7 +141,13 @@ plugins.md §5.
     Peaks with `resolution_s ≥ 10` (dstack every 10 s; CloudWatch, Cloud
     Monitoring, Azure Monitor and system tables every 60 s) are **coarse**:
     headroom 1.5, or 1.75 with another digest, and S3(b) needs
-    `2 × min_history` of them.
+    `2 × min_history` of them. **Vetoes:** among the key's newest K runs
+    (K = `history_limit`), no measured success may need more than the
+    proposal (its peak × `scale` × headroom), and no OOM-class run may prove
+    more (its `AtLeast` bound — the peak, else the limit it was killed at;
+    for GPU memory, the device's memory — × `scale`). Vetoes ignore trust.
+    GPU-memory reductions (a smaller device) follow the same rule on
+    `gpu_memory_peak`.
 
   Where memory is **not enforced** by the platform (Ray's logical resources;
   Slurm without `ConstrainRAMSpace`; a Kubernetes container with a memory
@@ -648,7 +655,9 @@ GET  /v1/health           -> 200 | 503
     (kubernetes.md §3.2).
 - **Reference server.** `rightsizer.serve` wraps any Python callable
   `ctx -> Estimate` (or a batch callable) as a protocol server. A Flyte app
-  template serves the tuner's models (M4).
+  template serves the tuner's models. Serving the published model-factory models
+  through vLLM, SGLang or `transformers` is in [models.md](models.md) (pulled
+  forward from M4 to M3).
 
 ### 6.4 LLM estimators
 
@@ -952,10 +961,16 @@ Off by default. With `exploration = ε` (≤ 0.05), incompressible axes go one c
 {prefix}/v1/decisions/{tenant}/{date}/{ulid}.json
 {prefix}/v1/attempts/{tenant}/{key-hash}/{invocation-hash}.json   attempt records and ladder leases (§7.2); expire after 7 d
 {prefix}/v1/latest/{tenant}/{key-hash}.json             pointer: last K records inline + watermark ULID
-{prefix}/v1/breakers/{scope}.json
+{prefix}/v1/breakers/{scope}.json                       resets (operator-written)
+{prefix}/v1/breakers-trips/{scope}/{ulid}.json           trips (client-creatable)
 {prefix}/v1/control/mode.json
 {prefix}/v1/snapshots/{tenant}/{date}.parquet           compacted, for analytics and export
 ```
+
+`{tenant}` in these paths is the workload key's `{platform}://{tenant}` with `://`
+replaced by `/` (for example `flyte/acme/ml/development`), so platforms never
+share a prefix; `{key-hash}` is the first 32 hex characters of the SHA-256 of
+the full key string.
 
 - **Reads.** GET the `latest` pointer, then LIST only shards newer than its
   watermark (`start-after`). That is one GET plus one small LIST per key, and
@@ -979,11 +994,18 @@ Off by default. With `exploration = ε` (≤ 0.05), incompressible axes go one c
 
 **Control objects are operator-written.** `control/` and breaker *resets*
 require operator credentials (a separate prefix policy or postgres role).
-Clients can only create **trip** objects (`breakers/{scope}/trips/{ulid}.json`,
+Clients can only create **trip** objects (`breakers-trips/{scope}/{ulid}.json`,
 `If-None-Match: *`); a breaker is open while any trip is newer than its latest
 operator-written reset. A tenant with shared credentials can therefore trip a
 breaker (which only makes rightsizer more conservative) but never reset one or
-raise `mode_ceiling`.
+raise `mode_ceiling`. The IAM policy is by top-level prefix: clients get
+`PutObject` (create-only) on `{prefix}/v1/breakers-trips/*` and read on
+`{prefix}/v1/breakers/*` and `{prefix}/v1/control/*`; only operators write
+under `breakers/` and `control/`. Trips have their own prefix so no
+tenant-chosen path segment can make a reset path match a client grant.
+`{scope}` is injective (tenants and suffixes have no empty, `.` or `..`
+segments; free-form segments are escaped). Readers also read the N-1 trip
+layout `breakers/{scope}/trips/{ulid}.json`.
 
 **Enforce needs a durable, shared store.** A store that is local to an ephemeral
 or per-host location demotes enforce to recommend, with a warning.
@@ -995,6 +1017,13 @@ or per-host location demotes enforce to recommend, with a warning.
 | `Verified` | written by a trusted component: the watcher, an importer reading platform accounting (`sacct`, Prometheus, `flyte.remote`), **when the record's tenant comes from the platform's authenticated identity** (namespace, `submit_uid`, CloudTrail `userIdentity`, Modal workspace) | everything |
 | `Authenticated` | written with credentials whose write access is limited to that tenant's prefix (per-tenant IAM on the object-store prefix, or a per-tenant postgres role) | everything |
 | `Unverified` | anything else: self-reports with shared credentials | stored and shown; excluded from floors, trust-region anchors and S3(b), unless the operator sets `history.allow_unverified_for_reductions = true` |
+
+Trust is capped twice. At ingestion, `outcome` stores at most
+`history.max_ingest_trust` (`authenticated` for client engines; `verified`
+for operators and trusted importers: the watcher, `sacct`, `flyte.remote`).
+At read time, a record counts at most at what its `source` can carry:
+`self_report`, `cgroup` and `ray_state` are written with the workload's own
+credentials and count as `authenticated` at most, whatever they claim.
 
 An importer that can attribute a record to a tenant only through
 caller-chosen data (job names, tags, an account-wide default) writes it as
@@ -1396,7 +1425,7 @@ tuner's scorer replays rightsizer's decisions.
 | **A** adoption (after M0, in parallel with M1) | the importer and catalog half of `rightsizer-cloud` (AWS and Modal catalogs, prices, importers); `rsz audit` for Kubernetes (Prometheus), Slurm (`sacct`), AWS (SageMaker, Batch, CloudWatch) and Modal; HTML report; `rsz suggest` for Kubernetes YAML and Flyte/Ray literals (other key rules arrive with their milestones); `rsz mcp` | a 30-day audit of a real AWS account finishes in < 10 min with read-only credentials; counterfactual decisions equal `shadow`'s on the same history |
 | **M1** Flyte | `rightsizer-runtime`, `rightsizer` wheels; Flyte task, action, run and environment levels; child-side measurement; `flyte.remote` backfill; escalation; deploy-time sizing and `reconcile`; the request-only-memory integration test (§16, open question 5) | demo workflows in `enforce` with 0 rightsizer-caused failures over 1,000 invocations; 10k-way `flyte.map` overhead < 2 ms per call once memoized |
 | **M2** K8s | CLI, webhook (Pods, Jobs, JobSets, PyTorchJob), watcher, Prometheus importer, postgres store, Helm chart, alerts, `k8s restore` | 2 weeks shadow on a real cluster with join ratio ≥ 0.95; webhook p99 < 100 ms |
-| **M3** plugins | plugin protocol and daemon; Slurm (wrapper, `cli_filter`, `job_submit` token verification); Ray (functions, actors, Ray Data, Jobs); KubeRay, TrainJob, Volcano; node agent; Arrow/HF readers | Slurm test cluster with HMAC verification and rotation; Ray 10k-task fan-out < 5 ms per task |
+| **M3** plugins | plugin protocol and daemon; Slurm (wrapper, `cli_filter`, `job_submit` token verification); Ray (functions, actors, Ray Data, Jobs); KubeRay, TrainJob, Volcano; node agent; Arrow/HF readers; model-factory models served through vLLM/SGLang/transformers (models.md) | Slurm test cluster with HMAC verification and rotation; Ray 10k-task fan-out < 5 ms per task |
 | **M4** models | Estimator Protocol reference server; tuner models served; pool and gate with novelty/1; GPU type changes (opt-in); Slurm decision table | the gate beats `rules-sized` on the tuner's unseen split under rightsizer's decoder |
 | **M5** managed clouds I | AWS botocore hook, SageMaker (training, processing, transform, Pipelines deploy-time) and Batch (EC2, Fargate, EKS) adapters, caller ladders; `rightsizer_aws.pth` start-up hook, `rsz aws reconcile`; Modal proxy and `measure` | SDK v2, SDK v3 and boto3 fixtures sized identically; 0 rightsizer-caused failures over 500 enforced SageMaker and Batch jobs; a 10k-input Modal `.map` stays within the variant budget |
 | **M6** launchers and orchestrators | `AttemptContext` and escalate-on-retry; SkyPilot policy; dstack plugin and importer; `metaflow-rightsizer` and `rsz metaflow reconcile`; Airflow hooks and listener | fault injection (raise, hang, missing `_core`) leaves every SkyPilot, dstack and Airflow submission unchanged; an orchestrator retry after a reduced attempt escalates |
@@ -1411,10 +1440,16 @@ tuner's scorer replays rightsizer's decisions.
 3. Exploration in production: is the learning value worth the waste?
 4. Per-site calibration of `rules-sized` constants from local history, and how to
    version it.
-5. How the Flyte v2 backend treats a request-only memory spec (whether it sets
-   limit = request) must be confirmed by an M1 integration test. Until then
-   Flyte uses `memory_enforced = (prior memory has a limit)`: tasks declaring
-   `memory=(req, lim)` get ladders (S3a); scalar-memory tasks get S3(b) only.
+5. ~~How the Flyte v2 backend treats a request-only memory spec~~ **Settled
+   (M1, Flyte v2 devbox, SDK 2.13.6):** the SDK serializes a scalar
+   `memory=` as a request only, and the backend sets limit = request on the
+   pod, so scalar memory **is** enforced (an over-use is OOM-killed, the
+   unit's own failure). Flyte therefore uses `memory_enforced = true` for
+   scalar and `(req, lim)` memory alike, and both get ladders (S3a). The
+   switch `[flyte] scalar_memory_enforced` (default `true`) is for
+   deployments whose platform defaults leave the limit unset (recheck Union
+   deployments); with `false`, scalar-memory tasks get S3(b) reductions only
+   (flyte.md §4.2).
 6. **Modal ladder.** A caller ladder needs a per-input OOM status on the
    client; today only the CLI-side `FunctionCallFetch` exposes it
    (modal.md §6).

@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kq
+  labels:
+    kueue.x-k8s.io/queue-name: lq
+spec:
+  suspend: true
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: main
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep 20"]
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            limits: {memory: 2Gi}

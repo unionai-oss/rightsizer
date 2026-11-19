@@ -1,0 +1,12 @@
+rightsizer {{ .Chart.AppVersion }} is installed in {{ .Release.Namespace }} ({{ .Values.replicas }} webhook replicas{{ if .Values.watcher.enabled }}, leader-elected watcher{{ end }}{{ if .Values.nodeAgent.enabled }}, node agent{{ end }}).
+
+Opt a namespace in (default mode: recommend, annotation-only):
+  kubectl label ns ml rightsizer.io/enabled=true
+  kubectl label ns ml rightsizer.io/mode=enforce --overwrite   # when `rsz shadow` says ready
+
+Kill switch:   rsz control mode-ceiling recommend
+Revert:        rsz k8s restore -f job.yaml   |   rsz k8s restore cronjob/NAME -n ml
+kubectl plugin: ln -s "$(command -v rsz)" /usr/local/bin/kubectl-rsz   →  kubectl rsz shadow -n ml
+
+GitOps: add ignoreDifferences on /spec/template/spec/containers/*/resources (see README), or keep
+the webhook in recommend for those namespaces and run `rsz apply` in CI.

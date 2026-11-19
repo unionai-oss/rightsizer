@@ -1,0 +1,36 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: rc
+spec:
+  headGroupSpec:
+    rayStartParams:
+      num-cpus: "0"
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: busybox:latest
+            imagePullPolicy: IfNotPresent
+            command: ["sh", "-c", "sleep 3600"]
+            resources:
+              requests: {cpu: "1", memory: 2Gi}
+              limits: {cpu: "1", memory: 2Gi}
+  workerGroupSpecs:
+    - groupName: cpu
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      rayStartParams:
+        num-cpus: "2"
+        memory: "2147483648"
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: busybox:latest
+              imagePullPolicy: IfNotPresent
+              command: ["sh", "-c", "sleep 3600"]
+              resources:
+                requests: {cpu: "2", memory: 2Gi}
+                limits: {cpu: "2", memory: 2Gi}

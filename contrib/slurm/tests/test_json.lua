@@ -1,0 +1,21 @@
+local H = require("helper")
+local json = require("json")
+H.eq(json.encode({ a = 1, b = { true, false, json.null }, c = "x\"\n\1" }), '{"a":1,"b":[true,false,null],"c":"x\\"\\n\\u0001"}', "encode")
+H.eq(json.encode({}), "{}", "empty object")
+H.eq(json.encode(json.as_array({})), "[]", "empty array")
+H.eq(json.encode(1.5), "1.5", "float")
+H.eq(json.encode(1000.0), "1000", "integral float")
+local v = json.decode(' {"jsonrpc":"2.0","id":1,"result":{"mode":"enforce","patch":{"kind":"options","options":{"mem":"24G"}},"decisions":[],"n":-1.25e2,"s":"\\u00e9\\ud83d\\ude00\\/"}} ')
+H.eq(v.result.mode, "enforce", "decode nested")
+H.eq(v.result.patch.options.mem, "24G", "decode deep")
+H.eq(#v.result.decisions, 0, "empty array decodes")
+H.eq(json.encode(v.result.decisions), "[]", "empty decoded array re-encodes as []")
+H.eq(v.result.n, -125, "number")
+H.eq(v.result.s, "\195\169\240\159\152\128/", "unicode + surrogates")
+H.eq(json.decode("null"), json.null, "null")
+for _, bad in ipairs({ "", "{", "[1,]", '{"a"}', '"\\ud83d"', "tru", "1 2", '"a\nb"', "{'a':1}" }) do
+  H.ok(not pcall(json.decode, bad), "rejects " .. bad)
+end
+local rt = { kind = "cli_filter", options = { mem = "1G", argv = json.as_array({ "/data/t.sh", "x y" }) }, offset = 0 }
+H.eq(json.encode(json.decode(json.encode(rt))), json.encode(rt), "round trip")
+H.done("json")

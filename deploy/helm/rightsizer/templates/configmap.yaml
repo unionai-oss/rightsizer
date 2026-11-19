@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rightsizer.fullname" . }}
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+data:
+  rightsizer.toml: |
+    [history]
+    {{- if .Values.history.uri }}
+    uri = {{ .Values.history.uri | quote }}
+    {{- end }}
+    cluster = {{ required "cluster is required (the tenant prefix k8s://{cluster}/{namespace})" .Values.cluster | quote }}
+
+    [k8s]
+    cluster = {{ .Values.cluster | quote }}
+    signing_key_file = "/etc/rightsizer/keys/signing.key"
+    webhook_listen = "0.0.0.0:{{ .Values.webhook.port }}"
+    tls_cert = "/etc/rightsizer/tls/tls.crt"
+    tls_key = "/etc/rightsizer/tls/tls.key"
+    webhook_deadline_ms = {{ .Values.webhook.deadlineMs }}
+    exclude_namespaces = {{ append .Values.webhook.excludeNamespaces .Release.Namespace | uniq | toJson }}
+    lease_namespace = {{ .Release.Namespace | quote }}
+    {{- if .Values.watcher.prometheusUrl }}
+    prometheus_url = {{ .Values.watcher.prometheusUrl | quote }}
+    {{- end }}
+
+    {{- .Values.config | nindent 4 }}

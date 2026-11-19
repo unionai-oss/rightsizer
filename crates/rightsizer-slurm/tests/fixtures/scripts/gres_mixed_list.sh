@@ -1,0 +1,6 @@
+#!/bin/bash
+#SBATCH --gres=gpu:v100:2,shard:4
+#SBATCH --mem=48000
+#SBATCH -n 1
+#SBATCH --account=vision
+python train.py

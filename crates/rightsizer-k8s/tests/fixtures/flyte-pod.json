@@ -1,0 +1,35 @@
+{
+  "apiVersion": "admission.k8s.io/v1",
+  "kind": "AdmissionReview",
+  "request": {
+    "uid": "0d5b1b2c-6a7e-4f59-9a1e-7d3c2b1a0f9e",
+    "kind": {"group": "", "version": "v1", "kind": "Pod"},
+    "operation": "CREATE",
+    "namespace": "flytesnacks-development",
+    "userInfo": {"username": "system:serviceaccount:flyte:flyte-propeller"},
+    "dryRun": false,
+    "object": {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "a7f8k2l9m3n4-n0-0",
+        "namespace": "flytesnacks-development",
+        "labels": {
+          "project": "flytesnacks",
+          "domain": "development",
+          "task-name": "workflows.example.train",
+          "execution-id": "a7f8k2l9m3n4",
+          "organization": "acme"
+        },
+        "ownerReferences": [{"apiVersion": "flyte.lyft.com/v1alpha1", "kind": "flyteworkflow", "name": "a7f8k2l9m3n4", "uid": "4a1b"}]
+      },
+      "spec": {
+        "containers": [
+          {"name": "a7f8k2l9m3n4-n0-0", "image": "ghcr.io/flyteorg/flytekit:py3.12-1.15.0",
+           "args": ["pyflyte-execute", "--task-module", "workflows.example", "--task-name", "train"],
+           "resources": {"requests": {"cpu": "2", "memory": "8Gi"}, "limits": {"cpu": "2", "memory": "8Gi"}}}
+        ]
+      }
+    }
+  }
+}

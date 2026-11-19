@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Reset",
+  "description": "An operator-written reset.",
+  "type": "object",
+  "properties": {
+    "at": {
+      "description": "When.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "by": {
+      "description": "Who.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope": {
+      "description": "Scope.",
+      "$ref": "#/$defs/BreakerScope"
+    },
+    "v": {
+      "description": "Wire version (1).",
+      "type": "integer",
+      "format": "uint16",
+      "default": 1,
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "scope",
+    "at"
+  ],
+  "$defs": {
+    "BreakerScope": {
+      "description": "What a breaker covers (SPEC §2.3 S5). JSON: `{\"kind\": \"workload\", \"key\": ...}`.",
+      "oneOf": [
+        {
+          "description": "One workload key.",
+          "type": "object",
+          "properties": {
+            "key": {
+              "description": "The key.",
+              "$ref": "#/$defs/WorkloadKey"
+            },
+            "kind": {
+              "type": "string",
+              "const": "workload"
+            }
+          },
+          "required": [
+            "kind",
+            "key"
+          ]
+        },
+        {
+          "description": "One input-size bucket of a workload key.",
+          "type": "object",
+          "properties": {
+            "bucket": {
+              "description": "The bucket (e.g. the memory-ladder cell of the input bytes).",
+              "type": "string"
+            },
+            "key": {
+              "description": "The key.",
+              "$ref": "#/$defs/WorkloadKey"
+            },
+            "kind": {
+              "type": "string",
+              "const": "input_bucket"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "bucket"
+          ]
+        },
+        {
+          "description": "Every decision from one estimator version.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "description": "Estimator id.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "estimator_version"
+            },
+            "version": {
+              "description": "Version.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "version"
+          ]
+        },
+        {
+          "description": "The whole store prefix.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fleet"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "WorkloadKey": {
+      "description": "Workload key `{platform}://{tenant}/{suffix}` (or `{platform}://{tenant}//{suffix}`).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}://.+/.+$"
+    }
+  }
+}

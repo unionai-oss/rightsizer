@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Control",
+  "description": "The fleet control object (`{prefix}/v1/control/mode.json`).",
+  "type": "object",
+  "properties": {
+    "by": {
+      "description": "Who wrote it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode_ceiling": {
+      "description": "Caps every policy at every level (the fleet kill switch).",
+      "$ref": "#/$defs/Mode"
+    },
+    "updated_at": {
+      "description": "When written.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "v": {
+      "description": "Wire version (1).",
+      "type": "integer",
+      "format": "uint16",
+      "default": 1,
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "mode_ceiling",
+    "updated_at"
+  ],
+  "$defs": {
+    "Mode": {
+      "description": "Mode, ordered `off < observe < recommend < enforce` (SPEC §4).",
+      "oneOf": [
+        {
+          "description": "Do nothing.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Record outcomes only.",
+          "type": "string",
+          "const": "observe"
+        },
+        {
+          "description": "Decide and record, change nothing.",
+          "type": "string",
+          "const": "recommend"
+        },
+        {
+          "description": "Apply under the safety contract.",
+          "type": "string",
+          "const": "enforce"
+        }
+      ]
+    }
+  }
+}

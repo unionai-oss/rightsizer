@@ -1,0 +1,125 @@
+{{- if .Values.nodeAgent.enabled }}
+# Node agent (kubernetes.md §6.2): cgroup v2 memory.peak / cpu.stat of
+# tracked containers every second, served on :{{ .Values.nodeAgent.port }} for the watcher (pull).
+# /v1 requires the bearer token in the node-agent token Secret (401 otherwise).
+{{- if not .Values.nodeAgent.token.existingSecret }}
+{{- $tname := include "rightsizer.nodeAgentTokenSecret" . }}
+{{- $old := lookup "v1" "Secret" .Release.Namespace $tname }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $tname }}
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+type: Opaque
+data:
+  {{- if and $old $old.data (index $old.data "token") }}
+  token: {{ index $old.data "token" }}
+  {{- else }}
+  token: {{ randAlphaNum 48 | b64enc }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, watch]   # pods on this node (fieldSelector spec.nodeName)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ include "rightsizer.fullname" . }}-node-agent}
+subjects:
+  - {kind: ServiceAccount, name: {{ include "rightsizer.fullname" . }}-node-agent, namespace: {{ .Release.Namespace }}}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
+spec:
+  selector:
+    matchLabels: {{- include "rightsizer.selector" . | nindent 6 }}
+      app.kubernetes.io/component: node-agent
+  template:
+    metadata:
+      labels: {{- include "rightsizer.selector" . | nindent 8 }}
+        app.kubernetes.io/component: node-agent
+    spec:
+      serviceAccountName: {{ include "rightsizer.fullname" . }}-node-agent
+      hostPID: false
+      {{- with .Values.nodeAgent.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeAgent.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeAgent.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: node-agent
+          image: {{ include "rightsizer.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [node-agent, --listen=0.0.0.0:{{ .Values.nodeAgent.port }}, --cgroup-root=/host/sys/fs/cgroup, --interval-ms={{ .Values.nodeAgent.intervalMs }}, --token-file=/etc/rightsizer/node-agent/token]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - {name: RSZ_LOG, value: "info,kube=warn"}
+          ports:
+            - {name: http, containerPort: {{ .Values.nodeAgent.port }}}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          resources: {{- toYaml .Values.nodeAgent.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: cgroup, mountPath: /host/sys/fs/cgroup, readOnly: true}
+            - {name: node-agent-token, mountPath: /etc/rightsizer/node-agent, readOnly: true}
+      volumes:
+        - name: cgroup
+          hostPath: {path: /sys/fs/cgroup, type: Directory}
+        - name: node-agent-token
+          secret: {secretName: {{ include "rightsizer.nodeAgentTokenSecret" . }}, items: [{key: token, path: token}]}
+{{- if .Values.nodeAgent.networkPolicy.enabled }}
+---
+# Only this release's webhook/watcher pods reach the agents (pod network only).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-node-agent
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "rightsizer.selector" . | nindent 6 }}
+      app.kubernetes.io/component: node-agent
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: {{ .Values.nodeAgent.port }}}
+      from:
+        - podSelector:
+            matchLabels: {{- include "rightsizer.selector" . | nindent 14 }}
+              app.kubernetes.io/component: webhook
+        {{- with .Values.nodeAgent.networkPolicy.extraFrom }}{{ toYaml . | nindent 8 }}{{ end }}
+{{- end }}
+{{- end }}

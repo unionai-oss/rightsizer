@@ -1,0 +1,14 @@
+#!/bin/bash
+#SBATCH -J llama-ft
+#SBATCH -p gpu
+#SBATCH -N 4
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=h100:8
+#SBATCH -c 12
+#SBATCH --mem=0
+#SBATCH -t 2-00:00:00
+#SBATCH --exclusive
+
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=29500
+srun torchrun --nnodes=$SLURM_NNODES --nproc_per_node=8 finetune.py

@@ -1,0 +1,407 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Constraints",
+  "description": "Constraints defining the feasible set (SPEC §7.4).",
+  "type": "object",
+  "properties": {
+    "allowed_shapes": {
+      "description": "Allowed GPU shapes when GPU type changes are opted in.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/GpuShape"
+      }
+    },
+    "ceiling": {
+      "description": "User ceiling (the core intersects it with the largest shape and quota).",
+      "$ref": "#/$defs/Requests",
+      "default": {}
+    },
+    "ceiling_reason": {
+      "description": "Why `ceiling` is set, reported as the clamp reason (advisory and\n`rightsizer_clamped_total{reason}`) instead of `\"user\"` when the user\nceiling binds: e.g. `\"no_platform_state\"` when an adapter without\nnode shapes set it to the definition ceiling or the prior (S4).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "floor": {
+      "description": "Platform minimums (the core adds the size-scaled floor).",
+      "$ref": "#/$defs/Requests",
+      "default": {}
+    },
+    "held": {
+      "description": "Platform and adapter holds (the core adds S2/S3 holds itself).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Hold"
+      }
+    },
+    "pinned": {
+      "description": "User pins and explicit call-site resources: stay at the prior's value.",
+      "$ref": "#/$defs/AxisSet",
+      "default": []
+    }
+  },
+  "$defs": {
+    "AcceleratorId": {
+      "description": "A canonical accelerator id with per-device memory and family (SPEC §5.1.1).\nJSON: the canonical string, e.g. `\"A100-80G\"`; parsing is case-insensitive.",
+      "oneOf": [
+        {
+          "description": "NVIDIA T4, 16 GB.",
+          "type": "string",
+          "const": "T4-16G"
+        },
+        {
+          "description": "NVIDIA L4, 24 GB.",
+          "type": "string",
+          "const": "L4-24G"
+        },
+        {
+          "description": "NVIDIA A10G (AWS), 24 GB.",
+          "type": "string",
+          "const": "A10G-24G"
+        },
+        {
+          "description": "NVIDIA A10, 24 GB.",
+          "type": "string",
+          "const": "A10-24G"
+        },
+        {
+          "description": "NVIDIA L40S, 48 GB.",
+          "type": "string",
+          "const": "L40S-48G"
+        },
+        {
+          "description": "NVIDIA A100, 40 GB.",
+          "type": "string",
+          "const": "A100-40G"
+        },
+        {
+          "description": "NVIDIA A100, 80 GB.",
+          "type": "string",
+          "const": "A100-80G"
+        },
+        {
+          "description": "NVIDIA H100, 80 GB.",
+          "type": "string",
+          "const": "H100-80G"
+        },
+        {
+          "description": "NVIDIA H200, 141 GB.",
+          "type": "string",
+          "const": "H200-141G"
+        },
+        {
+          "description": "NVIDIA B200, 180 GB.",
+          "type": "string",
+          "const": "B200-180G"
+        },
+        {
+          "description": "AMD MI300X, 192 GB.",
+          "type": "string",
+          "const": "MI300X-192G"
+        },
+        {
+          "description": "Google TPU v5e (per chip).",
+          "type": "string",
+          "const": "TPU-V5E"
+        },
+        {
+          "description": "Google TPU v5p (per chip).",
+          "type": "string",
+          "const": "TPU-V5P"
+        },
+        {
+          "description": "Google TPU v6e / Trillium (per chip).",
+          "type": "string",
+          "const": "TPU-V6E"
+        },
+        {
+          "description": "AWS Trainium 1 (per chip).",
+          "type": "string",
+          "const": "TRN1"
+        },
+        {
+          "description": "AWS Trainium 2 (per chip).",
+          "type": "string",
+          "const": "TRN2"
+        },
+        {
+          "description": "AWS Inferentia 2 (per chip).",
+          "type": "string",
+          "const": "INF2"
+        },
+        {
+          "description": "A GPU of unknown type. Its type is never changed (SPEC §5.1.1).",
+          "type": "string",
+          "const": "unknown-gpu"
+        }
+      ]
+    },
+    "Axis": {
+      "description": "A resource axis (SPEC §5.1).",
+      "oneOf": [
+        {
+          "description": "Host memory (incompressible).",
+          "type": "string",
+          "const": "memory"
+        },
+        {
+          "description": "Host CPU (compressible).",
+          "type": "string",
+          "const": "cpu"
+        },
+        {
+          "description": "Number of accelerators.",
+          "type": "string",
+          "const": "gpu_count"
+        },
+        {
+          "description": "Accelerator type.",
+          "type": "string",
+          "const": "gpu_type"
+        },
+        {
+          "description": "Ephemeral storage (no grid in v1: always held).",
+          "type": "string",
+          "const": "ephemeral_storage"
+        },
+        {
+          "description": "Shared memory (`/dev/shm`; no grid in v1: always held).",
+          "type": "string",
+          "const": "shm"
+        }
+      ]
+    },
+    "AxisSet": {
+      "description": "A set of axes; aliases `gpu` = {gpu_count, gpu_type}, `disk` = ephemeral_storage.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "memory",
+          "cpu",
+          "gpu_count",
+          "gpu_type",
+          "ephemeral_storage",
+          "shm",
+          "gpu",
+          "disk",
+          "mem"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "Bytes": {
+      "description": "A byte count. JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "GpuShape": {
+      "description": "An accelerator type × count (SPEC §5.1, §5.4).",
+      "type": "object",
+      "properties": {
+        "accel": {
+          "description": "Canonical accelerator id.",
+          "$ref": "#/$defs/AcceleratorId"
+        },
+        "count": {
+          "description": "Number of devices.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "accel",
+        "count"
+      ]
+    },
+    "Hold": {
+      "description": "One held axis (SPEC §5.6 `held: Vec<(Axis, HoldReason)>`; an object on\nthe wire so it can carry detail).",
+      "type": "object",
+      "properties": {
+        "axis": {
+          "description": "The axis.",
+          "$ref": "#/$defs/Axis"
+        },
+        "detail": {
+          "description": "Optional detail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why.",
+          "$ref": "#/$defs/HoldReason"
+        }
+      },
+      "required": [
+        "axis",
+        "reason"
+      ]
+    },
+    "HoldReason": {
+      "description": "Why an axis was held at the prior (SPEC §5.6, §7.4).",
+      "oneOf": [
+        {
+          "description": "The user pinned it.",
+          "type": "string",
+          "const": "pinned"
+        },
+        {
+          "description": "S2 forbids changing it (limits, QoS).",
+          "type": "string",
+          "const": "s2_limit"
+        },
+        {
+          "description": "An incompressible reduction S3 does not permit.",
+          "type": "string",
+          "const": "s3_not_met"
+        },
+        {
+          "description": "Memory is not enforced and S3(b) evidence is missing.",
+          "type": "string",
+          "const": "not_enforced"
+        },
+        {
+          "description": "A breaker is open (or unreadable) for reductions.",
+          "type": "string",
+          "const": "breaker"
+        },
+        {
+          "description": "The axis has no grid in v1 (ephemeral storage, shm).",
+          "type": "string",
+          "const": "no_grid"
+        },
+        {
+          "description": "GPU count is held for every unit in v1.",
+          "type": "string",
+          "const": "gpu_count_v1"
+        },
+        {
+          "description": "The unit is distributed: GPU count permanently held.",
+          "type": "string",
+          "const": "distributed"
+        },
+        {
+          "description": "GPU type changes are not allowed.",
+          "type": "string",
+          "const": "gpu_type"
+        },
+        {
+          "description": "The prior's GPU type is unknown and never changed.",
+          "type": "string",
+          "const": "unknown_gpu"
+        },
+        {
+          "description": "QoS class is held.",
+          "type": "string",
+          "const": "qos"
+        },
+        {
+          "description": "No prior on this axis and `enforce_without_prior` is off.",
+          "type": "string",
+          "const": "no_prior"
+        },
+        {
+          "description": "The estimate has nothing for this axis.",
+          "type": "string",
+          "const": "no_estimate"
+        },
+        {
+          "description": "The surface cannot get failures classified (S5): reductions recommend-only.",
+          "type": "string",
+          "const": "unclassifiable"
+        },
+        {
+          "description": "The store is unreachable past its TTL.",
+          "type": "string",
+          "const": "store_unreachable"
+        },
+        {
+          "description": "The request model's snap function is not known exactly (SPEC §5.8).",
+          "type": "string",
+          "const": "inexact_snap"
+        },
+        {
+          "description": "An adapter- or platform-specific hold (see detail).",
+          "type": "string",
+          "const": "platform"
+        }
+      ]
+    },
+    "MilliCpu": {
+      "description": "CPU in millicores (1000 = one core). JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "Requests": {
+      "description": "Resource requests of one unit (SPEC §5.1). `None` = not set.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral storage.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu": {
+          "description": "Accelerators.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shm": {
+          "description": "Shared memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

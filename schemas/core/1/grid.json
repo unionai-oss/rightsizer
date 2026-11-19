@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Grid",
+  "description": "A versioned grid (SPEC §5.3).",
+  "type": "object",
+  "properties": {
+    "cpu": {
+      "description": "CPU cells, ascending.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MilliCpu"
+      }
+    },
+    "gpu_memory": {
+      "description": "Total GPU memory cells, ascending; index 0 means \"no GPU\".",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Bytes"
+      }
+    },
+    "id": {
+      "description": "Grid id, e.g. `\"rs-grid-v1\"`.",
+      "type": "string"
+    },
+    "memory": {
+      "description": "Memory cells, ascending.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Bytes"
+      }
+    }
+  },
+  "required": [
+    "id",
+    "memory",
+    "cpu",
+    "gpu_memory"
+  ],
+  "$defs": {
+    "Bytes": {
+      "description": "A byte count. JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "MilliCpu": {
+      "description": "CPU in millicores (1000 = one core). JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  }
+}

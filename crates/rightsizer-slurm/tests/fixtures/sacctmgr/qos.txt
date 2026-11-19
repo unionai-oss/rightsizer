@@ -1,0 +1,3 @@
+Name|GrpTRES|MaxTRES|MaxTRESPerNode|MaxTRESPU
+normal||||
+gpuq|gres/gpu=8|gres/gpu=4,mem=32G||

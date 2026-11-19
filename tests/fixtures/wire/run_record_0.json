@@ -1,0 +1,83 @@
+{
+  "v": 1,
+  "key": "flyte://acme/proj/dev/env.train",
+  "cluster": "us-east-1",
+  "invocation_id": "inv-0",
+  "attempt": 1,
+  "decision_id": "01MCC5RM000000000000000007",
+  "started_at": "2027-01-15T08:00:00Z",
+  "inputs": [
+    {
+      "name": "data",
+      "uri_hash": "sha256:0f",
+      "format": "parquet",
+      "bytes": 8589934592,
+      "rows": 1000000,
+      "columns": {
+        "total": 12,
+        "numeric": 9,
+        "string": 2,
+        "nested": 1,
+        "other": 0,
+        "names": [
+          "a",
+          "b"
+        ]
+      }
+    },
+    {
+      "name": "epochs",
+      "format": "scalar",
+      "scalar": {
+        "kind": "int",
+        "value": 3
+      }
+    }
+  ],
+  "code_digest": "sha256:abc",
+  "requested": {
+    "requests": {
+      "cpu": 8000,
+      "memory": 68719476736,
+      "gpu": {
+        "accel": "A100-80G",
+        "count": 1
+      }
+    },
+    "limits": {
+      "memory": 68719476736
+    }
+  },
+  "origin_prior": {
+    "cpu": 8000,
+    "memory": 68719476736
+  },
+  "status": "succeeded",
+  "status_confidence": "observed",
+  "memory_peak": {
+    "value": 22548578304.0,
+    "censor": "exact",
+    "resolution_s": 1.0
+  },
+  "cpu_mean": {
+    "value": 3.5,
+    "censor": "exact"
+  },
+  "cpu_peak_window": {
+    "value": 6.25,
+    "censor": "at_least",
+    "resolution_s": 1.0
+  },
+  "cpu_throttled_frac": 0.0625,
+  "gpu_memory_peak": {
+    "value": 32212254720.0,
+    "censor": "exact"
+  },
+  "gpu_util_mean": 0.5,
+  "t_peak_frac": 0.75,
+  "duration_s": 1800.0,
+  "source": {
+    "kind": "cgroup"
+  },
+  "trust": "authenticated"
+}

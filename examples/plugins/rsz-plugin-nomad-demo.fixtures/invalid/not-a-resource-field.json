@@ -1,0 +1,1 @@
+{"native": {"kind": "object", "value": {"Job": {"ID": "train", "Namespace": "ml", "TaskGroups": [{"Name": "trainer", "Tasks": [{"Name": "main", "Resources": {"CPU": 2000, "MemoryMB": 8192}}]}]}}}, "patch": {"kind": "json_patch", "ops": [{"op": "replace", "path": "/Job/ID", "value": "other"}]}}

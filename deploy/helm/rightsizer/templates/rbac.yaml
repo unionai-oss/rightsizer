@@ -1,0 +1,80 @@
+# Least privilege (kubernetes.md §7): read-only on workloads and cluster
+# inputs; Leases (leader election) in the release namespace only. No write
+# access to user objects: mutation happens through admission responses.
+# `rsz k8s restore` runs with the invoking user's credentials.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rightsizer.fullname" . }}
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes, limitranges, resourcequotas]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [jobset.x-k8s.io]
+    resources: [jobsets]
+    verbs: [get, list, watch]
+  - apiGroups: [kubeflow.org]
+    resources: [pytorchjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [trainer.kubeflow.org]
+    resources: [trainjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [ray.io]
+    resources: [rayclusters, rayjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [batch.volcano.sh]
+    resources: [jobs]
+    verbs: [get, list, watch]
+  - apiGroups: [kueue.x-k8s.io]
+    resources: [clusterqueues, resourceflavors, localqueues]
+    verbs: [get, list, watch]
+  - apiGroups: [node.k8s.io]
+    resources: [runtimeclasses]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "rightsizer.fullname" . }}
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "rightsizer.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rightsizer.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-leader-election
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+  {{- if .Values.nodeAgent.enabled }}
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]   # node agent discovery (pod IP by node)
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "rightsizer.fullname" . }}-leader-election
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "rightsizer.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rightsizer.fullname" . }}
+    namespace: {{ .Release.Namespace }}

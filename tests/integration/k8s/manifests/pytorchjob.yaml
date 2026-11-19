@@ -1,0 +1,18 @@
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: pt
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: Never
+      template:
+        spec:
+          containers:
+            - name: pytorch
+              image: busybox:latest
+              command: ["sh", "-c", "sleep 5"]
+              resources:
+                requests: {cpu: "1", memory: 2Gi}
+                limits: {memory: 2Gi}

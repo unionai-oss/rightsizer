@@ -1,0 +1,63 @@
+{{- if .Values.prometheusRule.enabled }}
+# Alerts of SPEC §13.1 / kubernetes.md §3.2.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "rightsizer.fullname" . }}
+  labels: {{- include "rightsizer.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}{{ toYaml . | nindent 4 }}{{ end }}
+spec:
+  groups:
+    - name: rightsizer
+      rules:
+        - alert: RightsizerFastBurnBreakerOpen
+          expr: max(rightsizer_breaker_open{scope=~"fleet.*"}) > 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: The rightsizer fleet breaker is open (enforce demoted to recommend).
+            description: More than 5% of enforced invocations failed rightsizer-caused within 1 h (SPEC §2.3 S5). Inspect `rsz breaker status`; reset with operator credentials.
+        - alert: RightsizerCausedFailureBurn
+          expr: |
+            sum(rate(rightsizer_caused_failures_total[1h]))
+              / clamp_min(sum(rate(rightsizer_decisions_total{mode="enforce"}[1h])), 1e-9) > 0.05
+            and sum(increase(rightsizer_caused_failures_total[1h])) >= 20
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: Rightsizer-caused failures above the fast-burn threshold (5% over 1 h, >= 20 failures).
+        - alert: RightsizerWebhookFailOpen
+          # The apiserver's own counter: an expired certificate or a dead webhook fails open silently otherwise.
+          expr: apiserver_admission_webhook_fail_open_count{name=~"jobs.rightsizer.io|pods.rightsizer.io"} > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "The apiserver admitted objects without calling {{`{{ $labels.name }}`}} (failurePolicy Ignore)."
+            description: Check the webhook's certificate (cert-manager / self-signed Secret), Service endpoints and latency.
+        - alert: RightsizerWebhookErrors
+          expr: sum by (reason) (increase(rightsizer_webhook_fail_open_total[15m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "The webhook admitted requests unchanged because of {{`{{ $labels.reason }}`}} (S1)."
+        - alert: RightsizerOutcomeJoinRatioLow
+          expr: rightsizer_outcome_join_ratio < 0.9
+          for: 1h
+          labels: {severity: warning}
+          annotations:
+            summary: "Less than 90% of decisions have an outcome ({{`{{ $value | humanizePercentage }}`}}): losing outcomes means losing safety."
+        - alert: RightsizerCompactionLag
+          expr: rightsizer_store_compaction_lag_seconds > 21600
+          labels: {severity: warning}
+          annotations:
+            summary: History compaction has not run for more than 6 h (`rsz history compact`).
+        - alert: RightsizerEstimatorCircuitStuckOpen
+          expr: min_over_time(rightsizer_estimator_circuit_open[30m]) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "Remote estimator {{`{{ $labels.estimator }}`}} circuit open for 30 min; the chain falls through to the next member."
+        - alert: RightsizerWebhookLatencyHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(rightsizer_webhook_admission_duration_seconds_bucket[10m]))) > 0.1
+          for: 15m
+          labels: {severity: info}
+          annotations:
+            summary: Webhook p99 above 100 ms (kubernetes.md §3.2 target).
+{{- end }}

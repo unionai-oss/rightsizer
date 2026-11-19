@@ -1,0 +1,24 @@
+# Minimal values for prometheus-community/prometheus (pinned in k3s.sh).
+# Keeps: Prometheus server (scrapes kubelet cAdvisor via the chart's default
+# kubernetes-nodes-cadvisor job) + kube-state-metrics. Drops everything else.
+alertmanager:
+  enabled: false
+prometheus-pushgateway:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+kube-state-metrics:
+  enabled: true
+server:
+  retention: 2d
+  persistentVolume:
+    enabled: false
+  global:
+    scrape_interval: 15s
+    evaluation_interval: 15s
+  service:
+    type: NodePort
+    # nodePort set by k3s.sh (30909), mapped to host 127.0.0.1:${RSZ_IT_PROM_PORT:-19090}
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {memory: 2Gi}   # 1Gi was OOMKilled under the K8s suite's pod churn (2026-11-19)

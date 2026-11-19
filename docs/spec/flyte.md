@@ -1,7 +1,9 @@
 # rightsizer for Flyte v2 (`rightsizer.flyte`)
 
 Status: **draft v2**. Core concepts: [SPEC.md](SPEC.md). SDK references are to
-`flyteorg/flyte-sdk` `src/flyte/` at HEAD `2e821ef` (2026-11-18).
+`flyteorg/flyte-sdk` `src/flyte/` at HEAD `2e821ef` (2026-11-18). The M1
+implementation was checked against the released SDK **2.13.6**; §1.1 lists
+what differs there.
 
 ## 0. Day one
 
@@ -46,6 +48,27 @@ per run, or per environment with `rightsize="enforce"`.
 | Pickled bundles cloudpickle the task per child. | `_controller.py:237-243` | `RightsizedTask` holds only plain, picklable data. |
 | The in-pod resolver loads `getattr(module, name)`; `env.task` registers into the private `env._tasks`; deploy serializes `env.tasks`. | `_internal/resolvers/default.py:23`, `_task_environment.py:430-463`, `_deploy.py:571` | The rightsizable object must be the module attribute *and* the registered task (§4.1). Registry writes use private API (§11). |
 | `TaskEnvironment` is a non-`kw_only` dataclass; `clone_with` requires a new `name` and starts with an empty task registry. | `_environment.py:33`, `_task_environment.py:48, 154, 169-253` | Subclass fields need defaults and `kw_only`; deploy-time sizing rewrites tasks, not the environment (§6.3). |
+
+### 1.1 Checked against SDK 2.13.6
+
+Every fact above holds in 2.13.6 (line numbers differ: `TaskTemplate.aio` is
+`_task.py:313-364`, `__call__` 374-431, `_replace` 444-451, `override`
+453-597; `RemoteController.submit` / `_submit` are
+`_internal/controllers/remote/_controller.py:397-418` / `222-395`, with
+`translate_task_to_wire` at 264; `with_runcontext` is `_run.py:1875`; action
+identity is `convert.py:1150-1169`; `OOMError` conversion is `convert.py:785`).
+Differences and additions that shaped the implementation:
+
+| fact (2.13.6) | where | consequence |
+|---|---|---|
+| `flyte.custom_context` replaces the task context; the controller reads `tctx.custom_context` when the submit coroutine **runs**, not when it is created. A coroutine created in a `flyte.custom_context` block and awaited after it exits loses the context. Outside a task context the manager is a no-op. | `_custom_context.py:42-84`, `convert.py:463-470` | `RightsizedTask` captures the stack eagerly and re-enters `custom_context` around the submission (§4.1 step 2). |
+| A CUDA/ROCm OOM raised in the child reaches the parent as `RuntimeUserError(code="OutOfMemoryError")`: the child's task runner wraps any exception as `CustomError(<class name>)` (USER kind). | `taskrunner.py:121-133`, `errors.py:291-309` | §8.2 matches the code (and the message) whatever the error class. |
+| `override(...)` also takes `plugin_config` and rebuilds the task as the plugin class (`_rebuild_as`). | `_task.py:559-597, 64-89` | The decorator builds a `RightsizedTask` with `_rebuild_as` when a plugin class's `__init__` does not take its fields. |
+| A child's image is looked up in the transported image cache **by environment name** (`parent_env_name`), not by image hash. | `_internal/runtime/task_serde.py:317-366` | In-pod `Image` objects may differ from the host's (e.g. no local wheel directory); sized and pickled copies keep `parent_env_name`. |
+| The local image builder, with no configured registry and an endpoint containing `localhost`, pushes to `localhost:30000`. | `_image.py:650-684`, `_internal/imagebuild/image_builder.py:470-476` | Test infra must configure `image.registry` (tests/infra `flyte.sh`). |
+| `deploy` serializes `copy.copy(task)` with extra env vars. | `_deploy.py:168-179` | `RightsizedTask` keeps the SDK's `__copy__`. |
+| `flyte.Resources(memory=...)` must be a string (or a pair of strings). | `_resources.py:524-556` | The merge writes `"<n>Mi"` / `"<n>Gi"` quantities. |
+| Outside a task context `TaskTemplate.aio` returns the function's coroutine (awaiting it yields a coroutine). | `_task.py:358-364` | Unchanged delegation reproduces this. |
 
 ## 2. Levels at a glance
 
@@ -188,7 +211,7 @@ Methods:
 | code | `inspect.getsource(func)`, captured **once at decoration**. Fallback: a digest of `func.__code__` (pickled bundles). |
 | inputs | per argument: `flyte.io.File`/`Dir` → `path` → reader; `flyte.io.DataFrame` → `uri` + `format` → reader; `str` that parses as a URI → reader; `int`/`float`/`bool` → scalar; otherwise the type name only. Reads are cached per (URI, `hash`) for the process. |
 | prior | `task.resources` (the environment's, copied at decoration) |
-| platform | `flyte`; overhead distribution (median 70 MiB, p90 242 MiB); `PlatformRetry{same_size: retries, ladder: if escalating}` (root actions: `ladder = None`, §6.1); walltime from `timeout` (`Timeout`, `int` or `timedelta`, normalized); `memory_enforced = prior memory is a (request, limit) tuple` until SPEC §16 (open question 5) is settled, so scalar-memory tasks get S3(b) reductions only |
+| platform | `flyte`; overhead distribution (median 70 MiB, p90 242 MiB); `PlatformRetry{same_size: retries, ladder: if escalating}` (root actions: `ladder = None`, §6.1); walltime from `timeout` (`Timeout`, `int` or `timedelta`: its `max_runtime`); `memory_enforced`: true for a `(request, limit)` tuple; for a scalar (request-only) memory, `[flyte] scalar_memory_enforced` (default **true**: the Flyte v2 backend sets limit = request, SPEC §16 open question 5, confirmed on the devbox with SDK 2.13.6); false when the prior has no memory |
 | history | the store, by key |
 
 ### 4.3 Merging a decision into `flyte.Resources`
@@ -369,7 +392,7 @@ finally: memory peak = cgroup v2 memory.peak (kernel ≥ 5.19)
   from the action's `raw_data_path` bucket.
 - **Trust.** Records are `Authenticated` when the deployment gives each
   project/domain credentials scoped to its own prefix
-  (`{prefix}/v1/runs/{org}/{project}/{domain}/`). Otherwise they are
+  (`{prefix}/v1/runs/flyte/{org}/{project}/{domain}/`). Otherwise they are
   `Unverified`. In that case enforce relies on the escalation ladder (S3a,
   on by default for `retries == 0`) and on `flyte.remote` backfill, which is
   `Verified` for statuses but has no peaks in open-source Flyte. The operator can
@@ -383,9 +406,9 @@ duration, attempt, status):
 | child result | status |
 |---|---|
 | returns, child record found (or `measured = false`) | `Succeeded` |
-| returns, `measured = true`, no child record within 10 min | `Cached` (provisional; confirmed or corrected by backfill) |
+| returns, `measured = true`, the task has caching on, and no child record joined to the decision is found (one listing of the key's newest shards right after the child returns; the child writes its record before returning) | `Cached` (provisional, `Inferred`; confirmed or corrected by backfill) |
 | `flyte.errors.OOMError` | `OomKilled` |
-| `RuntimeUnknownError` with code `OutOfMemoryError`, or a message matching `CUDA out of memory` / `HIP out of memory` | `GpuOom` |
+| code `OutOfMemoryError` (a `RuntimeUserError` in SDK 2.13.6, §1.1; `RuntimeUnknownError` in older SDKs), or a message matching `CUDA out of memory` / `HIP out of memory` | `GpuOom` |
 | a timeout error | `Timeout` |
 | other | `Failed` |
 

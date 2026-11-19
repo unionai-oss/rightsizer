@@ -1,0 +1,58 @@
+# Nightly feature build for the ranking model.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: feature-build
+  namespace: ml
+  labels:
+    app.kubernetes.io/name: feature-build
+    team: ranking
+  annotations:
+    rightsizer.io/inputs: '["s3://ml-data/features/2026-11-17.parquet"]'
+    rightsizer.io/prior: eyJ2IjoxLCJraWQiOiJrMSIsInByaW9yIjp7InNwZWMudGVtcGxhdGUuc3BlYy5jb250YWluZXJzW2J1aWxkXSI6eyJyZXF1ZXN0cyI6eyJjcHUiOjQwMDAsIm1lbW9yeSI6MTcxNzk4NjkxODR9LCJsaW1pdHMiOnsibWVtb3J5IjozNDM1OTczODM2OH19fSwiYmluZCI6Im1sL0pvYi9mZWF0dXJlLWJ1aWxkIiwic2lnIjoibm9zVTI5YjhORWM5b2NzaTFHSWZ0VWpTOVNUNlpoVDJsNnhXNDFpYjNGdyJ9
+    rightsizer.io/decision-id: 01JDRSZ0000000000000000000
+    rightsizer.io/recommendation: "{\"id\":\"01JDRSZ0000000000000000000\",\"mode\":\"enforce\",\"units\":{\"spec.template.spec.containers[build]\":{\"cpu\":\"2\",\"memory\":\"12Gi\"}},\"v\":1}"
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: feature-build
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: stage
+          image: "public.ecr.aws/aws-cli/aws-cli:2.17.0"
+          command: ["aws", "s3", "cp", "--recursive", "s3://ml-data/features/", "/scratch/"]
+          volumeMounts:
+            - name: scratch
+              mountPath: /scratch
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+      containers:
+        - name: build   # the main step
+          image: ghcr.io/acme/feature-build@sha256:6b2d6d5c2f1c1d7e9f7a3a0c4b8e2d1f0a9c8b7e6d5c4b3a2f1e0d9c8b7a6f5e
+          args:
+            - --date=2026-11-17
+            - --workers=8
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          volumeMounts:
+            - name: scratch
+              mountPath: /scratch
+          resources:
+            requests:
+              cpu: "2"        # tuned by hand in 2024
+              memory: '12Gi'
+            limits:
+              memory: 24Gi
+      volumes:
+        - name: scratch
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi

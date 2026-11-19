@@ -1,0 +1,3 @@
+{"kind": "object", "value": {"Job": {"ID": "etl", "Namespace": "data",
+  "Meta": {"rightsizer.key": "nightly-etl"},
+  "TaskGroups": [{"Name": "g", "Count": 3, "Tasks": [{"Name": "t"}]}]}}}

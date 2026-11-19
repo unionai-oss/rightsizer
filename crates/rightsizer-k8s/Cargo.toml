@@ -1,0 +1,59 @@
+[package]
+name = "rightsizer-k8s"
+description = "Kubernetes adapter for rightsizer: manifest extract/render/validate (pure); features webhook (axum + rustls) and cluster (kube-rs watcher, restore, Prometheus importer)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["webhook", "cluster"]
+# The admission webhook server (axum + rustls) and its request path (engine).
+webhook = ["engine", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tower", "dep:http", "dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:rcgen"]
+# kube-rs: cluster view, watcher, leader election, restore, apply --watch, Prometheus importer, node agent.
+cluster = ["engine", "dep:rustls", "dep:kube", "dep:k8s-openapi", "dep:reqwest", "dep:rightsizer-features"]
+# Internal: the async engine (no kube, no axum).
+engine = ["dep:rightsizer-engine", "dep:rightsizer-history", "dep:prometheus", "dep:tokio"]
+
+[dependencies]
+rightsizer-core.workspace = true
+rightsizer-plugin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+chrono.workspace = true
+base64.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+json-patch.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+# YAML with byte spans for minimal in-place edits (`rsz apply`).
+saphyr-parser = "0.3.4"
+rightsizer-engine = { workspace = true, optional = true }
+rightsizer-history = { workspace = true, optional = true }
+rightsizer-features = { workspace = true, optional = true }
+prometheus = { workspace = true, optional = true }
+axum = { workspace = true, optional = true, features = ["query"] }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true, features = ["server-auto", "service"] }
+tower = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true, features = ["query"] }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+insta.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

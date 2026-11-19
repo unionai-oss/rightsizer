@@ -1,0 +1,35 @@
+{
+  "v": 1,
+  "id": "01M7S70Q96DP230BZDSMSGZPDT",
+  "key": "python://unknown/invalid-request",
+  "unit": "main",
+  "mode": "recommend",
+  "recommended": {
+    "requests": {},
+    "limits": {}
+  },
+  "applied": {
+    "requests": {},
+    "limits": {}
+  },
+  "prior": {
+    "spec": {
+      "requests": {},
+      "limits": {}
+    },
+    "defaulted": []
+  },
+  "held": [],
+  "source": {
+    "kind": "prior",
+    "reason": "internal",
+    "detail": "invalid request: fixture"
+  },
+  "propensity": 1.0,
+  "advisories": [],
+  "explanation": [
+    "kept the prior: internal",
+    "invalid request: fixture"
+  ],
+  "context_digest": "sha256:2677e9e66c94535cdaba641635a0a6f3c9ee6474768af0f6f1139f74c863136c"
+}

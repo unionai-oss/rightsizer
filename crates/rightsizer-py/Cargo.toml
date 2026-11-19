@@ -1,0 +1,45 @@
+[package]
+name = "rightsizer-py"
+description = "PyO3 module rightsizer._core: core + features + estimators + history (object store, sqlite) + engine; no kube-rs, no postgres."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "_core"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Object-store clouds, HTTP(S)/hf:// input readers and the Estimator
+# Protocol v1 client are in the wheel; history backends are object store +
+# sqlite only (no postgres, no kube-rs: `cargo xtask deps-check`).
+default = ["clouds", "http", "remote"]
+clouds = ["rightsizer-engine/s3", "rightsizer-engine/gcs", "rightsizer-engine/azure"]
+http = ["rightsizer-engine/http"]
+remote = ["rightsizer-engine/remote"]
+# Turned on by maturin when building the wheel; off by default so `cargo test` links.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+rightsizer-core.workspace = true
+rightsizer-features.workspace = true
+rightsizer-estimators.workspace = true
+rightsizer-history = { workspace = true, features = ["object-store", "sqlite"] }
+rightsizer-engine = { workspace = true, features = ["object-store", "sqlite"] }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+toml.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+pyo3.workspace = true
+pyo3-async-runtimes.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

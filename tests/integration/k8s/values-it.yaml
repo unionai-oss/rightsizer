@@ -1,0 +1,22 @@
+# Helm values for scenario d (in-cluster deploy on rsz-it).
+image:
+  repository: rsz-it/rsz
+  tag: dev
+  pullPolicy: Never
+cluster: rsz-it
+replicas: 2
+history:
+  postgres:
+    # The suite's postgres container, reached through Docker Desktop's host gateway.
+    url: postgres://rsz:rsz@host.k3d.internal:15432/rsz
+watcher:
+  prometheusUrl: http://rsz-it-prometheus-server.rsz-it-monitoring.svc
+  scrapeIntervalSeconds: 15
+nodeAgent:
+  enabled: true
+webhook:
+  excludeNamespaces: [kube-system, kueue-system, jobset-system, rsz-it-monitoring, rsz-it-kuberay]
+prometheusRule:
+  enabled: false   # no prometheus-operator CRDs on rsz-it; rendered and checked by helm_test.sh
+grafanaDashboard:
+  enabled: true

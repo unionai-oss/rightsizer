@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""rsz-plugin-nomad-demo: a toy rightsizer platform plugin (plugins.md §3).
+
+It speaks `rightsizer-plugin/1` (JSON-RPC 2.0, one JSON message per line) on
+stdin/stdout and implements `extract`, `render` and `validate` for a
+Nomad-like JSON jobspec:
+
+    {"kind": "object", "value": {"Job": {
+        "ID": "train", "Namespace": "ml",
+        "Meta": {"rightsizer.key": "optional-key", "rightsizer": "off"},
+        "TaskGroups": [{"Name": "g", "Count": 2,
+            "Tasks": [{"Name": "t", "Resources": {"CPU": 500, "MemoryMB": 2048}}]}]}}}
+
+(also accepted as {"kind": "document", "media_type": "application/json",
+"bytes": base64(json)}).
+
+Conventions of this toy, not of Nomad: `CPU` is read as millicores
+(1 MHz == 1 millicore) and `MemoryMB` as MiB. One unit per task
+(`TaskGroups[i].Tasks[j]`), key suffix `<Job.ID>/<group>/<task>` unless
+`Meta["rightsizer.key"]` is set. The tenant is `env.namespace` when the
+host authenticated one, else `Job.Namespace` (else `default`).
+
+`render` emits JSON Patch `replace`/`add` operations on
+`/Job/TaskGroups/<i>/Tasks/<j>/Resources/{MemoryMB,CPU}` and nothing for
+values that already match (so rendering twice is `Patch::None`).
+`validate` accepts only such operations, with 10 <= MemoryMB <= MAX_MEMORY_MB
+and CPU >= 1.
+
+Standard library only. Run `rsz plugin check nomad-demo` to check it.
+
+Test hooks (used by tests/integration/plugin to prove the suite catches
+broken plugins): RSZ_DEMO_KIND overrides the kind; RSZ_DEMO_BREAK is one of
+`crash` (exit on extract), `hang` (never answer extract), `handshake` (answer
+initialize with an unsupported protocol) or `render` (non-idempotent render).
+"""
+
+import base64
+import json
+import math
+import os
+import sys
+import time
+
+PROTOCOL = "rightsizer-plugin/1"
+VERSION = "0.1.0"
+MAX_MEMORY_MB = int(os.environ.get("RSZ_DEMO_MAX_MEMORY_MB", "65536"))
+MIB = 1 << 20
+BREAK = os.environ.get("RSZ_DEMO_BREAK", "")
+
+
+def kind_of():
+    k = os.environ.get("RSZ_DEMO_KIND")
+    if k:
+        return k
+    name = os.path.basename(sys.argv[0])
+    return name[len("rsz-plugin-"):] if name.startswith("rsz-plugin-") else "nomad-demo"
+
+
+KIND = kind_of()
+
+
+class RpcError(Exception):
+    def __init__(self, code, message, retryable=False, jsonrpc_code=-32000):
+        super().__init__(message)
+        self.code, self.message, self.retryable, self.jsonrpc_code = code, message, retryable, jsonrpc_code
+
+
+def job_of(native):
+    if not isinstance(native, dict):
+        raise RpcError("invalid_native", "native must be an object")
+    if native.get("kind") == "object":
+        value = native.get("value")
+    elif native.get("kind") == "document":
+        try:
+            value = json.loads(base64.b64decode(native.get("bytes", "")))
+        except Exception as e:  # noqa: BLE001
+            raise RpcError("parse_error", f"document is not JSON: {e}")
+    else:
+        raise RpcError("unsupported", f"native kind {native.get('kind')!r} not supported")
+    job = (value or {}).get("Job") if isinstance(value, dict) else None
+    if not isinstance(job, dict):
+        raise RpcError("invalid_native", "no Job object")
+    return job
+
+
+def segment(s):
+    out = []
+    for ch in str(s):
+        out.append(ch if ch.isalnum() or ch in "._@+,-" else "-")
+    return "".join(out).strip("-") or "none"
+
+
+def extract(params):
+    native = params.get("native")
+    env = params.get("env") or {}
+    job = job_of(native)
+    tenant = segment(env.get("namespace") or job.get("Namespace") or "default")
+    meta = job.get("Meta") or {}
+    if str(meta.get("rightsizer", "")).lower() == "off":
+        return {"tenant": tenant, "units": [], "skip": {"kind": "opted_out"}}
+    if meta.get("rightsizer.decision-id"):
+        return {"tenant": tenant, "units": [], "skip": {"kind": "already_sized", "decision_id": meta["rightsizer.decision-id"]}}
+    base = meta.get("rightsizer.key") or job.get("ID") or job.get("Name") or "job"
+    units = []
+    for i, g in enumerate(job.get("TaskGroups") or []):
+        for j, t in enumerate(g.get("Tasks") or []):
+            res = t.get("Resources") or {}
+            req = {}
+            defaulted = []
+            if isinstance(res.get("MemoryMB"), int):
+                req["memory"] = res["MemoryMB"] * MIB
+            else:
+                req["memory"] = 300 * MIB  # Nomad's default
+                defaulted.append("memory")
+            if isinstance(res.get("CPU"), int):
+                req["cpu"] = res["CPU"]
+            else:
+                req["cpu"] = 100
+                defaulted.append("cpu")
+            units.append({
+                "id": f"TaskGroups[{i}].Tasks[{j}]",
+                "key_suffix": "/".join(segment(x) for x in (base, g.get("Name", f"g{i}"), t.get("Name", f"t{j}"))),
+                "prior": {"spec": {"requests": req, "limits": {}}, "defaulted": defaulted},
+                "seed": {"labels": {"nomad.group": str(g.get("Name", "")), "nomad.task": str(t.get("Name", ""))}},
+                "distributed": False,
+            })
+    if not units:
+        return {"tenant": tenant, "units": [], "skip": {"kind": "no_units"}}
+    return {"tenant": tenant, "units": units}
+
+
+def unit_index(unit_id):
+    # "TaskGroups[i].Tasks[j]"
+    try:
+        a, b = unit_id.split(".")
+        return int(a[len("TaskGroups["):-1]), int(b[len("Tasks["):-1])
+    except Exception:  # noqa: BLE001
+        raise RpcError("invalid_native", f"unknown unit {unit_id!r}")
+
+
+def render(params):
+    job = job_of(params.get("native"))
+    ops = []
+    for d in params.get("decisions") or []:
+        i, j = unit_index(d.get("unit", ""))
+        try:
+            task = job["TaskGroups"][i]["Tasks"][j]
+        except (KeyError, IndexError, TypeError):
+            raise RpcError("invalid_native", f"no task for unit {d.get('unit')!r}")
+        res = task.get("Resources") or {}
+        req = (d.get("spec") or {}).get("requests") or {}
+        base = f"/Job/TaskGroups/{i}/Tasks/{j}/Resources"
+        if "Resources" not in task:
+            ops.append({"op": "add", "path": base, "value": {}})
+        if req.get("memory") is not None:
+            mb = max(1, math.ceil(req["memory"] / MIB))
+            if BREAK == "render":
+                mb = int(res.get("MemoryMB", mb)) + 1  # never converges
+            if res.get("MemoryMB") != mb:
+                ops.append({"op": "replace" if "MemoryMB" in res else "add", "path": f"{base}/MemoryMB", "value": mb})
+        if req.get("cpu") is not None:
+            cpu = max(1, int(req["cpu"]))
+            if res.get("CPU") != cpu:
+                ops.append({"op": "replace" if "CPU" in res else "add", "path": f"{base}/CPU", "value": cpu})
+    if not ops:
+        return {"kind": "none"}
+    return {"kind": "json_patch", "ops": ops}
+
+
+def validate(params):
+    job_of(params.get("native"))
+    patch = params.get("patch") or {}
+    if patch.get("kind") == "none":
+        return {"ok": True}
+    if patch.get("kind") != "json_patch":
+        return {"ok": False, "rejection": {"reason": "unsupported_patch", "detail": f"patch kind {patch.get('kind')!r}"}}
+    for op in patch.get("ops") or []:
+        path = op.get("path", "")
+        parts = path.split("/")
+        ok_shape = (len(parts) in (7, 8) and parts[1:3] == ["Job", "TaskGroups"] and parts[3].isdigit()
+                    and parts[4] == "Tasks" and parts[5].isdigit() and parts[6] == "Resources")
+        if not ok_shape or op.get("op") not in ("add", "replace"):
+            return {"ok": False, "rejection": {"reason": "not_a_resource_field", "field": path}}
+        if len(parts) == 7:
+            continue
+        field, v = parts[7], op.get("value")
+        if field == "MemoryMB":
+            if not isinstance(v, int) or v < 10:
+                return {"ok": False, "rejection": {"reason": "below_minimum", "detail": "MemoryMB must be >= 10", "field": path}}
+            if v > MAX_MEMORY_MB:
+                return {"ok": False, "rejection": {"reason": "exceeds_node_shape", "detail": f"MemoryMB > {MAX_MEMORY_MB}", "field": path}}
+        elif field == "CPU":
+            if not isinstance(v, int) or v < 1:
+                return {"ok": False, "rejection": {"reason": "below_minimum", "detail": "CPU must be >= 1", "field": path}}
+        else:
+            return {"ok": False, "rejection": {"reason": "not_a_resource_field", "field": path}}
+    return {"ok": True}
+
+
+def initialize(params):
+    offered = [params.get("protocol")] + list(params.get("protocols") or [])
+    if BREAK == "handshake":
+        return {"protocol": "rightsizer-plugin/7", "kind": KIND, "version": VERSION, "methods": ["extract", "render", "validate"]}
+    if PROTOCOL not in offered:
+        raise RpcError("unsupported", f"no common protocol version (offered {offered})", jsonrpc_code=-32004)
+    return {
+        "protocol": PROTOCOL,
+        "kind": KIND,
+        "version": VERSION,
+        "methods": ["extract", "render", "validate"],
+        "native_media_types": ["application/json"],
+    }
+
+
+def handle(method, params):
+    if method == "initialize":
+        return initialize(params)
+    if method == "extract":
+        if BREAK == "crash":
+            sys.stderr.write("rsz-plugin: crashing on extract (RSZ_DEMO_BREAK=crash)\n")
+            os._exit(3)
+        if BREAK == "hang":
+            time.sleep(3600)
+        return extract(params)
+    if method == "render":
+        return render(params)
+    if method == "validate":
+        return validate(params)
+    raise RpcError("unsupported", f"method not found: {method}", jsonrpc_code=-32601)
+
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except ValueError as e:
+            send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(e), "data": {"code": "parse_error", "retryable": False}}})
+            continue
+        rid, method, params = req.get("id"), req.get("method"), req.get("params") or {}
+        if method == "$/cancel":
+            continue  # requests are answered one at a time; nothing to cancel
+        if method == "shutdown":
+            if rid is not None:
+                send({"jsonrpc": "2.0", "id": rid, "result": None})
+            return
+        try:
+            result = handle(method, params)
+            if rid is not None:
+                send({"jsonrpc": "2.0", "id": rid, "result": result})
+        except RpcError as e:
+            if rid is not None:
+                send({"jsonrpc": "2.0", "id": rid, "error": {"code": e.jsonrpc_code, "message": e.message, "data": {"code": e.code, "retryable": e.retryable}}})
+        except Exception as e:  # noqa: BLE001
+            if rid is not None:
+                send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"internal: {e}", "data": {"code": "internal", "retryable": False}}})
+
+
+if __name__ == "__main__":
+    main()

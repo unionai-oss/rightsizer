@@ -1,0 +1,36 @@
+[package]
+name = "rightsizer-plugin"
+description = "Adapter / PlatformModel / OutcomeSource traits, Native, Unit, Patch and the rightsizer-plugin/1 protocol for rightsizer (plugins.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# JSON Schemas for the protocol (`cargo xtask schemas`).
+schema = ["dep:schemars", "rightsizer-core/schema"]
+
+[dependencies]
+rightsizer-core.workspace = true
+rightsizer-engine.workspace = true
+rightsizer-history.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+base64.workspace = true
+hex.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "net", "macros", "rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+pretty_assertions.workspace = true

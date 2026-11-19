@@ -1,0 +1,778 @@
+{
+  "context": {
+    "kind": "full",
+    "context": {
+      "v": 1,
+      "key": "flyte://acme/proj/dev/env.train",
+      "unit": "main",
+      "platform": {
+        "kind": "flyte",
+        "version": "",
+        "overhead": {
+          "memory_mib": [
+            [
+              0.5,
+              70.0
+            ],
+            [
+              0.9,
+              242.0
+            ]
+          ],
+          "cpu_millis": 0
+        },
+        "retry": {
+          "same_size": 0
+        },
+        "walltime_s": 7200,
+        "cpu_window_s": 15,
+        "memory_enforced": true
+      },
+      "code": {
+        "digest": "sha256:0eb8eb4cd34c9d9b9796db6a87f8803258e7dd17d1881c198a95664ab36e84ea",
+        "tokens": [
+          "code_lines_log2=1",
+          "tok:pd.read_parquet",
+          "tok:read_parquet",
+          "tok:read_parquet("
+        ]
+      },
+      "inputs": [
+        {
+          "name": "data",
+          "uri_hash": "sha256:0f",
+          "format": "parquet",
+          "bytes": 8589934592,
+          "rows": 1000000,
+          "columns": {
+            "total": 12,
+            "numeric": 9,
+            "string": 2,
+            "nested": 1,
+            "other": 0,
+            "names": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "manifest": {
+        "sidecars": 0,
+        "init_containers": 0,
+        "distributed": false
+      },
+      "prior": {
+        "spec": {
+          "requests": {
+            "cpu": 8000,
+            "memory": 68719476736,
+            "gpu": {
+              "accel": "A100-80G",
+              "count": 1
+            }
+          },
+          "limits": {
+            "memory": 68719476736
+          }
+        },
+        "defaulted": []
+      },
+      "history": [
+        {
+          "v": 1,
+          "key": "flyte://acme/proj/dev/env.train",
+          "cluster": "us-east-1",
+          "invocation_id": "inv-0",
+          "attempt": 1,
+          "decision_id": "01MCC5RM000000000000000007",
+          "started_at": "2027-01-15T08:00:00Z",
+          "inputs": [
+            {
+              "name": "data",
+              "uri_hash": "sha256:0f",
+              "format": "parquet",
+              "bytes": 8589934592,
+              "rows": 1000000,
+              "columns": {
+                "total": 12,
+                "numeric": 9,
+                "string": 2,
+                "nested": 1,
+                "other": 0,
+                "names": [
+                  "a",
+                  "b"
+                ]
+              }
+            },
+            {
+              "name": "epochs",
+              "format": "scalar",
+              "scalar": {
+                "kind": "int",
+                "value": 3
+              }
+            }
+          ],
+          "code_digest": "sha256:abc",
+          "requested": {
+            "requests": {
+              "cpu": 8000,
+              "memory": 68719476736,
+              "gpu": {
+                "accel": "A100-80G",
+                "count": 1
+              }
+            },
+            "limits": {
+              "memory": 68719476736
+            }
+          },
+          "origin_prior": {
+            "cpu": 8000,
+            "memory": 68719476736
+          },
+          "status": "succeeded",
+          "status_confidence": "observed",
+          "memory_peak": {
+            "value": 21474836480.0,
+            "censor": "exact",
+            "resolution_s": 1.0
+          },
+          "cpu_mean": {
+            "value": 3.5,
+            "censor": "exact"
+          },
+          "cpu_peak_window": {
+            "value": 6.25,
+            "censor": "at_least",
+            "resolution_s": 1.0
+          },
+          "cpu_throttled_frac": 0.0625,
+          "gpu_memory_peak": {
+            "value": 32212254720.0,
+            "censor": "exact"
+          },
+          "gpu_util_mean": 0.5,
+          "t_peak_frac": 0.75,
+          "duration_s": 1800.0,
+          "source": {
+            "kind": "cgroup"
+          },
+          "trust": "authenticated"
+        },
+        {
+          "v": 1,
+          "key": "flyte://acme/proj/dev/env.train",
+          "invocation_id": "inv-1",
+          "attempt": 1,
+          "decision_id": "01MCC5RM010000000000000007",
+          "started_at": "2027-01-15T09:00:00Z",
+          "inputs": [
+            {
+              "name": "data",
+              "uri_hash": "sha256:0f",
+              "format": "parquet",
+              "bytes": 8589934592,
+              "rows": 1000000,
+              "columns": {
+                "total": 12,
+                "numeric": 9,
+                "string": 2,
+                "nested": 1,
+                "other": 0,
+                "names": [
+                  "a",
+                  "b"
+                ]
+              }
+            },
+            {
+              "name": "epochs",
+              "format": "scalar",
+              "scalar": {
+                "kind": "int",
+                "value": 3
+              }
+            }
+          ],
+          "code_digest": "sha256:abc",
+          "requested": {
+            "requests": {
+              "cpu": 8000,
+              "memory": 68719476736,
+              "gpu": {
+                "accel": "A100-80G",
+                "count": 1
+              }
+            },
+            "limits": {
+              "memory": 68719476736
+            }
+          },
+          "origin_prior": {
+            "cpu": 8000,
+            "memory": 68719476736
+          },
+          "status": "succeeded",
+          "status_confidence": "observed",
+          "memory_peak": {
+            "value": 22011707392.0,
+            "censor": "exact"
+          },
+          "cpu_mean": {
+            "value": 3.5,
+            "censor": "exact"
+          },
+          "cpu_peak_window": {
+            "value": 6.25,
+            "censor": "at_least",
+            "resolution_s": 1.0
+          },
+          "cpu_throttled_frac": 0.0625,
+          "gpu_memory_peak": {
+            "value": 32212254720.0,
+            "censor": "exact"
+          },
+          "gpu_util_mean": 0.5,
+          "t_peak_frac": 0.75,
+          "duration_s": 1801.0,
+          "staged_bytes": 268435456,
+          "source": {
+            "kind": "importer",
+            "platform": "flyte"
+          },
+          "trust": "unverified"
+        },
+        {
+          "v": 1,
+          "key": "flyte://acme/proj/dev/env.train",
+          "cluster": "us-east-1",
+          "invocation_id": "inv-2",
+          "attempt": 1,
+          "decision_id": "01MCC5RM020000000000000007",
+          "started_at": "2027-01-15T10:00:00Z",
+          "inputs": [
+            {
+              "name": "data",
+              "uri_hash": "sha256:0f",
+              "format": "parquet",
+              "bytes": 8589934592,
+              "rows": 1000000,
+              "columns": {
+                "total": 12,
+                "numeric": 9,
+                "string": 2,
+                "nested": 1,
+                "other": 0,
+                "names": [
+                  "a",
+                  "b"
+                ]
+              }
+            },
+            {
+              "name": "epochs",
+              "format": "scalar",
+              "scalar": {
+                "kind": "int",
+                "value": 3
+              }
+            }
+          ],
+          "code_digest": "sha256:abc",
+          "requested": {
+            "requests": {
+              "cpu": 8000,
+              "memory": 68719476736,
+              "gpu": {
+                "accel": "A100-80G",
+                "count": 1
+              }
+            },
+            "limits": {
+              "memory": 68719476736
+            }
+          },
+          "origin_prior": {
+            "cpu": 8000,
+            "memory": 68719476736
+          },
+          "status": "succeeded",
+          "status_confidence": "observed",
+          "memory_peak": {
+            "value": 22548578304.0,
+            "censor": "exact"
+          },
+          "cpu_mean": {
+            "value": 3.5,
+            "censor": "exact"
+          },
+          "cpu_peak_window": {
+            "value": 6.25,
+            "censor": "at_least",
+            "resolution_s": 1.0
+          },
+          "cpu_throttled_frac": 0.0625,
+          "gpu_memory_peak": {
+            "value": 32212254720.0,
+            "censor": "exact"
+          },
+          "gpu_util_mean": 0.5,
+          "t_peak_frac": 0.75,
+          "duration_s": 1802.0,
+          "source": {
+            "kind": "cgroup"
+          },
+          "trust": "authenticated"
+        },
+        {
+          "v": 1,
+          "key": "flyte://acme/proj/dev/env.train",
+          "invocation_id": "inv-3",
+          "attempt": 1,
+          "decision_id": "01MCC5RM030000000000000007",
+          "started_at": "2027-01-15T11:00:00Z",
+          "inputs": [
+            {
+              "name": "data",
+              "uri_hash": "sha256:0f",
+              "format": "parquet",
+              "bytes": 8589934592,
+              "rows": 1000000,
+              "columns": {
+                "total": 12,
+                "numeric": 9,
+                "string": 2,
+                "nested": 1,
+                "other": 0,
+                "names": [
+                  "a",
+                  "b"
+                ]
+              }
+            },
+            {
+              "name": "epochs",
+              "format": "scalar",
+              "scalar": {
+                "kind": "int",
+                "value": 3
+              }
+            }
+          ],
+          "code_digest": "sha256:abc",
+          "requested": {
+            "requests": {
+              "cpu": 8000,
+              "memory": 68719476736,
+              "gpu": {
+                "accel": "A100-80G",
+                "count": 1
+              }
+            },
+            "limits": {
+              "memory": 68719476736
+            }
+          },
+          "origin_prior": {
+            "cpu": 8000,
+            "memory": 68719476736
+          },
+          "status": "succeeded",
+          "status_confidence": "observed",
+          "memory_peak": {
+            "value": 23085449216.0,
+            "censor": "exact",
+            "resolution_s": 1.0
+          },
+          "cpu_mean": {
+            "value": 3.5,
+            "censor": "exact"
+          },
+          "cpu_peak_window": {
+            "value": 6.25,
+            "censor": "at_least",
+            "resolution_s": 1.0
+          },
+          "cpu_throttled_frac": 0.0625,
+          "gpu_memory_peak": {
+            "value": 32212254720.0,
+            "censor": "exact"
+          },
+          "gpu_util_mean": 0.5,
+          "t_peak_frac": 0.75,
+          "duration_s": 1803.0,
+          "source": {
+            "kind": "importer",
+            "platform": "flyte"
+          },
+          "trust": "unverified"
+        },
+        {
+          "v": 1,
+          "key": "flyte://acme/proj/dev/env.train",
+          "cluster": "us-east-1",
+          "invocation_id": "inv-4",
+          "attempt": 1,
+          "decision_id": "01MCC5RM040000000000000007",
+          "started_at": "2027-01-15T12:00:00Z",
+          "inputs": [
+            {
+              "name": "data",
+              "uri_hash": "sha256:0f",
+              "format": "parquet",
+              "bytes": 8589934592,
+              "rows": 1000000,
+              "columns": {
+                "total": 12,
+                "numeric": 9,
+                "string": 2,
+                "nested": 1,
+                "other": 0,
+                "names": [
+                  "a",
+                  "b"
+                ]
+              }
+            },
+            {
+              "name": "epochs",
+              "format": "scalar",
+              "scalar": {
+                "kind": "int",
+                "value": 3
+              }
+            }
+          ],
+          "code_digest": "sha256:abc",
+          "requested": {
+            "requests": {
+              "cpu": 8000,
+              "memory": 68719476736,
+              "gpu": {
+                "accel": "A100-80G",
+                "count": 1
+              }
+            },
+            "limits": {
+              "memory": 68719476736
+            }
+          },
+          "origin_prior": {
+            "cpu": 8000,
+            "memory": 68719476736
+          },
+          "status": "succeeded",
+          "status_confidence": "observed",
+          "memory_peak": {
+            "value": 23622320128.0,
+            "censor": "exact"
+          },
+          "cpu_mean": {
+            "value": 3.5,
+            "censor": "exact"
+          },
+          "cpu_peak_window": {
+            "value": 6.25,
+            "censor": "at_least",
+            "resolution_s": 1.0
+          },
+          "cpu_throttled_frac": 0.0625,
+          "gpu_memory_peak": {
+            "value": 32212254720.0,
+            "censor": "exact"
+          },
+          "gpu_util_mean": 0.5,
+          "t_peak_frac": 0.75,
+          "duration_s": 1804.0,
+          "source": {
+            "kind": "cgroup"
+          },
+          "trust": "authenticated"
+        },
+        {
+          "v": 1,
+          "key": "flyte://acme/proj/dev/env.train",
+          "invocation_id": "inv-5",
+          "attempt": 1,
+          "decision_id": "01MCC5RM050000000000000007",
+          "started_at": "2027-01-15T13:00:00Z",
+          "inputs": [
+            {
+              "name": "data",
+              "uri_hash": "sha256:0f",
+              "format": "parquet",
+              "bytes": 8589934592,
+              "rows": 1000000,
+              "columns": {
+                "total": 12,
+                "numeric": 9,
+                "string": 2,
+                "nested": 1,
+                "other": 0,
+                "names": [
+                  "a",
+                  "b"
+                ]
+              }
+            },
+            {
+              "name": "epochs",
+              "format": "scalar",
+              "scalar": {
+                "kind": "int",
+                "value": 3
+              }
+            }
+          ],
+          "code_digest": "sha256:abc",
+          "requested": {
+            "requests": {
+              "cpu": 8000,
+              "memory": 68719476736,
+              "gpu": {
+                "accel": "A100-80G",
+                "count": 1
+              }
+            },
+            "limits": {
+              "memory": 68719476736
+            }
+          },
+          "origin_prior": {
+            "cpu": 8000,
+            "memory": 68719476736
+          },
+          "status": "succeeded",
+          "status_confidence": "observed",
+          "memory_peak": {
+            "value": 24159191040.0,
+            "censor": "exact"
+          },
+          "cpu_mean": {
+            "value": 3.5,
+            "censor": "exact"
+          },
+          "cpu_peak_window": {
+            "value": 6.25,
+            "censor": "at_least",
+            "resolution_s": 1.0
+          },
+          "cpu_throttled_frac": 0.0625,
+          "gpu_memory_peak": {
+            "value": 32212254720.0,
+            "censor": "exact"
+          },
+          "gpu_util_mean": 0.5,
+          "t_peak_frac": 0.75,
+          "duration_s": 1805.0,
+          "source": {
+            "kind": "importer",
+            "platform": "flyte"
+          },
+          "trust": "unverified"
+        },
+        {
+          "v": 1,
+          "key": "flyte://acme/proj/dev/env.train",
+          "cluster": "us-east-1",
+          "invocation_id": "inv-6",
+          "attempt": 1,
+          "decision_id": "01MCC5RM060000000000000007",
+          "started_at": "2027-01-15T14:00:00Z",
+          "inputs": [
+            {
+              "name": "data",
+              "uri_hash": "sha256:0f",
+              "format": "parquet",
+              "bytes": 8589934592,
+              "rows": 1000000,
+              "columns": {
+                "total": 12,
+                "numeric": 9,
+                "string": 2,
+                "nested": 1,
+                "other": 0,
+                "names": [
+                  "a",
+                  "b"
+                ]
+              }
+            },
+            {
+              "name": "epochs",
+              "format": "scalar",
+              "scalar": {
+                "kind": "int",
+                "value": 3
+              }
+            }
+          ],
+          "code_digest": "sha256:abc",
+          "requested": {
+            "requests": {
+              "cpu": 8000,
+              "memory": 68719476736,
+              "gpu": {
+                "accel": "A100-80G",
+                "count": 1
+              }
+            },
+            "limits": {
+              "memory": 68719476736
+            }
+          },
+          "origin_prior": {
+            "cpu": 8000,
+            "memory": 68719476736
+          },
+          "status": "succeeded",
+          "status_confidence": "observed",
+          "memory_peak": {
+            "value": 24696061952.0,
+            "censor": "exact",
+            "resolution_s": 1.0
+          },
+          "cpu_mean": {
+            "value": 3.5,
+            "censor": "exact"
+          },
+          "cpu_peak_window": {
+            "value": 6.25,
+            "censor": "at_least",
+            "resolution_s": 1.0
+          },
+          "cpu_throttled_frac": 0.0625,
+          "gpu_memory_peak": {
+            "value": 32212254720.0,
+            "censor": "exact"
+          },
+          "gpu_util_mean": 0.5,
+          "t_peak_frac": 0.75,
+          "duration_s": 1806.0,
+          "source": {
+            "kind": "cgroup"
+          },
+          "trust": "authenticated"
+        },
+        {
+          "v": 1,
+          "key": "flyte://acme/proj/dev/env.train",
+          "invocation_id": "inv-7",
+          "attempt": 1,
+          "decision_id": "01MCC5RM070000000000000007",
+          "started_at": "2027-01-15T15:00:00Z",
+          "inputs": [
+            {
+              "name": "data",
+              "uri_hash": "sha256:0f",
+              "format": "parquet",
+              "bytes": 8589934592,
+              "rows": 1000000,
+              "columns": {
+                "total": 12,
+                "numeric": 9,
+                "string": 2,
+                "nested": 1,
+                "other": 0,
+                "names": [
+                  "a",
+                  "b"
+                ]
+              }
+            },
+            {
+              "name": "epochs",
+              "format": "scalar",
+              "scalar": {
+                "kind": "int",
+                "value": 3
+              }
+            }
+          ],
+          "code_digest": "sha256:abc",
+          "requested": {
+            "requests": {
+              "cpu": 8000,
+              "memory": 68719476736,
+              "gpu": {
+                "accel": "A100-80G",
+                "count": 1
+              }
+            },
+            "limits": {
+              "memory": 68719476736
+            }
+          },
+          "origin_prior": {
+            "cpu": 8000,
+            "memory": 68719476736
+          },
+          "status": "succeeded",
+          "status_confidence": "observed",
+          "memory_peak": {
+            "value": 25232932864.0,
+            "censor": "exact"
+          },
+          "cpu_mean": {
+            "value": 3.5,
+            "censor": "exact"
+          },
+          "cpu_peak_window": {
+            "value": 6.25,
+            "censor": "at_least",
+            "resolution_s": 1.0
+          },
+          "cpu_throttled_frac": 0.0625,
+          "gpu_memory_peak": {
+            "value": 32212254720.0,
+            "censor": "exact"
+          },
+          "gpu_util_mean": 0.5,
+          "t_peak_frac": 0.75,
+          "duration_s": 1807.0,
+          "source": {
+            "kind": "importer",
+            "platform": "flyte"
+          },
+          "trust": "unverified"
+        }
+      ],
+      "labels": {
+        "team": "ml"
+      }
+    }
+  },
+  "constraints": {
+    "pinned": [
+      "gpu_count",
+      "gpu_type"
+    ],
+    "held": [],
+    "floor": {},
+    "ceiling": {}
+  },
+  "state": {
+    "shapes": [],
+    "request_model": {
+      "kind": "free"
+    },
+    "price": {
+      "kind": "packed"
+    },
+    "floors": {}
+  },
+  "policy": {
+    "mode": "enforce",
+    "max_mode": null,
+    "risk": null,
+    "chain": null,
+    "enforce_without_prior": null,
+    "exploration": null,
+    "allow_gpu_type_change": null,
+    "can_classify": null
+  },
+  "dry_run": true
+}

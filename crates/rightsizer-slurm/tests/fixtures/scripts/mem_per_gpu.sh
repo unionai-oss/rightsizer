@@ -1,0 +1,6 @@
+#!/bin/bash
+#SBATCH --gpus=2
+#SBATCH --mem-per-gpu=40G
+#SBATCH --cpus-per-gpu=6
+#SBATCH -t 4:00:00
+python infer.py

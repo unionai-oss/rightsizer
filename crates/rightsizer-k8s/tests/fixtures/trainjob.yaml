@@ -1,0 +1,18 @@
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: llama-sft
+  namespace: ml
+spec:
+  runtimeRef:
+    name: torch-distributed
+  trainer:
+    image: ghcr.io/acme/sft:0.3
+    numNodes: 2
+    resourcesPerNode:
+      requests:
+        cpu: "32"
+        memory: 256Gi
+        nvidia.com/gpu: 4
+      limits:
+        nvidia.com/gpu: 4

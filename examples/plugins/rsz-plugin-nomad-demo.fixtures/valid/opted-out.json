@@ -1,0 +1,2 @@
+{"kind": "object", "value": {"Job": {"ID": "pinned", "Meta": {"rightsizer": "off"},
+  "TaskGroups": [{"Name": "g", "Tasks": [{"Name": "t", "Resources": {"CPU": 500, "MemoryMB": 1024}}]}]}}}

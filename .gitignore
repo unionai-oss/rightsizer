@@ -221,3 +221,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# rightsizer integration-test infra state (kubeconfigs, tokens, built binaries)
+tests/infra/.state/
