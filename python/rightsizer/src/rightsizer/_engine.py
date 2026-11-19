@@ -347,10 +347,16 @@ class Engine:
             req = json.dumps(build_request(ctx, **policy))
             att = self._attempt(attempt)
             if att is not None:
-                # Attempts are rare (retries); the sync path runs off the loop.
-                import asyncio
+                # Not only retries: Flyte parents pass an attempt context on every call that may
+                # escalate. Awaited on this loop (a thread-pool hop per call queued a fan-out's
+                # decisions behind the executor; M1 QA). Older _core builds: the sync path off-loop.
+                aatt = getattr(self._core, "aattempt_decide", None)
+                if aatt is not None:
+                    out = await aatt(req, att.to_json())
+                else:
+                    import asyncio
 
-                out = await asyncio.get_running_loop().run_in_executor(None, self._core.attempt_decide, req, att.to_json())
+                    out = await asyncio.get_running_loop().run_in_executor(None, self._core.attempt_decide, req, att.to_json())
             else:
                 out = await self._core.adecide(req)
             return Decision.from_dict(json.loads(out), context=ctx)

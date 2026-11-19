@@ -33,6 +33,10 @@ struct Flaky {
     checks: AtomicUsize,
     /// Latency of `runs_changed_since`, ms.
     check_delay_ms: AtomicUsize,
+    /// `breaker_get` / `control_get` calls, and their latency (ms).
+    breaker_reads: AtomicUsize,
+    control_reads: AtomicUsize,
+    breaker_delay_ms: AtomicUsize,
 }
 
 impl Flaky {
@@ -46,6 +50,9 @@ impl Flaky {
             delay_after_read_ms: AtomicUsize::new(0),
             checks: AtomicUsize::new(0),
             check_delay_ms: AtomicUsize::new(0),
+            breaker_reads: AtomicUsize::new(0),
+            control_reads: AtomicUsize::new(0),
+            breaker_delay_ms: AtomicUsize::new(0),
         })
     }
     fn set_down(&self, d: bool) {
@@ -108,6 +115,11 @@ impl HistoryStore for Flaky {
         self.inner.decision(id).await
     }
     async fn breaker_get(&self, s: &BreakerScope) -> Result<BreakerObjects, StoreError> {
+        self.breaker_reads.fetch_add(1, Ordering::SeqCst);
+        let d = self.breaker_delay_ms.load(Ordering::SeqCst);
+        if d > 0 {
+            tokio::time::sleep(Duration::from_millis(d as u64)).await;
+        }
         self.check()?;
         self.inner.breaker_get(s).await
     }
@@ -124,6 +136,11 @@ impl HistoryStore for Flaky {
         self.inner.breaker_reset(r).await
     }
     async fn control_get(&self) -> Result<Option<Control>, StoreError> {
+        self.control_reads.fetch_add(1, Ordering::SeqCst);
+        let d = self.breaker_delay_ms.load(Ordering::SeqCst);
+        if d > 0 {
+            tokio::time::sleep(Duration::from_millis(d as u64)).await;
+        }
         self.check()?;
         self.inner.control_get().await
     }
@@ -260,11 +277,18 @@ async fn breaker_and_control_cache_60s_then_unknown() {
     assert_eq!(c.control().await, ControlRead::Known(None));
     assert!(!c.breaker(&scope).await.blocks_reductions());
     tokio::time::advance(Duration::from_secs(31)).await;
+    // Past the TTL (within two): the cached state answers while one refresh runs.
+    assert_eq!(c.control().await, ControlRead::Known(None));
+    assert!(!c.breaker(&scope).await.blocks_reductions());
+    settle().await;
     assert!(matches!(c.control().await, ControlRead::Known(Some(x)) if x.mode_ceiling == Mode::Recommend));
     assert!(c.breaker(&scope).await.blocks_reductions(), "open");
-    // Unreadable past the cache: unknown, which blocks reductions.
+    // Unreadable past the cache: the failed refresh drops the entry, then unknown (blocks reductions).
     inner.set_down(true);
     tokio::time::advance(Duration::from_secs(61)).await;
+    let _ = c.breaker(&scope).await;
+    let _ = c.control().await;
+    settle().await;
     assert_eq!(c.breaker(&scope).await, BreakerRead::Unknown);
     assert!(BreakerRead::Unknown.blocks_reductions());
     assert_eq!(c.control().await, ControlRead::Unknown);
@@ -275,6 +299,76 @@ async fn breaker_and_control_cache_60s_then_unknown() {
     assert!(!c.breaker(&other).await.blocks_reductions());
     c.breaker_trip(&trip(other.clone(), t(2))).await.unwrap();
     assert!(c.breaker(&other).await.blocks_reductions());
+}
+
+/// Let spawned cache tasks run (paused clock).
+async fn settle() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(1)).await;
+}
+
+/// M1 QA (Flyte devbox): every decision reads several breaker scopes and the
+/// control object. Concurrent misses must share one store read per scope, and
+/// an expired entry must not send every decision back to the store.
+#[tokio::test(start_paused = true)]
+async fn breaker_and_control_reads_are_single_flight_and_refresh_in_the_background() {
+    let inner = Flaky::new();
+    inner.breaker_delay_ms.store(200, Ordering::SeqCst);
+    let scope = BreakerScope::Workload { key: k1() };
+    let c = Arc::new(CachedStore::new(inner.clone(), CacheOptions::default()));
+    // A cold fan-out: 50 concurrent decisions, one read per scope and one of the control object.
+    let mut hs = Vec::new();
+    for _ in 0..50 {
+        let (c, s) = (c.clone(), scope.clone());
+        hs.push(tokio::spawn(async move { (c.breaker(&s).await, c.breaker(&BreakerScope::Fleet).await, c.control().await) }));
+    }
+    for h in hs {
+        let (b, f, ctl) = h.await.unwrap();
+        assert_eq!(b, BreakerRead::Known(BreakerObjects::default()));
+        assert_eq!(f, BreakerRead::Known(BreakerObjects::default()));
+        assert_eq!(ctl, ControlRead::Known(None));
+    }
+    assert_eq!(inner.breaker_reads.load(Ordering::SeqCst), 2, "one read per scope");
+    assert_eq!(inner.control_reads.load(Ordering::SeqCst), 1);
+    // A caller that gives up (an expired budget) does not cancel the read: the cache still fills.
+    let other = BreakerScope::Workload { key: k2() };
+    assert!(tokio::time::timeout(Duration::from_millis(10), c.breaker(&other)).await.is_err());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let n = inner.breaker_reads.load(Ordering::SeqCst);
+    assert_eq!(c.breaker(&other).await, BreakerRead::Known(BreakerObjects::default()));
+    assert_eq!(inner.breaker_reads.load(Ordering::SeqCst), n, "filled by the abandoned read");
+    // Expired (between one and two TTLs): answered at once from the cache; one background refresh.
+    inner.inner.breaker_trip(&trip(scope.clone(), t(1))).await.unwrap();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    let n = inner.breaker_reads.load(Ordering::SeqCst);
+    for _ in 0..20 {
+        let r = tokio::time::timeout(Duration::from_millis(1), c.breaker(&scope)).await.expect("no wait on the store");
+        assert!(!r.blocks_reductions(), "stale state while refreshing");
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(inner.breaker_reads.load(Ordering::SeqCst), n + 1, "one refresh");
+    assert!(c.breaker(&scope).await.blocks_reductions(), "the refresh saw the trip");
+    // Older than two TTLs: wait for a fresh read.
+    tokio::time::advance(Duration::from_secs(121)).await;
+    inner.set_down(true);
+    assert_eq!(c.breaker(&scope).await, BreakerRead::Unknown);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_trip_during_a_breaker_read_keeps_the_older_answer_out_of_the_cache() {
+    let inner = Flaky::new();
+    inner.breaker_delay_ms.store(200, Ordering::SeqCst);
+    let scope = BreakerScope::Workload { key: k1() };
+    let c = Arc::new(CachedStore::new(inner.clone(), CacheOptions::default()));
+    let (c2, s2) = (c.clone(), scope.clone());
+    let early = tokio::spawn(async move { c2.breaker(&s2).await });
+    settle().await; // the read started before the trip (and reads before it lands)
+    inner.breaker_delay_ms.store(0, Ordering::SeqCst);
+    c.breaker_trip(&trip(scope.clone(), t(1))).await.unwrap();
+    let _ = early.await.unwrap();
+    assert!(c.breaker(&scope).await.blocks_reductions(), "the pre-trip answer was not cached");
 }
 
 #[tokio::test]
@@ -358,7 +452,11 @@ async fn cache_ttls_run_on_an_injected_clock() {
     assert!(matches!(c.history(&k, 10).await, HistoryRead::Cached { age, .. } if age == Duration::from_secs(59)));
     assert!(matches!(c.breaker(&BreakerScope::Fleet).await, BreakerRead::Known(_)));
     clock.advance(Duration::from_secs(2));
-    assert_eq!(c.breaker(&BreakerScope::Fleet).await, BreakerRead::Unknown, "control TTL (60 s) passed");
+    // Past the control TTL (60 s) the stale entry answers once while its refresh runs; the
+    // refresh fails (store down) and drops it, so the next read is unknown.
+    assert!(matches!(c.breaker(&BreakerScope::Fleet).await, BreakerRead::Known(_)));
+    settle().await;
+    assert_eq!(c.breaker(&BreakerScope::Fleet).await, BreakerRead::Unknown, "control TTL (60 s) passed, store down");
     assert!(c.history(&k, 10).await.records().is_some(), "history TTL (10 min) not yet");
     clock.advance(Duration::from_secs(600));
     assert!(c.history(&k, 10).await.is_unavailable());

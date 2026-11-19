@@ -40,6 +40,7 @@ Checked against the code at `6b831e5` plus the working tree on 2026-11-19.
   - local-path allowlists for input reads.
 - Fleet and per-estimator-version breakers are evaluated over a 31-day window of attempts that is local to the process (`rightsizer-engine/src/engine.rs`). Each replica sees only its own outcomes. Notes: [Engine behaviour](#engine-behaviour-spec-as-implemented).
 - There is no `Engine::record_decision`. The K8s webhook decides dry-run, logs the decision itself and bumps the metrics by hand. Notes: [Engine / shared changes](#engine--shared-changes-additive).
+- A run record whose `origin_prior` is present but empty (`{}`), or the wrong shape (a `ResourceSpec` instead of a flat `Requests`, which deserializes to an empty `Requests`), takes precedence over the attempt record's origin in `Engine::outcome` and `Engine::sweep`. S5 attribution then finds nothing reduced and never trips (found while seeding the K8s QA lease sweep). Today's writers copy it from the decision, so an empty one means an empty origin. Treating an empty `origin_prior` as absent would be the safer default.
 - Adapters never set `RunRecord.staged_bytes`: the K8s watcher, the Prometheus importer, `apply --watch` and sacct all write `None`. Estimators then assume today's staging for past runs. Notes: [engine findings](#findings-for-other-crates).
 - The `RIGHTSIZER_DECISION` payload is defined only in Python (`rightsizer_runtime.env`). In Rust, K8s extract checks only that the variable is present. Notes: [runtime open items](#open-items-to-reconcile-with-rust).
 - The Rust `gbt` does not read the `rightsizer-trees-gpu/1` companion, so converted trees give no GPU axis. Notes: [Trees](#trees-rightsizer-models-convert), [round 3 deferred](#integration-round-3-core-set-core-features-estimators-history-engine-rsz-m0).
@@ -59,6 +60,8 @@ Checked against the code at `6b831e5` plus the working tree on 2026-11-19.
 **Slurm**
 - `rsz recommend -p slurm` passes no `PlatformModel` (`rightsizer-cli/src/adapters.rs`), although the daemon uses `SlurmPlatform`. Notes: [Integration points](#integration-points-status-after-round-3).
 - The `gres/gpumem` units are unverified (no GPUs to test on); the importer assumes bytes.
+- With whole-CPU rendering and packed prices, a 1-CPU job at or below the node's memory per core (1 GiB on the 2-CPU / 2 GiB test nodes) is never reduced: the smaller request saves nothing in the model, so the decision keeps the prior and no token is issued. QA rerun: [Slurm QA](#qa-rerun-after-review-head-f9acdbd-2026-11-19-3335).
+- The first decide after a daemon start and a `scontrol reconfigure` exceeded the 1 s cli_filter deadline once on the QA cluster (1.3 s). That submission is unchanged, and the user's negative cache then skips rightsizer for 60 s. It did not reproduce in isolation.
 - Each `sbatch` takes 9.4 ms longer, from spawning `decide-client`. A resident helper or a Lua socket library would remove most of that. Notes: [Slurm e2e](#end-to-end-on-the-docker-cluster-2026-11-19-slurm-26055).
 
 **Flyte**
@@ -886,6 +889,55 @@ history yet — the suite seeds before starting webhooks. The rsz-it
 Prometheus (1 GiB limit) was OOMKilled under this suite's churn;
 `tests/infra/k8s/prometheus-values.yaml` now sets 2 GiB.
 
+### QA rerun after review (HEAD `f9acdbd`, 2026-11-19)
+
+Linux `rsz` and `rsz-it/rsz:dev` rebuilt from HEAD; fresh k3d `rsz-it`;
+dev loop with the debug host binary. Three runs (results in
+`tests/infra/.state/qa/k8s-run{1,2}-results.tsv`, `k8s-gd.log`):
+
+| run | scope | result |
+|---|---|---|
+| 1 | `all` (setup a b c e f d; no new checks yet) | 26/27: only `a7.flyte-matching-namespace` failed: a harness bug (`flytesnacks-development` was never created on a fresh cluster) |
+| g/d | `setup g d` with the new checks | 11/12: `g4` failed on a seed bug (`origin_prior` written as a `ResourceSpec`; it is a flat `Requests`) |
+| 2 | `all` with every fix and check | 35/38. `b2`, `b4`: the laptop slept 17:09–17:45 during the run, so Prometheus had no samples for the steady job. `d7`: NetworkPolicy race (below). `a5`'s JobSet fell back to the prior (budget expired) at 17:46:05, between a wake and the next sleep |
+
+Every check passed at least once on HEAD. Each failure above is
+environmental or a harness defect, and each harness defect is fixed.
+
+- **Latency (e):** run 1: 1000 direct AdmissionReviews + 100 apiserver
+  dry-runs, webhook histogram **p50 10.3 ms, p90 14.3 ms, p99 19.2 ms**
+  (target p99 < 100 ms; debug build; client p99 21.9 ms, 626 rps). In run 2
+  (on battery, after sleep) p99 was 92.5 ms.
+- **New checks (scenario `g`, plus d6/d7):**
+  - g1, copied prior: train's genuine `rightsizer.io/prior` (bind
+    `rsz-it-enf/Job/train`, origin 2Gi) is copied onto a 4Gi Job `copy`. The
+    copy is enforced 4Gi → 2Gi with a new prior bound to `rsz-it-g/Job/copy`
+    and origin 4Gi. The copied annotation is ignored.
+  - g2, forged Flyte org: a pod labelled `organization: evilorg` in
+    `flytesnacks-development` is keyed `k8s://rsz-it/flytesnacks-development/pod/wf-t1/main`.
+    With `organization: testorg` (= `default_org`) the same pod gets
+    `flyte://testorg/flytesnacks/development/wf.t1`.
+  - g3, revalidation: a key decided with no history (2Gi kept) is seeded
+    by another process while the webhook runs. 35 s later the same Job is
+    enforced 2Gi → 1Gi; before, this took the 10 min TTL.
+  - g4, lease sweep: an attempt row with an open lease is seeded in
+    postgres, plus an inferred OOM at the reduced 512Mi. The importer's
+    outcome leaves it pending. The watcher (`--sweep-interval 5`,
+    `lease_ttl = "60s"`) then trips `workload k8s://rsz-it/rsz-it-g/job/swept/main`
+    with reason `unrecovered_failure` and closes the lease (`outcome: oom_killed`).
+  - d6/d7, node agent: from an ordinary pod in `rsz-it-d`, every request is
+    dropped by the chart's NetworkPolicy (k3s/kube-router enforces it). From
+    a pod in `rightsizer` that copies the webhook's labels (passes the
+    policy), `/healthz` returns 200 and `/v1/containers/…` returns **401**
+    without a token and with a wrong one. This holds on both nodes. The
+    first request from a new pod is dropped while kube-router admits the
+    pod's IP, so the probe now retries for up to 30 s.
+- `helm_test.sh`: 10/10 (lint, `cluster` required, four variants
+  rendered and `rsz config validate`d).
+- Not re-checked here: the 16 MiB body limit (`tests/admit.rs` covers it)
+  and replica-split ledger behaviour beyond d1 (one Lease holder, 2 ready
+  replicas).
+
 ### Not yet / follow-ups
 
 - Karpenter NodePool requirements in the GPU-type intersection; tolerations.
@@ -1324,6 +1376,14 @@ spawned), `decide` → `platform_unavailable` "plugin nomad-demo refused:
 sha256 mismatch", `status.refused` lists it; uid mapped to nothing →
 `-32003`; SIGTERM → exit 0, socket removed, buffered writes flushed.
 
+#### QA rerun after review (HEAD `f9acdbd`, 2026-11-19): 17/17
+
+The 15 checks above pass unchanged. Two new checks: a copy of the demo
+plugin made group-writable (0775), with a matching sha256 pin, is refused
+in server mode (`decide` → `platform_unavailable`, log: "unsafe to run
+from a server: … is group- or world-writable"). The same copy at 0755 is
+accepted (control).
+
 ### Lifecycle
 
 `READY=1`/`STATUS=`/`MAINPID=` after binding, `WATCHDOG=1` every
@@ -1660,6 +1720,72 @@ included) appears only while the per-call helper spawns load the 2-vCPU
 Docker VM; it is environmental, not a memo miss (checked: memo source on
 every replay).
 
+#### QA rerun after review (HEAD `f9acdbd`, 2026-11-19): 33/35
+
+Linux `rsz` rebuilt from HEAD. The table counts c, g, h from run 2 and
+setup, a, b, d, e, f from run 3 (`RSZ_IT_STEPS=a,b,d,e,f`). Logs and JSON
+are in `tests/infra/.state/qa/slurm-run{2,3}*`.
+
+- **Harness changes.**
+  - Jobs now declare **2G** (`PRIOR` in `e2e.py`), not 1G. With whole CPUs
+    (`cpu_granularity` 1000m) and packed pricing on these 2-CPU / 2 GiB
+    nodes, a 1-CPU job at ≤ 1 GiB already sits at its per-core share. A
+    smaller memory request saves nothing there, so the decision keeps the
+    prior (`patch: none`, no token). That made b–g fail at 1G.
+  - `setup()` wipes the suite's history store. Records from an aborted run
+    had raised `rsz-d`'s demand to 1.31 GiB, so the ladder started at 2G
+    and its 4G step could not be scheduled.
+- **New checks (step `h`, all pass):**
+  - whole CPUs: `-c 2 --mem=1G` with ~0.35-CPU history → decision
+    `cpu 1000m`, patch `cpus-per-task: "1"`, `mem: 768M`; the job is
+    `NumCPUs=1`, `rightsizer:<id>:verified` (the token verifies).
+  - sign binding: the daemon's `sign` with an enforced `rsz-hsign` decision
+    and a `rsz-hother` job → `-32000` "workload "rsz-hother" is not the
+    workload of decision …". The same key (control) gets a token; uid 0
+    (unmapped) → `-32003`.
+  - cli_filter without a token: a fake daemon on the socket answers
+    enforce with `mem=300M` and no token. The job stays at 2G,
+    `rightsizer::user`.
+  - negative-cache symlink: bob plants
+    `/tmp/rightsizer-cli-filter-alice.neg` → `/home/alice/precious`, and
+    alice's sbatch fails over (daemon down). The target's size, mtime,
+    inode and sha256 are unchanged, the marker is still bob's symlink, and
+    no `lua_*` temp files are left. The container has
+    `fs.protected_symlinks=1`, so the kernel would also have refused to
+    follow the link. This check does not separate the rename-over fix from
+    that protection; the Lua unit tests do.
+- **Existing steps:**
+  - b: 2G → 1G, verified, COMPLETED; tampering (forged env token, replay
+    at 900M, `scontrol update`) and the daemon frozen / stopped paths as
+    before (1137 ms then 78 ms with the negative cache).
+  - c: rotation stage / promote overlap / retire.
+  - d: 1G `OUT_OF_MEMORY` → 2G COMPLETED, one verified decision, lease
+    closed `succeeded`.
+  - e: ladder records linked (`at_least` 1024 MiB, then `exact` 1491 MiB);
+    the `scontrol update` job is detached.
+  - g: `--disable` and re-enable.
+- **FAIL `a.summary_on_stderr`** (runs 2 and 3): the first sbatch after
+  setup took 1283 ms (6.2 s in run 2, while an orphaned sbatch loop from an
+  aborted run was still submitting). decide-client hit its 1 s deadline, so
+  there was no summary and the submission was unchanged (S1). slurmctld was
+  reconfiguring at the time (`slurm.sh reconfigure` in `install`). It did
+  not reproduce in isolation: a restarted daemon's first decide took 30 ms.
+  A timed-out first decide also writes the 60 s negative cache for that
+  user.
+- **FAIL `f.p99_round_trip_under_20ms`** (target: socket round trip p99
+  < 20 ms, idle and under sbatch load):
+  - idle: p50 0.65 ms, **p99 6.3 ms**;
+  - under load: p50 0.95 ms, **p99 33.5 ms**;
+  - daemon-side decide for 1000 sbatch: p50 6.8 / p99 24.1 ms;
+  - decide-client incl. spawn: p50 18.8 / p99 58.5 ms;
+  - sbatch 30.0 ms vs 12.9 ms disabled (+17.0 ms).
+
+  The host ran on battery, sleeping between runs, with the Flyte devbox
+  in the same Docker VM. The rightsizer-free baseline was 2.7× slower than
+  this morning's (12.9 vs 4.7 ms per sbatch). The morning run on the same
+  cluster measured 0.70 / 7.1 ms p99 and +9.4 ms per sbatch. Re-measure on
+  AC with an otherwise idle Docker VM before reading this as a regression.
+
 ## Integration round 3 (core set: core, features, estimators, history, engine, rsz M0)
 
 All API changes are additive except where marked. Per item:
@@ -1854,6 +1980,18 @@ delegation `crates/rightsizer-cli/src/ray.rs`. Unit tests: `.venv/bin/python -m 
 10,000 tasks, memoized decisions: plain `ray.remote` 0.029 ms per `.remote()`; `rs.ray.remote` 0.63 ms (added
 0.60 mean / 0.56 p50); sizing only 0.58 ms. Decision path (decide + merge) p50 0.48 ms, p99 0.80 ms, max 10 ms.
 Wall clock for 10k no-op tasks: 1.06 s plain vs 6.3 s rightsized (the driver's submit loop is the bottleneck).
+
+### QA rerun after review (HEAD `f9acdbd`, 2026-11-19): 10/10
+
+Extension rebuilt (`maturin develop --release`); local head
+(`tests/infra/ray.sh`); `RSZ_IT_RAY=1 pytest tests/integration/ray`:
+9 passed (actor, Ray Data, failures, fan-out, history → enforce,
+unverified hold and opt-in, `rsz ray submit`). `RSZ_IT_RAY_LINUX=1`
+memory-monitor test: 1 passed (`linux.hog` → `oom_killed`, `observed`,
+`ray_state`; SIGKILL → `failed`; reused-worker peaks 200/200/50/200 MiB).
+Fan-out, 10,000 memoized tasks: `rs.ray.remote` adds **0.60 ms** per
+`.remote()` (mean; p50 0.53 ms; target < 5 ms). Decision path p50 0.44 ms,
+p99 1.18 ms, max 14 ms. Wall clock 1.46 s plain vs 6.40 s rightsized.
 
 ### Open / for other agents
 - Worker-written records bypass the driver engine's per-key history cache and memo: new evidence is seen after

@@ -293,6 +293,29 @@ impl PyEngine {
         })
     }
 
+    /// Awaitable `attempt_decide` (on the caller's event loop). Never raises.
+    /// Flyte parents pass an attempt context on every call that may escalate
+    /// (the default), so this is the common async path, not a retry-only one.
+    fn aattempt_decide<'py>(&self, py: Python<'py>, request_json: &str, attempt_json: &str) -> PyResult<Bound<'py, PyAny>> {
+        let parsed = api::parse_request(request_json);
+        let attempt: Result<AttemptContext, String> = serde_json::from_str(attempt_json).map_err(|e| e.to_string());
+        let shared = self.shared.clone();
+        pyo3_async_runtimes::generic::future_into_py::<PyRt, _, _>(py, async move {
+            let req = match parsed {
+                Ok(r) => r,
+                Err(d) => return Ok(api::to_json(&*d)),
+            };
+            let attempt = match attempt {
+                Ok(a) => a,
+                Err(e) => return Ok(api::to_json(&api::fallback_decision(&req, PriorReason::Internal, format!("invalid attempt context: {e}")))),
+            };
+            Ok(match shared.engine_async().await {
+                Ok(e) => api::to_json(&e.attempt_decide(req, attempt).await),
+                Err(msg) => api::to_json(&api::fallback_decision(&req, PriorReason::ConfigError, msg)),
+            })
+        })
+    }
+
     /// Ingest a `RunRecord` (JSON). Returns the outcome report as JSON.
     /// Raises `RightsizerError` on an invalid record or a store error.
     fn outcome(&self, py: Python<'_>, record_json: &str) -> PyResult<String> {

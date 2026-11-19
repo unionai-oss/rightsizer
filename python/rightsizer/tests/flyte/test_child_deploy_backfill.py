@@ -162,3 +162,20 @@ def test_backfill_maps_phases_errors_and_requests():
     spec = requested_from_template(t)
     assert (spec.requests.cpu, spec.requests.memory, spec.limits.memory) == (500, 256 * MiB, 512 * MiB)
     assert parse_since("30d").days == 30
+
+
+def test_wheel_dir_image_forces_both_local_wheels(tmp_path):
+    """M1 QA regression: the PythonWheels layer force-reinstalls only its own package, so a
+    stale rightsizer-runtime (same dev version) from the builder's uv cache stayed in the image.
+    Both local wheels get their own layer."""
+    from rightsizer.flyte._env import rightsizer_image
+
+    (tmp_path / "rightsizer-0.1.0-cp310-abi3-manylinux2014_aarch64.whl").write_bytes(b"x")
+    base = flyte.Image.from_debian_base(python_version=(3, 12))
+    only_core = rightsizer_image(base, str(tmp_path))
+    assert [getattr(layer, "package_name", None) for layer in only_core._layers if hasattr(layer, "wheel_dir")] == ["rightsizer"]
+    (tmp_path / "rightsizer_runtime-0.1.0-py3-none-any.whl").write_bytes(b"y")
+    img = rightsizer_image(base, str(tmp_path))
+    names = [getattr(layer, "package_name", None) for layer in img._layers if hasattr(layer, "wheel_dir")]
+    assert names == ["rightsizer", "rightsizer-runtime"]
+    assert rightsizer_image(img, str(tmp_path)) is img  # idempotent

@@ -41,7 +41,11 @@ SLURM_KEY = "/etc/slurm/rightsizer.key"
 EXTRA = "/etc/slurm-extra"
 TENANT = "slurm://rsz-it/mlteam"
 THROUGHPUT_N = int(os.environ.get("RSZ_IT_THROUGHPUT_N", "1000"))
-ONLY = set(filter(None, os.environ.get("RSZ_IT_STEPS", "a,b,c,d,e,f,g").split(",")))
+# The jobs' declared memory. Slurm renders whole CPUs and prices packed
+# (2-CPU / 2 GiB nodes): a 1-CPU job at <= 1 GiB already sits at its per-core
+# share, so only a request above that has a reduction worth making.
+PRIOR, PRIOR_MIB = "2G", 2048
+ONLY = set(filter(None, os.environ.get("RSZ_IT_STEPS", "a,b,c,d,e,f,g,h").split(",")))
 
 results = []
 evidence = {}
@@ -158,7 +162,9 @@ def setup():
           "sacctmgr -i add user alice account=mlteam >/dev/null 2>&1 || true; "
           "sacctmgr -i add user bob account=mlteam >/dev/null 2>&1 || true; "
           "mkdir -p /etc/rightsizer /run/rightsizer /var/lib/rightsizer; chown rightsizer: /run/rightsizer /var/lib/rightsizer; chmod 0755 /run/rightsizer; "
-          "rm -f /tmp/rightsizer-cli-filter-*.neg")
+          "rm -f /tmp/rightsizer-cli-filter-*.neg; "
+          # A fresh store: records left by an earlier (aborted) run change the decisions.
+          "rm -rf /var/lib/rightsizer/history; scancel -u alice >/dev/null 2>&1 || true")
     for n in NODES:
         dexec("id bob >/dev/null 2>&1 || useradd -m -u 1001 bob; id rightsizer >/dev/null 2>&1 || useradd -r -m -d /var/lib/rightsizer -u 991 rightsizer", container=n)
     v = dexec(f"{RSZ} --version").stdout.strip()
@@ -217,7 +223,7 @@ def status(user="alice"):
         return None
 
 
-def cli_opts(name, mem="1G"):
+def cli_opts(name, mem=PRIOR):
     """What slurm.json_cli_options sends for `sbatch -A mlteam /data/<name>.sh` (non-empty keys)."""
     return {"account": "mlteam", "cpus-per-task": "1", "job-name": f"rsz-{name}", "mem": mem}
 
@@ -245,12 +251,12 @@ for i in range(n):
 '''
 
 
-def seed(key, n=5, peak_mib=100, req_mib=1024):
+def seed(key, n=5, peak_mib=100, req_mib=PRIOR_MIB):
     dexec(f"python3 /data/seed.py {key} {n} {peak_mib} {req_mib} > /data/seed-$$.jsonl && {RSZ} history import jsonl /data/seed-$$.jsonl; rm -f /data/seed-$$.jsonl",
           user="rightsizer", env={"RIGHTSIZER_CONFIG": CONF})
 
 
-def script(name, body, mem="1G", extra=""):
+def script(name, body, mem=PRIOR, extra=""):
     put(f"/data/{name}.sh", f"#!/bin/bash\n#SBATCH --job-name=rsz-{name}\n#SBATCH --mem={mem}\n#SBATCH -c 1\n{extra}{body}\n")
     return f"/data/{name}.sh"
 
@@ -273,7 +279,7 @@ def step_a():
     s = script("a", 'python3 -c "b=bytearray(50*2**20)"; sleep 1')
     jid, err, dt = sbatch(f"-A mlteam -o /data/a-%j.out {s}")
     j = job(jid)
-    check("a.unchanged", j.get("MinMemoryNode") == "1G", f"job {jid} MinMemoryNode={j.get('MinMemoryNode')} ({dt * 1000:.0f} ms)")
+    check("a.unchanged", j.get("MinMemoryNode") == PRIOR, f"job {jid} MinMemoryNode={j.get('MinMemoryNode')} ({dt * 1000:.0f} ms)")
     check("a.summary_on_stderr", "rightsizer:" in err and "[recommend]" in err, f"stderr: {err}")
     wait_done(jid)
     ac = sacct_field(jid, "AdminComment")
@@ -286,14 +292,14 @@ def step_a():
 
 def step_b():
     log("== b: enforce with S3(b) history evidence")
-    seed(f"{TENANT}/rsz-b", n=5, peak_mib=100, req_mib=1024)
+    seed(f"{TENANT}/rsz-b", n=5, peak_mib=100, req_mib=PRIOR_MIB)
     st = start_daemon("enforce")
     check("b.daemon", st is not None, f"enforce daemon up: {st and st.get('kinds')}")
     s = script("b", 'python3 -c "b=bytearray(60*2**20)"; sleep 1')
     jid, err, dt = sbatch(f"-A mlteam -o /data/b-%j.out {s}")
     j = job(jid)
     mem = mem_mib(j.get("MinMemoryNode", "0"))
-    check("b.memory_reduced", 0 < mem < 1024, f"job {jid} MinMemoryNode={j.get('MinMemoryNode')} (prior 1G), sbatch {dt * 1000:.0f} ms")
+    check("b.memory_reduced", 0 < mem < PRIOR_MIB, f"job {jid} MinMemoryNode={j.get('MinMemoryNode')} (prior {PRIOR}), sbatch {dt * 1000:.0f} ms")
     wait_done(jid)
     ac = sacct_field(jid, "AdminComment")
     did = ac.split(":")[1] if ac.count(":") == 2 else ""
@@ -306,7 +312,7 @@ def step_b():
     forged = base64.urlsafe_b64encode(b"\x01\x02k1" + b"0" * 26 + b"\x00" * 8 + b"\x11" * 32).decode().rstrip("=")
     jid2, _, _ = sbatch(f"--hold -A mlteam {s}", env={"RIGHTSIZER_TOKEN": forged})
     ac2 = job(jid2).get("AdminComment", "")
-    check("b.tamper_forged_env_token", ac2.endswith(":user") and job(jid2).get("MinMemoryNode") == "1G", f"job {jid2}: AdminComment={ac2} MinMemoryNode={job(jid2).get('MinMemoryNode')}")
+    check("b.tamper_forged_env_token", ac2.endswith(":user") and job(jid2).get("MinMemoryNode") == PRIOR, f"job {jid2}: AdminComment={ac2} MinMemoryNode={job(jid2).get('MinMemoryNode')}")
     # Tampering 2: a real token replayed with other resources.
     r = decide_client(s, cli_opts("b"))
     tok = (r.get("result") or {}).get("token")
@@ -335,14 +341,14 @@ def step_b():
     j7, _, t7 = sbatch(f"--hold -A mlteam {s}")
     neg = dexec("ls /tmp/rightsizer-cli-filter-*.neg && cat /tmp/rightsizer-cli-filter-*.neg", check_rc=False).stdout.strip().replace(chr(10), " ")
     m6, m7 = job(j6).get("MinMemoryNode"), job(j7).get("MinMemoryNode")
-    check("b.daemon_frozen_unchanged", m6 == "1G" and m7 == "1G", f"jobs {j6},{j7} MinMemoryNode={m6},{m7}; AdminComment={job(j6).get('AdminComment')}")
+    check("b.daemon_frozen_unchanged", m6 == PRIOR and m7 == PRIOR, f"jobs {j6},{j7} MinMemoryNode={m6},{m7}; AdminComment={job(j6).get('AdminComment')}")
     check("b.negative_cache", t6 >= 0.9 and t7 < 0.6 and neg != "", f"first sbatch {t6 * 1000:.0f} ms (waits the 1 s deadline), second {t7 * 1000:.0f} ms (skipped: negative cache {neg})")
     stop_daemon("CONT")
     stop_daemon("TERM")
     dexec("rm -f /tmp/rightsizer-cli-filter-*.neg")
     j8, _, t8 = sbatch(f"--hold -A mlteam {s}")
     j9, _, t9 = sbatch(f"--hold -A mlteam {s}")
-    check("b.daemon_stopped_fast", job(j8).get("MinMemoryNode") == "1G" and t8 < 0.6 and t9 < 0.6, f"daemon stopped: jobs {j8},{j9} unchanged in {t8 * 1000:.0f} / {t9 * 1000:.0f} ms")
+    check("b.daemon_stopped_fast", job(j8).get("MinMemoryNode") == PRIOR and t8 < 0.6 and t9 < 0.6, f"daemon stopped: jobs {j8},{j9} unchanged in {t8 * 1000:.0f} / {t9 * 1000:.0f} ms")
     dexec(f"scancel {j6} {j7} {j8} {j9}", check_rc=False)
     dexec("rm -f /tmp/rightsizer-cli-filter-*.neg")
     evidence["b_down"] = {"frozen_ms": [round(t6 * 1000), round(t7 * 1000)], "stopped_ms": [round(t8 * 1000), round(t9 * 1000)]}
@@ -360,7 +366,7 @@ def rotate(step):
 
 def step_c():
     log("== c: key rotation")
-    seed(f"{TENANT}/rsz-c", n=5, peak_mib=100, req_mib=1024)
+    seed(f"{TENANT}/rsz-c", n=5, peak_mib=100, req_mib=PRIOR_MIB)
     start_daemon("enforce")
     s = script("c", "sleep 1")
 
@@ -403,7 +409,7 @@ def step_c():
 
 def step_d():
     log("== d: rsz slurm sbatch --watch ladder")
-    seed(f"{TENANT}/rsz-d", n=5, peak_mib=100, req_mib=1024)
+    seed(f"{TENANT}/rsz-d", n=5, peak_mib=100, req_mib=PRIOR_MIB)
     start_daemon("enforce")
     s = script("d", 'python3 -c "import os,time; b=bytearray(int(os.environ.get(\'ALLOC_MB\',\'200\'))*2**20); b[::4096]=b\'x\'*len(b[::4096]); time.sleep(12)"')
     probe = decide_client(s, cli_opts("d"), extra={"watch": True, "dry_run": True})
@@ -475,7 +481,7 @@ import json, socket, sys, time
 sock, n, script = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 body = open(script).read()
 req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "decide", "params": {"kind": "slurm", "native": {"kind": "object", "value": {
-    "kind": "cli_filter", "type": "sbatch", "offset": 0, "options": {"account": "mlteam", "cpus-per-task": "1", "job-name": "rsz-f", "mem": "1G", "argv": [script]},
+    "kind": "cli_filter", "type": "sbatch", "offset": 0, "options": {"account": "mlteam", "cpus-per-task": "1", "job-name": "rsz-f", "mem": "2G", "argv": [script]},
     "script": body, "script_path": script, "cwd": "/data"}}}}).encode() + b"\n"
 lat = []
 for i in range(n):
@@ -496,7 +502,7 @@ print(json.dumps({"n": n, "p50": lat[n // 2], "p99": lat[int(n * 0.99) - 1], "ma
 
 def step_f():
     log(f"== f: throughput ({THROUGHPUT_N} sbatch through cli_filter -> daemon, memoized decision)")
-    seed(f"{TENANT}/rsz-f", n=5, peak_mib=100, req_mib=1024)
+    seed(f"{TENANT}/rsz-f", n=5, peak_mib=100, req_mib=PRIOR_MIB)
     start_daemon("enforce")
     s = script("f", "true")
     put("/data/rtt.py", RTT_PY)
@@ -504,7 +510,7 @@ def step_f():
     jid, _, _ = sbatch(f"--hold -A mlteam {s}")
     check("f.enforced", job(jid).get("AdminComment", "").endswith(":verified"), f"warm-up job {jid} MinMemoryNode={job(jid).get('MinMemoryNode')} {job(jid).get('AdminComment')}")
     rtt = json.loads(dexec(f"python3 /data/rtt.py {SOCK} {THROUGHPUT_N} {s}", user="alice").stdout)
-    helper = dexec(f"python3 - <<'EOF'\nimport json,subprocess,time\nreq=json.dumps({{'jsonrpc':'2.0','id':1,'method':'decide','params':{{'kind':'slurm','native':{{'kind':'object','value':{{'kind':'cli_filter','type':'sbatch','offset':0,'options':{{'account':'mlteam','cpus-per-task':'1','job-name':'rsz-f','mem':'1G','argv':['{s}']}},'script_path':'{s}','cwd':'/data'}}}}}}}})\nlat=[]\nfor i in range(200):\n    t=time.perf_counter(); p=subprocess.run(['{RSZ}','slurm','decide-client','--socket','{SOCK}','--timeout-ms','1000'],input=req.encode(),capture_output=True); lat.append((time.perf_counter()-t)*1000)\n    assert b'result' in p.stdout\nlat.sort(); print(json.dumps({{'n':200,'p50':lat[100],'p99':lat[197],'max':lat[-1]}}))\nEOF", user="alice")
+    helper = dexec(f"python3 - <<'EOF'\nimport json,subprocess,time\nreq=json.dumps({{'jsonrpc':'2.0','id':1,'method':'decide','params':{{'kind':'slurm','native':{{'kind':'object','value':{{'kind':'cli_filter','type':'sbatch','offset':0,'options':{{'account':'mlteam','cpus-per-task':'1','job-name':'rsz-f','mem':'2G','argv':['{s}']}},'script_path':'{s}','cwd':'/data'}}}}}}}})\nlat=[]\nfor i in range(200):\n    t=time.perf_counter(); p=subprocess.run(['{RSZ}','slurm','decide-client','--socket','{SOCK}','--timeout-ms','1000'],input=req.encode(),capture_output=True); lat.append((time.perf_counter()-t)*1000)\n    assert b'result' in p.stdout\nlat.sort(); print(json.dumps({{'n':200,'p50':lat[100],'p99':lat[197],'max':lat[-1]}}))\nEOF", user="alice")
     helper = json.loads(helper.stdout)
     loop = f"t=$(date +%s.%N); for i in $(seq 1 {THROUGHPUT_N}); do sbatch --hold --parsable -A mlteam {s} >/dev/null 2>&1; done; echo $t $(date +%s.%N)"
     # Fresh daemon statistics: only the sbatch-driven decisions (memo warmed by one job).
@@ -551,7 +557,7 @@ def step_g():
     hdr = dexec(f"grep -h RIGHTSIZER_DISABLED {EXTRA}/cli_filter.lua {EXTRA}/job_submit.lua").stdout.split()
     jid, err, _ = sbatch(f"--hold -A mlteam {s}")
     j = job(jid)
-    check("g.disabled", j.get("MinMemoryNode") == "1G" and j.get("AdminComment", "") in ("", "(null)") and "rightsizer" not in err,
+    check("g.disabled", j.get("MinMemoryNode") == PRIOR and j.get("AdminComment", "") in ("", "(null)") and "rightsizer" not in err,
           f"job {jid}: MinMemoryNode={j.get('MinMemoryNode')} AdminComment={j.get('AdminComment')!r}; headers {hdr}; {out.strip().splitlines()[-3:]}")
     dexec(f"scancel {jid}", check_rc=False)
     install(disable=False)
@@ -561,12 +567,152 @@ def step_g():
     dexec(f"scancel {jid}", check_rc=False)
 
 
+# ── h: review/refinement checks ───────────────────────────────────────
+
+
+SEED_CPU_PY = r"""
+import json, sys, datetime
+key, n = sys.argv[1], int(sys.argv[2])
+now = datetime.datetime.now(datetime.timezone.utc)
+for i in range(n):
+    t = (now - datetime.timedelta(hours=10 - i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(json.dumps({"v": 1, "key": key, "cluster": "rsz-it", "invocation_id": f"seed-{key}-{i}", "attempt": 1, "started_at": t,
+        "requested": {"requests": {"memory": 1024 << 20, "cpu": 2000}}, "status": "succeeded", "status_confidence": "observed",
+        "memory_peak": {"value": 100 * 2**20, "censor": "exact", "resolution_s": 5.0},
+        "cpu_mean": {"value": 0.35, "censor": "exact", "resolution_s": 5.0}, "cpu_peak_window": {"value": 0.6, "censor": "exact", "resolution_s": 5.0},
+        "duration_s": 600.0, "source": {"kind": "sacct"}, "trust": "verified"}))
+"""
+
+FAKE_DAEMON_PY = r"""
+import json, os, socket, sys
+path, log = sys.argv[1], sys.argv[2]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+s = socket.socket(socket.AF_UNIX)
+s.bind(path)
+os.chmod(path, 0o666)
+s.listen(16)
+while True:
+    c, _ = s.accept()
+    buf = b""
+    while not buf.endswith(b"\n"):
+        d = c.recv(65536)
+        if not d:
+            break
+        buf += d
+    with open(log, "a") as f:
+        f.write(buf.decode(errors="replace")[:120] + "\n")
+    # An enforce answer with a patch but no token.
+    resp = {"jsonrpc": "2.0", "id": 1, "result": {"mode": "enforce", "patch": {"kind": "options", "options": {"mem": "300M", "cpus-per-task": "1"}},
+            "decisions": [], "summary": "fake daemon: enforce without a token"}}
+    c.sendall(json.dumps(resp).encode() + b"\n")
+    c.close()
+"""
+
+
+def rpc(method, params, user="alice"):
+    req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+    p = dexec(f"{RSZ} slurm decide-client --socket {SOCK} --timeout-ms 3000", user=user, inp=req, check_rc=False)
+    return json.loads(p.stdout) if p.stdout.strip() else {"error": {"message": f"no response (rc {p.returncode})"}}
+
+
+def cli_native(script_path, options):
+    return {"kind": "object", "value": {"kind": "cli_filter", "type": "sbatch", "offset": 0, "options": dict(options, argv=[script_path]),
+                                         "script_path": script_path, "cwd": "/data"}}
+
+
+def step_h():
+    log("== h: whole CPUs, sign binding, cli_filter without a token, negative-cache symlink")
+    put("/data/seed_cpu.py", SEED_CPU_PY, mode="0755")
+    dexec(f"python3 /data/seed_cpu.py {TENANT}/rsz-hcpu 6 > /data/seed-hcpu.jsonl && {RSZ} history import jsonl /data/seed-hcpu.jsonl",
+          user="rightsizer", env={"RIGHTSIZER_CONFIG": CONF})
+    seed(f"{TENANT}/rsz-hsign", n=5, peak_mib=100, req_mib=PRIOR_MIB)
+    start_daemon("enforce")
+
+    # h1 whole CPUs: -c 2 with history using ~0.35 CPU -> a whole-CPU decision, a token that verifies.
+    s = "/data/hcpu.sh"
+    put(s, "#!/bin/bash\n#SBATCH --job-name=rsz-hcpu\n#SBATCH --mem=1G\n#SBATCH -c 2\nsleep 1\n")
+    r = decide_client(s, dict(cli_opts("hcpu"), **{"cpus-per-task": "2"}))
+    res = r.get("result") or {}
+    d0 = (res.get("decisions") or [{}])[0]
+    cpu_m = ((d0.get("applied") or {}).get("requests") or {}).get("cpu")
+    popts = (res.get("patch") or {}).get("options", {})
+    jid, _, _ = sbatch(f"--hold -A mlteam {s}")
+    j = job(jid)
+    check("h.whole_cpus_token_verifies",
+          res.get("mode") == "enforce" and isinstance(cpu_m, int) and cpu_m % 1000 == 0 and str(popts.get("cpus-per-task", "1")).isdigit()
+          and j.get("AdminComment", "").endswith(":verified"),
+          f"decision cpu {cpu_m}m (prior 2000m), patch {popts}, token={'yes' if res.get('token') else 'no'}; job {jid} NumCPUs={j.get('NumCPUs')} "
+          f"CPUs/Task={j.get('CPUs/Task')} MinMemoryNode={j.get('MinMemoryNode')} {j.get('AdminComment')}")
+    evidence["h_cpu"] = {"decision_cpu_m": cpu_m, "patch": popts, "job": jid, "num_cpus": j.get("NumCPUs"), "admin_comment": j.get("AdminComment")}
+    dexec(f"scancel {jid}", check_rc=False)
+
+    # h2 sign: a decision of key rsz-hsign cannot attest a job of another key (rsz-hother); same-key control signs.
+    sa = script("hsign", "sleep 1")
+    so = script("hother", "sleep 1")
+    r = decide_client(sa, cli_opts("hsign"))
+    res = r.get("result") or {}
+    did = ((res.get("decisions") or [{}])[0]).get("id")
+    pmem = (res.get("patch") or {}).get("options", {}).get("mem", PRIOR)
+    other = rpc("sign", {"kind": "slurm", "native": cli_native(so, cli_opts("hother", mem=pmem)), "decision_ids": [did]})
+    same = rpc("sign", {"kind": "slurm", "native": cli_native(sa, cli_opts("hsign", mem=pmem)), "decision_ids": [did]})
+    bob = rpc("sign", {"kind": "slurm", "native": cli_native(sa, cli_opts("hsign", mem=pmem)), "decision_ids": [did]}, user="root")
+    check("h.sign_refuses_other_key",
+          res.get("mode") == "enforce" and "error" in other and not (other.get("result") or {}).get("token") and (same.get("result") or {}).get("token"),
+          f"decision {did} ({res.get('decisions', [{}])[0].get('key')}, mem {pmem}); sign for rsz-hother -> {json.dumps(other.get('error'))[:220]}; "
+          f"same key (control) -> token {'yes' if (same.get('result') or {}).get('token') else json.dumps(same)[:200]}; as root (unmapped uid) -> {json.dumps(bob.get('error') or bob.get('result'))[:160]}")
+
+    # h3 cli_filter + a daemon answer without a token: the job is unchanged.
+    stop_daemon()
+    put("/data/fake_daemon.py", FAKE_DAEMON_PY)
+    dexec("rm -f /tmp/rightsizer-cli-filter-*.neg /data/fake.log; touch /data/fake.log; chmod 666 /data/fake.log")
+    subprocess.run(["docker", "exec", "-d", "-u", "rightsizer", CTLD, "python3", "/data/fake_daemon.py", SOCK, "/data/fake.log"], check=True)
+    try:
+        for _ in range(50):
+            if dexec(f"test -S {SOCK}", check_rc=False).returncode == 0:
+                break
+            time.sleep(0.1)
+        sb = script("hfake", "sleep 1")
+        jid, err, _ = sbatch(f"--hold -A mlteam {sb}")
+        j = job(jid)
+        calls = dexec("wc -l < /data/fake.log", check_rc=False).stdout.strip()
+        check("h.cli_filter_needs_token", calls not in ("", "0") and j.get("MinMemoryNode") == PRIOR and j.get("CPUs/Task") == "1" and not j.get("AdminComment", "").endswith(":verified"),
+              f"fake daemon answered {calls} request(s) with enforce mem=300M and no token: job {jid} MinMemoryNode={j.get('MinMemoryNode')} AdminComment={j.get('AdminComment')!r} stderr={err[:120]!r}")
+        dexec(f"scancel {jid}", check_rc=False)
+    finally:
+        dexec("pkill -f '^python3 /data/fake_daemon.py' || true; rm -f " + SOCK, check_rc=False)
+
+    # h4 negative-cache marker: bob plants a symlink at alice's marker path; with the
+    # daemon down alice's cli_filter marks a failure, which must not write through it.
+    dexec("rm -f /tmp/rightsizer-cli-filter-*.neg; rm -f /tmp/lua_*", check_rc=False)
+    dexec("echo precious > /home/alice/precious && chmod 0644 /home/alice/precious", user="alice")
+    before = dexec("stat -c '%s %Y %i' /home/alice/precious && sha256sum /home/alice/precious", user="alice").stdout.split()
+    dexec("ln -s /home/alice/precious /tmp/rightsizer-cli-filter-alice.neg", user="bob")
+    sb = script("hsym", "sleep 1")
+    jid, _, t_s = sbatch(f"--hold -A mlteam {sb}")
+    after = dexec("stat -c '%s %Y %i' /home/alice/precious && sha256sum /home/alice/precious", user="alice").stdout.split()
+    link = dexec("stat -c '%F %U' /tmp/rightsizer-cli-filter-alice.neg; readlink /tmp/rightsizer-cli-filter-alice.neg", check_rc=False).stdout.strip().replace("\n", " ")
+    content = dexec("cat /home/alice/precious", user="alice").stdout.strip()
+    leftovers = dexec("ls /tmp/lua_* 2>/dev/null | wc -l", check_rc=False).stdout.strip()
+    prot = dexec("cat /proc/sys/fs/protected_symlinks", check_rc=False).stdout.strip()
+    j = job(jid)
+    check("h.neg_marker_not_followed", before == after and content == "precious" and link.startswith("symbolic link bob") and j.get("MinMemoryNode") == PRIOR,
+          f"target before {before[:3]} after {after[:3]} content {content!r}; marker path: {link}; job {jid} MinMemoryNode={j.get('MinMemoryNode')} "
+          f"(sbatch {t_s * 1000:.0f} ms); leftover lua temp files {leftovers}; fs.protected_symlinks={prot}")
+    dexec(f"scancel {jid}", check_rc=False)
+    dexec("rm -f /tmp/rightsizer-cli-filter-alice.neg", user="bob", check_rc=False)
+    dexec("rm -f /home/alice/precious", user="alice", check_rc=False)
+    start_daemon("enforce")
+
+
 def main():
     if os.environ.get("RSZ_IT_SLURM") != "1":
         print("RSZ_IT_SLURM != 1: skipping the Slurm e2e")
         return 0
     setup()
-    steps = [("a", step_a), ("b", step_b), ("c", step_c), ("d", step_d), ("e", step_e), ("f", step_f), ("g", step_g)]
+    steps = [("a", step_a), ("b", step_b), ("c", step_c), ("d", step_d), ("e", step_e), ("f", step_f), ("g", step_g), ("h", step_h)]
     for name, fn in steps:
         if name not in ONLY:
             continue

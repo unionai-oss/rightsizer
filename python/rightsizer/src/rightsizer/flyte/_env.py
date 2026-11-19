@@ -67,7 +67,13 @@ def rightsizer_image(image: Any, auto_image: Union[bool, str, os.PathLike, None]
         d = pathlib.Path(wheels).expanduser().resolve()
         if not any(d.glob("rightsizer-*.whl")):
             raise FileNotFoundError(f"{WHEELS_ENV}={d}: no rightsizer-*.whl there")
-        return image.clone(addl_layer=PythonWheels(wheel_dir=d, package_name="rightsizer"))
+        image = image.clone(addl_layer=PythonWheels(wheel_dir=d, package_name="rightsizer"))
+        # The layer force-reinstalls only its own package; the dependency step may take
+        # rightsizer-runtime from the builder's uv cache (same dev version, older contents).
+        # A local runtime wheel must win too, so it gets its own layer (as the SDK advises).
+        if any(d.glob("rightsizer_runtime-*.whl")):
+            image = image.clone(addl_layer=PythonWheels(wheel_dir=d, package_name="rightsizer-runtime"))
+        return image
     from .. import __version__
 
     return image.with_pip_packages(f"rightsizer=={__version__}")

@@ -8,7 +8,19 @@
 //!   engine demotes enforce to recommend (`store_unreachable`).
 //! - **Breakers and control:** cached 60 s. If they cannot be read past
 //!   that, [`BreakerRead::Unknown`] / [`ControlRead::Unknown`]: callers treat
-//!   the breaker as **open for reductions**.
+//!   the breaker as **open for reductions**. Reads are **single flight** per
+//!   scope (and for the control object) and run as their own task, like
+//!   history reads. Between one and two TTLs old, an entry is served while
+//!   one background refresh runs (stale-while-revalidate); a refresh that
+//!   fails drops the entry, so an unreadable store still ends in `Unknown`.
+//!   A trip, reset or control write by this process (or an invalidation)
+//!   bumps an epoch that keeps an older in-flight read out of the cache.
+//!   Why: every decision reads several scopes (workload, input bucket,
+//!   fleet, each estimator version) and the control object, and each
+//!   breaker read is several store calls; without this, a fan-out in a new
+//!   process, or at each expiry, sent every concurrent decision to the store
+//!   for each scope and spent its whole budget there (M1 devbox QA: up to 50
+//!   of 90 decisions per round fell back to the prior).
 //! - **Cluster scope (SPEC §8.5):** history is per cluster unless
 //!   `history.share` merges clusters. Records of other clusters are dropped
 //!   from reads; records without a cluster are kept.
@@ -285,6 +297,10 @@ pub type ChangeHook = Arc<dyn Fn(&WorkloadKey) + Send + Sync>;
 /// A caching wrapper around any store.
 type RunsCache = Arc<Mutex<Lru<String, CachedRuns>>>;
 type HistoryFlight = futures::future::Shared<futures::future::BoxFuture<'static, Result<Arc<Vec<RunRecord>>, String>>>;
+type BreakerCache = Arc<Mutex<HashMap<BreakerScope, (BreakerObjects, Stamp)>>>;
+type BreakerFlight = futures::future::Shared<futures::future::BoxFuture<'static, Result<BreakerObjects, String>>>;
+type ControlCache = Arc<Mutex<Option<(Option<Control>, Stamp)>>>;
+type ControlFlight = futures::future::Shared<futures::future::BoxFuture<'static, Result<Option<Control>, String>>>;
 
 pub struct CachedStore {
     inner: Arc<dyn HistoryStore>,
@@ -297,8 +313,14 @@ pub struct CachedStore {
     generations: Arc<Mutex<HashMap<String, u64>>>,
     /// Keys invalidated since their entry was cached (served stale while refreshing).
     stale: Arc<Mutex<std::collections::HashSet<String>>>,
-    breakers: Mutex<HashMap<BreakerScope, (BreakerObjects, Stamp)>>,
-    control: Mutex<Option<(Option<Control>, Stamp)>>,
+    breakers: BreakerCache,
+    control: ControlCache,
+    /// In-flight breaker reads by scope, and the control read (single flight).
+    breaker_flights: Arc<Mutex<HashMap<BreakerScope, (u64, BreakerFlight)>>>,
+    control_flight: Arc<Mutex<Option<(u64, ControlFlight)>>>,
+    /// Bumped by every trip, reset, control write and invalidation through this
+    /// cache: a read started before it does not fill the cache.
+    control_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Revalidation hook.
     on_change: Arc<std::sync::OnceLock<ChangeHook>>,
 }
@@ -319,8 +341,11 @@ impl CachedStore {
             inner,
             opts,
             clock,
-            breakers: Mutex::new(HashMap::new()),
-            control: Mutex::new(None),
+            breakers: Arc::new(Mutex::new(HashMap::new())),
+            control: Arc::new(Mutex::new(None)),
+            breaker_flights: Arc::new(Mutex::new(HashMap::new())),
+            control_flight: Arc::new(Mutex::new(None)),
+            control_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             on_change: Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -445,6 +470,7 @@ impl CachedStore {
     /// Drop cached breakers and the control object (after a trip, reset or
     /// control write elsewhere in this process); history stays cached.
     pub fn invalidate_control(&self) {
+        self.bump_control_epoch();
         if let Ok(mut g) = self.breakers.lock() {
             g.clear();
         }
@@ -465,6 +491,7 @@ impl CachedStore {
         if let Ok(mut g) = self.runs.lock() {
             *g = Lru::new(self.opts.capacity);
         }
+        self.bump_control_epoch();
         if let Ok(mut g) = self.breakers.lock() {
             g.clear();
         }
@@ -587,21 +614,23 @@ impl CachedStore {
     }
 
     /// Breaker state, cached 60 s; `Unknown` (treat as open) when unreadable past that.
+    /// Single flight per scope; between one and two TTLs the cached state is
+    /// served while one background refresh runs (see the module docs).
     pub async fn breaker(&self, scope: &BreakerScope) -> BreakerRead {
         let now = self.clock.now();
         let cached = self.breakers.lock().ok().and_then(|g| g.get(scope).cloned());
-        if let Some((o, at)) = &cached
-            && elapsed(now, *at) < self.opts.control_ttl
-        {
-            return BreakerRead::Known(o.clone());
-        }
-        match self.inner.breaker_get(scope).await {
-            Ok(o) => {
-                if let Ok(mut g) = self.breakers.lock() {
-                    g.insert(scope.clone(), (o.clone(), self.clock.now()));
-                }
-                BreakerRead::Known(o)
+        if let Some((o, at)) = &cached {
+            let age = elapsed(now, *at);
+            if age < self.opts.control_ttl {
+                return BreakerRead::Known(o.clone());
             }
+            if age < self.opts.control_ttl * 2 && tokio::runtime::Handle::try_current().is_ok() {
+                drop(self.breaker_flight(scope)); // runs as its own task; fills the cache or drops the entry
+                return BreakerRead::Known(o.clone());
+            }
+        }
+        match self.breaker_flight(scope).await {
+            Ok(o) => BreakerRead::Known(o),
             Err(e) => {
                 tracing::warn!(error = %e, %scope, "breaker unreadable: treated as open for reductions");
                 BreakerRead::Unknown
@@ -609,27 +638,148 @@ impl CachedStore {
         }
     }
 
+    fn bump_control_epoch(&self) {
+        self.control_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The shared read of a breaker scope (joining one in flight, or starting it as its own task).
+    fn breaker_flight(&self, scope: &BreakerScope) -> BreakerFlight {
+        use futures::FutureExt as _;
+        use std::sync::atomic::Ordering;
+
+        let epoch = self.control_epoch.load(Ordering::SeqCst);
+        let mut g = match self.breaker_flights.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                let (inner, scope) = (self.inner.clone(), scope.clone());
+                return async move { inner.breaker_get(&scope).await.map_err(|e| e.to_string()) }.boxed().shared();
+            }
+        };
+        if let Some((e0, f)) = g.get(scope)
+            && *e0 == epoch
+        {
+            return f.clone();
+        }
+        let (inner, cache, flights, clock, epochs) =
+            (self.inner.clone(), self.breakers.clone(), self.breaker_flights.clone(), self.clock.clone(), self.control_epoch.clone());
+        let scope2 = scope.clone();
+        let in_runtime = tokio::runtime::Handle::try_current().is_ok();
+        let read = async move {
+            let r = if in_runtime {
+                match tokio::time::timeout(HISTORY_READ_TIMEOUT, inner.breaker_get(&scope2)).await {
+                    Ok(r) => r,
+                    Err(_) => Err(StoreError::Unreachable(format!("breaker read of {scope2} timed out"))),
+                }
+            } else {
+                inner.breaker_get(&scope2).await
+            };
+            let current = epochs.load(Ordering::SeqCst) == epoch;
+            if let Ok(mut c) = cache.lock() {
+                match &r {
+                    Ok(o) if current => {
+                        c.insert(scope2.clone(), (o.clone(), clock.now()));
+                    }
+                    Ok(_) => {}
+                    // A failed refresh drops a stale entry: past the TTL an unreadable breaker is Unknown.
+                    Err(_) => {
+                        c.remove(&scope2);
+                    }
+                }
+            }
+            if let Ok(mut m) = flights.lock()
+                && m.get(&scope2).is_some_and(|(e0, _)| *e0 == epoch)
+            {
+                m.remove(&scope2);
+            }
+            r.map_err(|e| e.to_string())
+        };
+        let f: BreakerFlight = if in_runtime {
+            let h = tokio::spawn(read);
+            async move { h.await.unwrap_or_else(|e| Err(format!("breaker read task: {e}"))) }.boxed().shared()
+        } else {
+            read.boxed().shared()
+        };
+        g.insert(scope.clone(), (epoch, f.clone()));
+        f
+    }
+
     /// Control object, cached 60 s; `Unknown` when unreadable past that.
+    /// Single flight; stale-while-revalidate as for breakers.
     pub async fn control(&self) -> ControlRead {
         let now = self.clock.now();
         let cached = self.control.lock().ok().and_then(|g| g.clone());
-        if let Some((c, at)) = &cached
-            && elapsed(now, *at) < self.opts.control_ttl
-        {
-            return ControlRead::Known(c.clone());
-        }
-        match self.inner.control_get().await {
-            Ok(c) => {
-                if let Ok(mut g) = self.control.lock() {
-                    *g = Some((c.clone(), self.clock.now()));
-                }
-                ControlRead::Known(c)
+        if let Some((c, at)) = &cached {
+            let age = elapsed(now, *at);
+            if age < self.opts.control_ttl {
+                return ControlRead::Known(c.clone());
             }
+            if age < self.opts.control_ttl * 2 && tokio::runtime::Handle::try_current().is_ok() {
+                drop(self.control_read());
+                return ControlRead::Known(c.clone());
+            }
+        }
+        match self.control_read().await {
+            Ok(c) => ControlRead::Known(c),
             Err(e) => {
                 tracing::warn!(error = %e, "control object unreadable");
                 ControlRead::Unknown
             }
         }
+    }
+
+    /// The shared read of the control object.
+    fn control_read(&self) -> ControlFlight {
+        use futures::FutureExt as _;
+        use std::sync::atomic::Ordering;
+
+        let epoch = self.control_epoch.load(Ordering::SeqCst);
+        let mut g = match self.control_flight.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                let inner = self.inner.clone();
+                return async move { inner.control_get().await.map_err(|e| e.to_string()) }.boxed().shared();
+            }
+        };
+        if let Some((e0, f)) = g.as_ref()
+            && *e0 == epoch
+        {
+            return f.clone();
+        }
+        let (inner, cache, flight, clock, epochs) =
+            (self.inner.clone(), self.control.clone(), self.control_flight.clone(), self.clock.clone(), self.control_epoch.clone());
+        let in_runtime = tokio::runtime::Handle::try_current().is_ok();
+        let read = async move {
+            let r = if in_runtime {
+                match tokio::time::timeout(HISTORY_READ_TIMEOUT, inner.control_get()).await {
+                    Ok(r) => r,
+                    Err(_) => Err(StoreError::Unreachable("control read timed out".into())),
+                }
+            } else {
+                inner.control_get().await
+            };
+            let current = epochs.load(Ordering::SeqCst) == epoch;
+            if let Ok(mut c) = cache.lock() {
+                match &r {
+                    Ok(v) if current => *c = Some((v.clone(), clock.now())),
+                    Ok(_) => {}
+                    Err(_) => *c = None,
+                }
+            }
+            if let Ok(mut m) = flight.lock()
+                && m.as_ref().is_some_and(|(e0, _)| *e0 == epoch)
+            {
+                *m = None;
+            }
+            r.map_err(|e| e.to_string())
+        };
+        let f: ControlFlight = if in_runtime {
+            let h = tokio::spawn(read);
+            async move { h.await.unwrap_or_else(|e| Err(format!("control read task: {e}"))) }.boxed().shared()
+        } else {
+            read.boxed().shared()
+        };
+        *g = Some((epoch, f.clone()));
+        f
     }
 }
 
@@ -698,6 +848,7 @@ impl HistoryStore for CachedStore {
     }
     async fn breaker_trip(&self, trip: &Trip) -> Result<(), StoreError> {
         let r = self.inner.breaker_trip(trip).await;
+        self.bump_control_epoch();
         if let Ok(mut g) = self.breakers.lock() {
             g.remove(&trip.scope);
         }
@@ -705,6 +856,7 @@ impl HistoryStore for CachedStore {
     }
     async fn breaker_reset(&self, reset: &Reset) -> Result<(), StoreError> {
         let r = self.inner.breaker_reset(reset).await;
+        self.bump_control_epoch();
         if let Ok(mut g) = self.breakers.lock() {
             g.remove(&reset.scope);
         }
@@ -718,6 +870,7 @@ impl HistoryStore for CachedStore {
     }
     async fn control_set(&self, control: &Control) -> Result<(), StoreError> {
         let r = self.inner.control_set(control).await;
+        self.bump_control_epoch();
         if let Ok(mut g) = self.control.lock() {
             *g = None;
         }

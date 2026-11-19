@@ -330,3 +330,29 @@ def test_invalidate_never_raises_and_refreshes(engine):
     engine.invalidate("not a key ::: at all")  # S1: logged, never raised
     d2 = engine.decide(ctx)
     assert d2.prior.spec.requests.memory == d1.prior.spec.requests.memory
+
+
+async def test_adecide_with_an_attempt_stays_on_the_loop(engine, monkeypatch):
+    """M1 QA regression: Flyte parents pass an attempt context on every call that may escalate.
+    ``adecide(attempt=…)`` must await ``_core.aattempt_decide`` (no thread-pool hop per call) and
+    agree with the sync path."""
+    import asyncio
+
+    ctx = rs.Context(key="att-async", prior=rs.Resources(cpu=2, memory="8Gi"))
+    def att(inv: str) -> "rs.AttemptContext":
+        return rs.AttemptContext(invocation_id=inv, attempt=1, max_attempts=3)
+
+    loop = asyncio.get_running_loop()
+
+    def no_executor(*a, **k):  # pragma: no cover - the failure mode
+        raise AssertionError("adecide(attempt=…) went through run_in_executor")
+
+    monkeypatch.setattr(loop, "run_in_executor", no_executor)
+    ds = await asyncio.gather(*(engine.adecide(ctx, attempt=att(f"inv-{i}")) for i in range(32)))
+    assert all(d.key == "python://alice/att-async" for d in ds)
+    # adecide never raises: a failure would surface as an S1 fallback, so check the source.
+    assert all(not (d.source.kind == "prior" and d.source.reason in ("internal", "panic", "error")) for d in ds), \
+        {(d.source.kind, d.source.reason) for d in ds}
+    assert len({d.id for d in ds}) == 32
+    sync = engine.decide(ctx, attempt=att("inv-sync"))
+    assert sync.applied.requests == ds[0].applied.requests

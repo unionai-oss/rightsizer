@@ -141,5 +141,26 @@ r="$(shim decide --namespace ml --mode enforce)"
 [[ "$(jq_ 'v.get("error",{}).get("code")' <<<"$r")" == "-32003" ]] && ok "unmapped uid -> error: $(jq_ 'v["error"]["message"]' <<<"$r")" || bad "unmapped uid: $r"
 stop || true
 
+echo "== server mode: a group-writable plugin path is refused (pin matches)"
+mkdir -p "$D/plug"
+cp "$DEMO" "$D/plug/rsz-plugin-nomad-demo"
+chmod 0775 "$D/plug/rsz-plugin-nomad-demo"
+DEMO_ORIG="$DEMO"; DEMO="$D/plug/rsz-plugin-nomad-demo"
+config "$SHA" '["nomad-demo://ml"]' '[]'
+start
+r="$(shim decide --namespace ml --mode recommend)"
+if [[ "$(jq_ 'v.get("error",{}).get("data",{}).get("code")' <<<"$r")" == "platform_unavailable" ]] && grep -q 'group- or world-writable' "$D/serve.log"; then
+  ok "group-writable plugin (0775) refused: $(grep -m1 'writable' "$D/serve.log" | sed 's/.*plugin refused/plugin refused/' | cut -c1-160)"
+else
+  bad "group-writable plugin: $r | $(tail -3 "$D/serve.log")"
+fi
+stop || true
+chmod 0755 "$D/plug/rsz-plugin-nomad-demo"
+start
+r="$(shim decide --namespace ml --mode recommend)"
+[[ "$(jq_ 'v.get("result",{}).get("mode")' <<<"$r")" == "recommend" ]] && ok "control: the same copy at 0755 is accepted" || bad "control 0755: $r"
+stop || true
+DEMO="$DEMO_ORIG"
+
 echo "== $pass passed, $fail failed"
 [[ $fail == 0 ]]

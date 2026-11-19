@@ -1073,26 +1073,30 @@ impl HistoryStore for ObjectHistoryStore {
     async fn breaker_get(&self, scope: &BreakerScope) -> Result<BreakerObjects, StoreError> {
         // The current path and the N-1 one (workload scopes without the
         // platform segment); trips are deduplicated by id.
+        // Every object and directory is read concurrently: a scope is ~5 store
+        // calls (current + N-1 layouts), and each decision reads several scopes.
         let mut trips: Vec<Trip> = Vec::new();
         let mut resets: Vec<Reset> = Vec::new();
-        for obj in scope.reset_objects() {
-            resets.extend(self.read_reset(&self.rel(&obj)).await?);
+        let reset_paths: Vec<String> = scope.reset_objects().iter().map(|o| self.rel(o)).collect();
+        for r in futures::future::try_join_all(reset_paths.iter().map(|p| self.read_reset(p))).await? {
+            resets.extend(r);
         }
         // Trips: `breakers-trips/{scope}/` (current), then the N-1
         // `breakers/{scope}/trips/` directories.
-        for dir in scope.trip_dirs() {
-            let trip_dir = self.rel(&dir);
-            let paths: Vec<String> = self
-                .list(&trip_dir, None)
-                .await?
-                .into_iter()
-                .map(|m| m.location.to_string())
-                .filter(|p| p.ends_with(".json") && !p[trip_dir.len()..].contains('/'))
-                .collect();
-            for (_, t) in self.get_many::<Trip>(paths).await? {
-                if &t.scope == scope && !trips.iter().any(|x| x.id == t.id) {
-                    trips.push(t);
-                }
+        let trip_dirs: Vec<String> = scope.trip_dirs().iter().map(|d| self.rel(d)).collect();
+        let listed = futures::future::try_join_all(trip_dirs.iter().map(|d| self.list(d, None))).await?;
+        let mut paths: Vec<String> = Vec::new();
+        for (trip_dir, metas) in trip_dirs.iter().zip(listed) {
+            paths.extend(
+                metas
+                    .into_iter()
+                    .map(|m| m.location.to_string())
+                    .filter(|p| p.ends_with(".json") && !p[trip_dir.len()..].contains('/')),
+            );
+        }
+        for (_, t) in self.get_many::<Trip>(paths).await? {
+            if &t.scope == scope && !trips.iter().any(|x| x.id == t.id) {
+                trips.push(t);
             }
         }
         trips.sort_by_key(|t| t.id);

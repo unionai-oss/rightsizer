@@ -87,7 +87,7 @@ start_host_webhook() { # start the webhook on the host (dev loop)
   stop_host_webhook
   RIGHTSIZER_CONFIG="${STATE}/rightsizer.toml" RSZ_LOG="${RSZ_LOG:-info,kube=warn,hyper=warn}" \
     nohup "${RSZ}" webhook serve --http-listen "127.0.0.1:${HTTP_PORT}" --no-leader-election \
-      --scrape-interval 15 --peak-delay "${RSZ_IT_PEAK_DELAY:-35}" --view-ttl 2 \
+      --scrape-interval 15 --peak-delay "${RSZ_IT_PEAK_DELAY:-35}" --view-ttl 2 ${RSZ_IT_WEBHOOK_EXTRA:-} \
       >"${STATE}/webhook.log" 2>&1 &
   echo $! >"${STATE}/webhook.pid"
   wait_for 30 "webhook ready" curl -sf "http://127.0.0.1:${HTTP_PORT}/readyz"

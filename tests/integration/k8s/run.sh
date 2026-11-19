@@ -78,6 +78,7 @@ scenario_a() {
   recreate_ns rsz-it-kq enforce
   recreate_ns rsz-it-crd enforce
   recreate_ns rsz-it-ray enforce
+  recreate_ns flytesnacks-development recommend # a7: the namespace the Flyte template renders
   seed_history k8s://rsz-it/rsz-it-enf/job/train/main 6 300
   seed_history k8s://rsz-it/rsz-it-enf/job/grow/main 6 900
   seed_history k8s://rsz-it/rsz-it-lr/job/grow/main 6 900
@@ -300,6 +301,45 @@ scenario_d() {
   srcs="$(kc get --raw /api/v1/namespaces/rightsizer/services/rightsizer-webhook:metrics/proxy/metrics 2>/dev/null | grep '^rightsizer_watcher_records_total' | tr '\n' ' ')"
   check d5.watcher-in-cluster-success-peak "$(echo "$st" | python3 -I -c 'import json,sys; r=json.load(sys.stdin); print({k: r.get(k) for k in ("status","memory_peak","cpu_mean","cpu_peak_window")})' 2>/dev/null) | replica metrics: ${srcs}" \
     python3 -I -c 'import json,sys; r=json.loads(sys.argv[1]); m=r.get("memory_peak") or {}; sys.exit(0 if r["status"]=="succeeded" and 95*2**20 <= m.get("value",0) <= 200*2**20 else 1)' "$st"
+  # Node agent auth: /v1 needs the bearer token. From an ordinary pod (the
+  # NetworkPolicy may drop it first) and from a pod in the release namespace
+  # that copies the webhook's labels (passes the NetworkPolicy): no token or
+  # a wrong one -> 401; /healthz stays open.
+  local aip p1 p2
+  aip="$(kc -n rightsizer get pods -l app.kubernetes.io/component=node-agent -o jsonpath='{.items[0].status.podIP}')"
+  p1="$(agent_probe rsz-it-d probe-plain "" "$aip" "$ust")"
+  check d6.node-agent-rejects-ordinary-pod "agent ${aip}:9102 from rsz-it-d: ${p1}" \
+    python3 -I -c 'import json,sys; r=json.loads(sys.argv[1]); sys.exit(0 if all(str(r[k]).startswith(("401","blocked")) for k in ("no_token","wrong_token")) else 1)' "${p1:-{\}}"
+  p2="$(agent_probe rightsizer probe-spoof "app.kubernetes.io/name=rightsizer,app.kubernetes.io/instance=rightsizer,app.kubernetes.io/component=webhook" "$aip" "$ust")"
+  check d7.node-agent-rejects-without-token "agent ${aip}:9102 from a pod with the webhook's labels in ns rightsizer: ${p2}" \
+    python3 -I -c 'import json,sys; r=json.loads(sys.argv[1]); sys.exit(0 if r["healthz"]==200 and r["no_token"]==401 and r["wrong_token"]==401 else 1)' "${p2:-{\}}"
+}
+
+agent_probe() { # agent_probe NS NAME LABELS IP POD_UID : JSON of HTTP statuses from inside a pod
+  local ns="$1" name="$2" labels="$3" ip="$4" uid="$5"
+  kc -n "$ns" delete pod "$name" --ignore-not-found --wait=true >/dev/null 2>&1
+  kc -n "$ns" run "$name" --restart=Never --image=python:3.12-slim --image-pull-policy=IfNotPresent ${labels:+--labels="$labels"} \
+    --env="IP=$ip" --env="UID_=$uid" -- python -c '
+import json, os, urllib.request, urllib.error
+base = "http://%s:9102" % os.environ["IP"]
+def get(path, tok=None):
+    r = urllib.request.Request(base + path)
+    if tok: r.add_header("Authorization", "Bearer " + tok)
+    try: return urllib.request.urlopen(r, timeout=5).status
+    except urllib.error.HTTPError as e: return e.code
+    except Exception as e: return "blocked:" + type(e).__name__
+import time
+p = "/v1/containers/%s/main" % os.environ["UID_"]
+# NetworkPolicy controllers admit a new pod IP asynchronously: retry while blocked.
+for _ in range(6):
+    r = {"healthz": get("/healthz"), "no_token": get(p), "wrong_token": get(p, "x" * 48)}
+    if r["healthz"] == 200:
+        break
+    time.sleep(5)
+print(json.dumps(r))' >/dev/null
+  wait_for 90 "probe pod $name" sh -c "kubectl --kubeconfig '${KUBECONFIG}' -n '$ns' get pod '$name' -o jsonpath='{.status.phase}' | grep -Eq 'Succeeded|Failed'"
+  kc -n "$ns" logs "$name" 2>/dev/null | tail -1
+  kc -n "$ns" delete pod "$name" --ignore-not-found >/dev/null 2>&1
 }
 
 # ================================================================ e: latency
@@ -357,6 +397,117 @@ sys.exit(0 if ok else 1)' "$restored"
   check f3.restore-live-job-refused "$(head -c 200 "${STATE}/restore-job.log")" grep -q immutable "${STATE}/restore-job.log"
 }
 
+# ================================================================ g: review/refinement checks
+prior_json() { # prior_json ANNOTATION : the signed prior's JSON body (no signature check)
+  python3 -I -c 'import base64,json,sys; v=sys.argv[1]; print(json.dumps(json.loads(base64.urlsafe_b64decode(v+"="*(-len(v)%4)))))' "$1"
+}
+
+org_pod() { # org_pod ORG : pod-flyte.yaml with an `organization` label
+  python3 -I -c 'import sys; print(open(sys.argv[1]).read().replace("  labels:\n", "  labels:\n    organization: %s\n" % sys.argv[2], 1), end="")' "$M/pod-flyte.yaml" "$1"
+}
+
+scenario_g() {
+  # g1 a genuine prior copied onto another object is not trusted there:
+  #    the new object's origin is its own 4Gi, bound to its own identity.
+  # g4 the watcher's lease sweep trips the workload breaker for a seeded
+  #    ladder lease that expired open (short lease_ttl + sweep interval).
+  stop_host_webhook
+  recreate_ns rsz-it-g enforce
+  ns_enable flytesnacks-development recommend
+  seed_history k8s://rsz-it/rsz-it-g/job/copy/main 6 300
+  local SW=k8s://rsz-it/rsz-it-g/job/swept/main now
+  seed_history "$SW" 6 300 succeeded 2048
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  docker exec -i "${PG_CONTAINER}" psql -U rsz -d rsz -q -v ON_ERROR_STOP=1 >/dev/null <<SQL
+INSERT INTO rightsizer.attempts (key, invocation_id, written_at_ms, body) VALUES ('${SW}', 'inv-expired', $(($(date +%s) * 1000)),
+ '{"v":1,"key":"${SW}","invocation_id":"inv-expired","origin_prior":{"memory":2147483648,"cpu":1000},"applied":{"memory":536870912,"cpu":1000},"reduced":true,"written_at":"${now}","lease":{"opened_at":"${now}"}}');
+SQL
+  # The failure: OOM at the reduced 512Mi, unclassified (inferred) and recent,
+  # so the importer's outcome neither trips (pending) nor closes the lease.
+  python3 -I - "$SW" >"${STATE}/swept.jsonl" <<'EOF'
+import datetime as dt, json, sys
+t = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=90)
+print(json.dumps({"v": 1, "key": sys.argv[1], "cluster": "rsz-it", "invocation_id": "inv-expired", "attempt": 1,
+  "started_at": t.isoformat().replace("+00:00", "Z"), "status": "oom_killed", "status_confidence": "inferred",
+  "requested": {"requests": {"memory": 536870912, "cpu": 1000}, "limits": {}},
+  "origin_prior": {"memory": 2147483648, "cpu": 1000},
+  "memory_peak": {"value": 536870912.0, "censor": "at_least"}, "duration_s": 30.0,
+  "source": {"kind": "watcher"}, "trust": "verified"}))
+EOF
+  local imp
+  imp="$(rsz history import jsonl "${STATE}/swept.jsonl" 2>&1)"
+  local pre
+  pre="$(rsz breaker status 2>&1)"
+  write_config $'[policy]\nlease_ttl = "60s"'
+  RSZ_IT_WEBHOOK_EXTRA="--sweep-interval 5" start_dev_loop
+
+  # g1 copied prior
+  local src
+  # (scenario a's enforced Job, saved: the live one may be gone by its TTL)
+  src="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["metadata"]["annotations"]["rightsizer.io/prior"])' "${STATE}/train-enforced.json")"
+  python3 -I - "$M/job-train.yaml" "$src" >"${STATE}/job-copy.yaml" <<'EOF'
+import sys
+t = open(sys.argv[1]).read().replace("  name: train\n", "  name: copy\n  annotations:\n    rightsizer.io/prior: \"%s\"\n" % sys.argv[2], 1)
+print(t.replace("memory: 2Gi", "memory: 4Gi"), end="")
+EOF
+  kc -n rsz-it-g create -f "${STATE}/job-copy.yaml" >/dev/null 2>"${STATE}/job-copy.err"
+  local cp_prior cp_mem body
+  cp_prior="$(ann job/copy rsz-it-g rightsizer.io/prior)"
+  cp_mem="$(jp job/copy rsz-it-g '{.spec.template.spec.containers[0].resources.requests.memory}')"
+  body="$(prior_json "$cp_prior" 2>/dev/null)"
+  check g1.copied-prior-not-trusted "source prior bind=$(prior_json "$src" | python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("bind"))') -> copy: memory 4Gi -> ${cp_mem}; new prior ${body:0:220}" \
+    python3 -I -c '
+import json,sys
+b=json.loads(sys.argv[1]); src=sys.argv[2]
+units=list(b["prior"].values())
+ok = b.get("bind")=="rsz-it-g/Job/copy" and units and all(u["requests"]["memory"]==4*2**30 for u in units) and sys.argv[3] not in ("", src)
+sys.exit(0 if ok else 1)' "${body:-{\}}" "$src" "$cp_prior"
+
+  # g2 forged Flyte org label: not keyed into another org (template has no {org}; default_org testorg)
+  local fe ft de dt ke kt
+  fe="$(org_pod evilorg | kc -n flytesnacks-development create -f - -o name)"
+  ft="$(org_pod testorg | kc -n flytesnacks-development create -f - -o name)"
+  de="$(ann "$fe" flytesnacks-development rightsizer.io/decision-id)"
+  dt="$(ann "$ft" flytesnacks-development rightsizer.io/decision-id)"
+  sleep 2
+  ke="$(rsz explain --decision "$de" -o json 2>/dev/null | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["key"])')"
+  kt="$(rsz explain --decision "$dt" -o json 2>/dev/null | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["key"])')"
+  check g2.forged-flyte-org-not-trusted "organization=evilorg -> ${ke}; organization=testorg (control) -> ${kt}" \
+    sh -c "case '$ke' in k8s://rsz-it/flytesnacks-development/pod/*) [ '$kt' = flyte://testorg/flytesnacks/development/wf.t1 ];; *) exit 1;; esac"
+
+  # g3 history revalidation (30 s): a key decided with no history, then seeded
+  #    by another process while the webhook runs, is enforced after ~30 s
+  #    (before: invisible until the 10 min cache/memo TTLs).
+  local m0 m1
+  sed 's/name: train/name: late/' "$M/job-train.yaml" | kc -n rsz-it-g create -f - >/dev/null
+  m0="$(jp job/late rsz-it-g '{.spec.template.spec.containers[0].resources.requests.memory}')"
+  kc -n rsz-it-g delete job late --wait=true >/dev/null
+  seed_history k8s://rsz-it/rsz-it-g/job/late/main 6 300
+  sleep 35
+  sed 's/name: train/name: late/' "$M/job-train.yaml" | kc -n rsz-it-g create -f - >/dev/null
+  m1="$(jp job/late rsz-it-g '{.spec.template.spec.containers[0].resources.requests.memory}')"
+  check g3.history-revalidation "before seeding: 2Gi -> ${m0}; seeded while the webhook runs, 35 s later: 2Gi -> ${m1}" \
+    test "$m0" = 2Gi -a "$m1" != 2Gi
+
+  # g4 lease sweep
+  local br end=$((SECONDS + 90))
+  until rsz breaker status 2>&1 | grep -q 'job/swept'; do ((SECONDS > end)) && break; sleep 3; done
+  br="$(rsz breaker status -o json 2>&1)"
+  local lease
+  lease="$(docker exec "${PG_CONTAINER}" psql -U rsz -d rsz -Atc "select body->'lease' from rightsizer.attempts where key='${SW}' and invocation_id='inv-expired'" 2>/dev/null)"
+  check g4.sweep-trips-expired-lease "before: $(echo "$pre" | tr '\n' ' ' | cut -c1-80); import: $(echo "$imp" | tr '\n' ' ' | cut -c1-120); after: $(echo "$br" | tr '\n' ' ' | cut -c1-400); lease ${lease}" \
+    python3 -I -c '
+import json,sys
+br=json.loads(sys.argv[1]); lease=json.loads(sys.argv[2] or "{}")
+hit=[b for b in br if "job/swept" in json.dumps(b.get("scope"))]
+ok = hit and any("expired open" in json.dumps(b) or "unrecovered" in json.dumps(b) for b in hit) and lease.get("closed_at") and "job/swept" not in sys.argv[3]
+sys.exit(0 if ok else 1)' "$br" "$lease" "$pre"
+
+  stop_host_webhook
+  write_config
+  start_dev_loop
+}
+
 do_teardown() {
   stop_host_webhook
   kc delete mutatingwebhookconfiguration rightsizer-it rightsizer --ignore-not-found >/dev/null 2>&1 || true
@@ -373,7 +524,8 @@ for step in "${@:-all}"; do
     d) scenario_d ;;
     e) scenario_e ;;
     f) scenario_f ;;
-    all) do_setup; scenario_a; scenario_b; scenario_b_import; scenario_c; scenario_e; scenario_f; scenario_d ;;
+    g) scenario_g ;;
+    all) do_setup; scenario_a; scenario_b; scenario_b_import; scenario_c; scenario_e; scenario_f; scenario_g; scenario_d ;;
     teardown) do_teardown ;;
     *) echo "unknown step $step" >&2; exit 2 ;;
   esac

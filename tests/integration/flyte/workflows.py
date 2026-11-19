@@ -186,13 +186,38 @@ driver_env = rf.RightsizedEnvironment(
 )
 
 
+_METRICS = ("rightsizer_decisions_total", "rightsizer_budget_expired_total", "rightsizer_caused_failures_total",
+            "rightsizer_held_total", "rightsizer_clamped_total", "rightsizer_errors_total", "rightsizer_store_errors_total",
+            "rightsizer_outcomes_joined_total", "rightsizer_outcomes_dropped_total", "rightsizer_breaker_open")
+
+
+def _metrics() -> Dict[str, float]:
+    """The parent engine's counters of interest (Prometheus text → {series: value})."""
+    from rightsizer.flyte import _engine as eng
+
+    out: Dict[str, float] = {}
+    try:
+        text = eng.get_engine().metrics()
+    except Exception as e:  # no engine (scenario h) or no metrics
+        return {"error": f"{type(e).__name__}: {e}"[:200]}
+    for line in text.splitlines():
+        if line.startswith(_METRICS):
+            name, _, val = line.rpartition(" ")
+            try:
+                out[name] = float(val)
+            except ValueError:
+                pass
+    return out
+
+
 def _stats() -> str:
     from rightsizer.flyte import _engine as eng
 
     lat = sorted(eng.latencies_ms)
     q = (lambda p: round(lat[min(len(lat) - 1, int(p * (len(lat) - 1)))], 3)) if lat else (lambda p: None)
     return {"counters": dict(eng.counters), "decision_ms_p50": q(0.5), "decision_ms_p99": q(0.99),
-            "decision_ms_max": round(lat[-1], 3) if lat else None, "decisions_timed": len(lat)}
+            "decision_ms_max": round(lat[-1], 3) if lat else None, "decisions_timed": len(lat),
+            "metrics": _metrics()}
 
 
 async def _parquet_files(sizes: List[int]) -> List[flyte.io.File]:
@@ -279,3 +304,53 @@ async def small(n: int = 3) -> str:
     """For local mode (f) and pickled bundles (e)."""
     outs = await asyncio.gather(*(tiny(i) for i in range(n)), hog(32, 0.1))
     return json.dumps({"outs": list(outs), **_stats()})
+
+
+@driver_env.task
+async def overhead(n: int = 10_000, seq: int = 2_000) -> str:
+    """M1 exit criterion: the rightsizer part of a call (plan + engine decision + sized copy) in a
+    parent pod, against the devbox store, once memoized: a ``n``-way ``gather`` (as ``flyte.map``
+    issues them) and ``seq`` sequential calls. Same arguments (memo hits) and, for comparison,
+    distinct scalar arguments per call. Nothing is submitted; decisions are recorded as on the
+    real path."""
+    from rightsizer.flyte import _engine as eng
+    from rightsizer.flyte._policy import captured_stack
+
+    t = tiny
+    with rf.policy(mode="enforce"):
+        stack = t._rs_stack()
+        inherited = captured_stack()
+    sources: Dict[str, int] = {}
+
+    async def one(arg: int, sink: list) -> None:
+        t0 = time.perf_counter()
+        plan = t._rs_plan(stack, inherited, (arg,), {})
+        d = await t._rs_adecide(plan, None)
+        t._rs_copy(d, plan, None)
+        sink.append(time.perf_counter() - t0)
+        k = f"{d.source.kind}:{getattr(d.source, 'reason', None) or getattr(d.source, 'id', '')}"
+        sources[k] = sources.get(k, 0) + 1
+
+    async def measure(label: str, args) -> Dict[str, object]:
+        warm: list = []
+        await one(args(-1), warm)  # the miss that fills the memo
+        await asyncio.sleep(0.5)
+        fan: list = []
+        before = dict(eng.counters)
+        t0 = time.perf_counter()
+        await asyncio.gather(*(one(args(i), fan) for i in range(n)))
+        wall = time.perf_counter() - t0
+        s: list = []
+        for i in range(seq):
+            await one(args(i), s)
+        s.sort()
+        return {"label": label, "calls": n, "first_ms": round(1000 * warm[0], 3), "fanout_wall_s": round(wall, 3),
+                "fanout_per_call_ms": round(1000 * wall / n, 4),
+                "sequential_p50_ms": round(1000 * statistics.median(s), 3),
+                "sequential_p99_ms": round(1000 * s[int(0.99 * (len(s) - 1))], 3),
+                "sequential_mean_ms": round(1000 * statistics.fmean(s), 3),
+                "counters_delta": {k: eng.counters[k] - before.get(k, 0) for k in eng.counters}}
+
+    same = await measure("same-args", lambda i: 7)
+    distinct = await measure("distinct-args", lambda i: 1_000_000 + i)
+    return json.dumps({"same": same, "distinct": distinct, "sources": sources, **_stats()})
