@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rightsizer-runtime"
+version = "0.1.0.dev0"
+description = "Pure-Python runtime for rightsizer: policy model, measurement, RunRecord writer."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.optional-dependencies]
+fsspec = ["fsspec>=2023.1"]
+nvml = ["nvidia-ml-py>=12"]
+test = ["pytest>=7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rightsizer_runtime"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

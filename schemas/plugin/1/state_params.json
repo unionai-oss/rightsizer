@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StateParams",
+  "description": "`state` params.",
+  "type": "object",
+  "properties": {
+    "deadline_ms": {
+      "description": "Deadline.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "env": {
+      "description": "Hosting environment.",
+      "$ref": "#/$defs/AdapterEnv",
+      "default": {
+        "settings": {}
+      }
+    },
+    "tenant": {
+      "description": "Tenant.",
+      "$ref": "#/$defs/Tenant"
+    }
+  },
+  "required": [
+    "tenant"
+  ],
+  "$defs": {
+    "AdapterEnv": {
+      "description": "What the hosting surface tells an adapter (cluster, caller identity, deadline).",
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "description": "Cluster name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deadline_ms": {
+          "description": "Remaining budget, ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "namespace": {
+          "description": "Authenticated namespace / account / project.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "description": "Authenticated caller (admission `userInfo.username`, Slurm `submit_uid`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settings": {
+          "description": "Adapter-specific settings (the `[k8s]`, `[slurm]`, … config section).",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        }
+      }
+    },
+    "Tenant": {
+      "description": "The security principal that owns workloads, derived by the integration\nfrom authenticated data (SPEC §4): a `/`-separated path of segments, e.g.\n`\"prod-us/ml-team\"` (K8s `{cluster}/{namespace}`).\n\nSegments are non-empty and use `[A-Za-z0-9._@+=,-]`.",
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,623 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlatformState",
+  "description": "Live platform state, given to the decision rule only (plugins.md §2).",
+  "type": "object",
+  "properties": {
+    "floors": {
+      "description": "Platform minimums.",
+      "$ref": "#/$defs/Requests",
+      "default": {}
+    },
+    "price": {
+      "description": "How a request is priced (SPEC §7.2).",
+      "$ref": "#/$defs/PriceModel",
+      "default": {
+        "kind": "packed"
+      }
+    },
+    "quota": {
+      "description": "Remaining quota, minus the adapter's reservation ledger.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Quota"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "request_model": {
+      "description": "What a request is (SPEC §5.8).",
+      "$ref": "#/$defs/RequestModel",
+      "default": {
+        "kind": "free"
+      }
+    },
+    "shapes": {
+      "description": "Schedulable node shapes.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/NodeShape"
+      }
+    }
+  },
+  "$defs": {
+    "AcceleratorId": {
+      "description": "A canonical accelerator id with per-device memory and family (SPEC §5.1.1).\nJSON: the canonical string, e.g. `\"A100-80G\"`; parsing is case-insensitive.",
+      "oneOf": [
+        {
+          "description": "NVIDIA T4, 16 GB.",
+          "type": "string",
+          "const": "T4-16G"
+        },
+        {
+          "description": "NVIDIA L4, 24 GB.",
+          "type": "string",
+          "const": "L4-24G"
+        },
+        {
+          "description": "NVIDIA A10G (AWS), 24 GB.",
+          "type": "string",
+          "const": "A10G-24G"
+        },
+        {
+          "description": "NVIDIA A10, 24 GB.",
+          "type": "string",
+          "const": "A10-24G"
+        },
+        {
+          "description": "NVIDIA L40S, 48 GB.",
+          "type": "string",
+          "const": "L40S-48G"
+        },
+        {
+          "description": "NVIDIA A100, 40 GB.",
+          "type": "string",
+          "const": "A100-40G"
+        },
+        {
+          "description": "NVIDIA A100, 80 GB.",
+          "type": "string",
+          "const": "A100-80G"
+        },
+        {
+          "description": "NVIDIA H100, 80 GB.",
+          "type": "string",
+          "const": "H100-80G"
+        },
+        {
+          "description": "NVIDIA H200, 141 GB.",
+          "type": "string",
+          "const": "H200-141G"
+        },
+        {
+          "description": "NVIDIA B200, 180 GB.",
+          "type": "string",
+          "const": "B200-180G"
+        },
+        {
+          "description": "AMD MI300X, 192 GB.",
+          "type": "string",
+          "const": "MI300X-192G"
+        },
+        {
+          "description": "Google TPU v5e (per chip).",
+          "type": "string",
+          "const": "TPU-V5E"
+        },
+        {
+          "description": "Google TPU v5p (per chip).",
+          "type": "string",
+          "const": "TPU-V5P"
+        },
+        {
+          "description": "Google TPU v6e / Trillium (per chip).",
+          "type": "string",
+          "const": "TPU-V6E"
+        },
+        {
+          "description": "AWS Trainium 1 (per chip).",
+          "type": "string",
+          "const": "TRN1"
+        },
+        {
+          "description": "AWS Trainium 2 (per chip).",
+          "type": "string",
+          "const": "TRN2"
+        },
+        {
+          "description": "AWS Inferentia 2 (per chip).",
+          "type": "string",
+          "const": "INF2"
+        },
+        {
+          "description": "A GPU of unknown type. Its type is never changed (SPEC §5.1.1).",
+          "type": "string",
+          "const": "unknown-gpu"
+        }
+      ]
+    },
+    "Bytes": {
+      "description": "A byte count. JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "Combo": {
+      "description": "One legal CPU with its legal memory values (SPEC §5.8 `Combos`).",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU.",
+          "$ref": "#/$defs/MilliCpu"
+        },
+        "memory": {
+          "description": "Legal memory values for that CPU.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Bytes"
+          }
+        }
+      },
+      "required": [
+        "cpu",
+        "memory"
+      ]
+    },
+    "GpuShape": {
+      "description": "An accelerator type × count (SPEC §5.1, §5.4).",
+      "type": "object",
+      "properties": {
+        "accel": {
+          "description": "Canonical accelerator id.",
+          "$ref": "#/$defs/AcceleratorId"
+        },
+        "count": {
+          "description": "Number of devices.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "accel",
+        "count"
+      ]
+    },
+    "HostShare": {
+      "description": "Host resources bundled with one GPU (SPEC §5.4).",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU per GPU.",
+          "$ref": "#/$defs/MilliCpu"
+        },
+        "memory": {
+          "description": "Memory per GPU.",
+          "$ref": "#/$defs/Bytes"
+        }
+      },
+      "required": [
+        "cpu",
+        "memory"
+      ]
+    },
+    "MilliCpu": {
+      "description": "CPU in millicores (1000 = one core). JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "NodeShape": {
+      "description": "A schedulable node shape (SPEC §5.4).",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "Allocatable CPU.",
+          "$ref": "#/$defs/MilliCpu"
+        },
+        "gpu": {
+          "description": "Accelerators.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host_per_gpu": {
+          "description": "Host CPU and memory bundled per GPU (default: node / GPU count).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostShare"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Allocatable memory.",
+          "$ref": "#/$defs/Bytes"
+        },
+        "name": {
+          "description": "Name (instance type, node pool).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "price_per_hour": {
+          "description": "Price of the whole node, $/h.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "cpu",
+        "memory",
+        "price_per_hour"
+      ]
+    },
+    "PriceModel": {
+      "description": "How an attempt is priced (SPEC §7.2). JSON: `{\"kind\": \"packed\"}`, …",
+      "oneOf": [
+        {
+          "description": "The dominant share of the cheapest node shape that holds the request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "packed"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Per-resource rates.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "linear"
+            },
+            "rates": {
+              "description": "Rates.",
+              "$ref": "#/$defs/Rates"
+            }
+          },
+          "required": [
+            "kind",
+            "rates"
+          ]
+        },
+        {
+          "description": "The shape's price × instance count (Catalog and Snap platforms).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "instance"
+            },
+            "usage": {
+              "description": "Usage type to price by (`\"training\"`, …).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Billed on max(request, use) per resource-second (Modal).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "usage_floor"
+            },
+            "rates": {
+              "description": "Rates.",
+              "$ref": "#/$defs/Rates"
+            }
+          },
+          "required": [
+            "kind",
+            "rates"
+          ]
+        }
+      ]
+    },
+    "Quota": {
+      "description": "Remaining quota (SPEC §7.4, S4).",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU remaining.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral storage remaining.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu_count": {
+          "description": "GPUs remaining.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "memory": {
+          "description": "Memory remaining.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Rates": {
+      "description": "Per-resource hourly rates.",
+      "type": "object",
+      "properties": {
+        "cpu_core_hr": {
+          "description": "$ per core-hour.",
+          "type": "number",
+          "format": "double"
+        },
+        "gpu_hr": {
+          "description": "$ per device-hour, by accelerator.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          },
+          "default": {}
+        },
+        "mem_gib_hr": {
+          "description": "$ per GiB-hour.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "cpu_core_hr",
+        "mem_gib_hr"
+      ]
+    },
+    "RequestModel": {
+      "description": "What a request is on this platform (SPEC §5.8). JSON: `{\"kind\": \"free\"}`,\n`{\"kind\": \"catalog\", \"shapes\": [...]}`, …\n\n`Snap` is data, not a function: the platform snaps a lower bound to the\ncheapest listed shape that covers it. An in-process caller with an exact\ncustom snap function passes a [`SnapFn`] to the decision rule instead;\nwhen `exact` is false the unit is recommend-only (SPEC §5.8).",
+      "oneOf": [
+        {
+          "description": "Any grid cell within floor and ceiling.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "free"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Discrete machine types.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "catalog"
+            },
+            "shapes": {
+              "description": "The catalog.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Shape"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "shapes"
+          ]
+        },
+        {
+          "description": "Legal CPU/memory pairs only (Fargate).",
+          "type": "object",
+          "properties": {
+            "combos": {
+              "description": "Legal combinations.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Combo"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "combos"
+            }
+          },
+          "required": [
+            "kind",
+            "combos"
+          ]
+        },
+        {
+          "description": "The platform turns a lower bound into a shape itself.",
+          "type": "object",
+          "properties": {
+            "exact": {
+              "description": "Whether the snap rule (cheapest covering shape) is known exactly.",
+              "type": "boolean",
+              "default": false
+            },
+            "instance_bounded": {
+              "description": "Whether memory is bounded by the instance (failure uses the snapped\nshape's usable memory) rather than by the ask.",
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "snap"
+            },
+            "shapes": {
+              "description": "Shapes the platform may choose from.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Shape"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "shapes"
+          ]
+        }
+      ]
+    },
+    "Requests": {
+      "description": "Resource requests of one unit (SPEC §5.1). `None` = not set.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral storage.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu": {
+          "description": "Accelerators.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shm": {
+          "description": "Shared memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Shape": {
+      "description": "A catalog machine type (SPEC §5.8).",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "vCPUs.",
+          "$ref": "#/$defs/MilliCpu"
+        },
+        "family": {
+          "description": "Instance family.",
+          "type": "string",
+          "default": ""
+        },
+        "gpu": {
+          "description": "Accelerators.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Installed memory.",
+          "$ref": "#/$defs/Bytes"
+        },
+        "name": {
+          "description": "Name, e.g. `\"ml.g5.2xlarge\"`.",
+          "type": "string"
+        },
+        "price": {
+          "description": "$/h by usage type (`\"training\"`, `\"spot\"`, …).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          },
+          "default": {}
+        },
+        "reserved": {
+          "description": "Taken by the platform's agents and OS: usable = memory − reserved.",
+          "$ref": "#/$defs/Bytes",
+          "default": 0
+        }
+      },
+      "required": [
+        "name",
+        "cpu",
+        "memory"
+      ]
+    }
+  }
+}

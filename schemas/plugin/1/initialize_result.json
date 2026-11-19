@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InitializeResult",
+  "description": "`initialize` result.",
+  "type": "object",
+  "properties": {
+    "concurrency": {
+      "description": "Concurrent requests per pipe (default 1).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "kind": {
+      "description": "Platform kind (plugins) or `\"rightsizer\"` (daemon).",
+      "type": "string"
+    },
+    "methods": {
+      "description": "Methods implemented.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "native_media_types": {
+      "description": "Native media types accepted.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "protocol": {
+      "description": "Protocol spoken.",
+      "type": "string"
+    },
+    "version": {
+      "description": "Implementation version.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol",
+    "kind",
+    "version"
+  ]
+}

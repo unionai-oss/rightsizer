@@ -1,0 +1,962 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReferenceParams",
+  "description": "`reference` params.",
+  "type": "object",
+  "properties": {
+    "unit": {
+      "description": "The unit.",
+      "$ref": "#/$defs/Unit"
+    }
+  },
+  "required": [
+    "unit"
+  ],
+  "$defs": {
+    "AcceleratorId": {
+      "description": "A canonical accelerator id with per-device memory and family (SPEC §5.1.1).\nJSON: the canonical string, e.g. `\"A100-80G\"`; parsing is case-insensitive.",
+      "oneOf": [
+        {
+          "description": "NVIDIA T4, 16 GB.",
+          "type": "string",
+          "const": "T4-16G"
+        },
+        {
+          "description": "NVIDIA L4, 24 GB.",
+          "type": "string",
+          "const": "L4-24G"
+        },
+        {
+          "description": "NVIDIA A10G (AWS), 24 GB.",
+          "type": "string",
+          "const": "A10G-24G"
+        },
+        {
+          "description": "NVIDIA A10, 24 GB.",
+          "type": "string",
+          "const": "A10-24G"
+        },
+        {
+          "description": "NVIDIA L40S, 48 GB.",
+          "type": "string",
+          "const": "L40S-48G"
+        },
+        {
+          "description": "NVIDIA A100, 40 GB.",
+          "type": "string",
+          "const": "A100-40G"
+        },
+        {
+          "description": "NVIDIA A100, 80 GB.",
+          "type": "string",
+          "const": "A100-80G"
+        },
+        {
+          "description": "NVIDIA H100, 80 GB.",
+          "type": "string",
+          "const": "H100-80G"
+        },
+        {
+          "description": "NVIDIA H200, 141 GB.",
+          "type": "string",
+          "const": "H200-141G"
+        },
+        {
+          "description": "NVIDIA B200, 180 GB.",
+          "type": "string",
+          "const": "B200-180G"
+        },
+        {
+          "description": "AMD MI300X, 192 GB.",
+          "type": "string",
+          "const": "MI300X-192G"
+        },
+        {
+          "description": "Google TPU v5e (per chip).",
+          "type": "string",
+          "const": "TPU-V5E"
+        },
+        {
+          "description": "Google TPU v5p (per chip).",
+          "type": "string",
+          "const": "TPU-V5P"
+        },
+        {
+          "description": "Google TPU v6e / Trillium (per chip).",
+          "type": "string",
+          "const": "TPU-V6E"
+        },
+        {
+          "description": "AWS Trainium 1 (per chip).",
+          "type": "string",
+          "const": "TRN1"
+        },
+        {
+          "description": "AWS Trainium 2 (per chip).",
+          "type": "string",
+          "const": "TRN2"
+        },
+        {
+          "description": "AWS Inferentia 2 (per chip).",
+          "type": "string",
+          "const": "INF2"
+        },
+        {
+          "description": "A GPU of unknown type. Its type is never changed (SPEC §5.1.1).",
+          "type": "string",
+          "const": "unknown-gpu"
+        }
+      ]
+    },
+    "Axis": {
+      "description": "A resource axis (SPEC §5.1).",
+      "oneOf": [
+        {
+          "description": "Host memory (incompressible).",
+          "type": "string",
+          "const": "memory"
+        },
+        {
+          "description": "Host CPU (compressible).",
+          "type": "string",
+          "const": "cpu"
+        },
+        {
+          "description": "Number of accelerators.",
+          "type": "string",
+          "const": "gpu_count"
+        },
+        {
+          "description": "Accelerator type.",
+          "type": "string",
+          "const": "gpu_type"
+        },
+        {
+          "description": "Ephemeral storage (no grid in v1: always held).",
+          "type": "string",
+          "const": "ephemeral_storage"
+        },
+        {
+          "description": "Shared memory (`/dev/shm`; no grid in v1: always held).",
+          "type": "string",
+          "const": "shm"
+        }
+      ]
+    },
+    "AxisSet": {
+      "description": "A set of axes; aliases `gpu` = {gpu_count, gpu_type}, `disk` = ephemeral_storage.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "memory",
+          "cpu",
+          "gpu_count",
+          "gpu_type",
+          "ephemeral_storage",
+          "shm",
+          "gpu",
+          "disk",
+          "mem"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "Bytes": {
+      "description": "A byte count. JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "CodeInfo": {
+      "description": "Code identity (SPEC §5.2).",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "description": "Normalized digest (comments, whitespace and resource directives stripped).",
+          "type": "string"
+        },
+        "source": {
+          "description": "Source text, only if privacy allows; truncated at 64 KiB.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokens": {
+          "description": "`features-v1` code tokens.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "digest"
+      ]
+    },
+    "CodeRef": {
+      "description": "Code reference (plugins.md §2): source text, or a reference the engine may\nresolve. JSON: `{\"kind\": \"source\", ...}`.",
+      "oneOf": [
+        {
+          "description": "Source text.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "source"
+            },
+            "language": {
+              "description": "Language hint (`\"python\"`, `\"bash\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "description": "The text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "description": "A local file path.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "path"
+            },
+            "path": {
+              "description": "Path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        },
+        {
+          "description": "Already-extracted code info.",
+          "type": "object",
+          "properties": {
+            "info": {
+              "description": "The info.",
+              "$ref": "#/$defs/CodeInfo"
+            },
+            "kind": {
+              "type": "string",
+              "const": "info"
+            }
+          },
+          "required": [
+            "kind",
+            "info"
+          ]
+        }
+      ]
+    },
+    "Constraints": {
+      "description": "Constraints defining the feasible set (SPEC §7.4).",
+      "type": "object",
+      "properties": {
+        "allowed_shapes": {
+          "description": "Allowed GPU shapes when GPU type changes are opted in.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/GpuShape"
+          }
+        },
+        "ceiling": {
+          "description": "User ceiling (the core intersects it with the largest shape and quota).",
+          "$ref": "#/$defs/Requests",
+          "default": {}
+        },
+        "floor": {
+          "description": "Platform minimums (the core adds the size-scaled floor).",
+          "$ref": "#/$defs/Requests",
+          "default": {}
+        },
+        "held": {
+          "description": "Platform and adapter holds (the core adds S2/S3 holds itself).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Hold"
+          }
+        },
+        "pinned": {
+          "description": "User pins and explicit call-site resources: stay at the prior's value.",
+          "$ref": "#/$defs/AxisSet",
+          "default": []
+        }
+      }
+    },
+    "ContextSeed": {
+      "description": "What an adapter knows about a unit before the core reads anything\n(plugins.md §2).",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Code reference.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputs": {
+          "description": "Inputs to read metadata for.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/InputRef"
+          }
+        },
+        "labels": {
+          "description": "Labels (allowlisting happens in the engine, SPEC §11).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "manifest": {
+          "description": "Manifest features.",
+          "$ref": "#/$defs/ManifestFeatures",
+          "default": {
+            "distributed": false,
+            "init_containers": 0,
+            "sidecars": 0
+          }
+        }
+      }
+    },
+    "GpuShape": {
+      "description": "An accelerator type × count (SPEC §5.1, §5.4).",
+      "type": "object",
+      "properties": {
+        "accel": {
+          "description": "Canonical accelerator id.",
+          "$ref": "#/$defs/AcceleratorId"
+        },
+        "count": {
+          "description": "Number of devices.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "accel",
+        "count"
+      ]
+    },
+    "GroupId": {
+      "description": "A group id: units sized identically (SPEC §4).",
+      "type": "string"
+    },
+    "Hold": {
+      "description": "One held axis (SPEC §5.6 `held: Vec<(Axis, HoldReason)>`; an object on\nthe wire so it can carry detail).",
+      "type": "object",
+      "properties": {
+        "axis": {
+          "description": "The axis.",
+          "$ref": "#/$defs/Axis"
+        },
+        "detail": {
+          "description": "Optional detail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why.",
+          "$ref": "#/$defs/HoldReason"
+        }
+      },
+      "required": [
+        "axis",
+        "reason"
+      ]
+    },
+    "HoldReason": {
+      "description": "Why an axis was held at the prior (SPEC §5.6, §7.4).",
+      "oneOf": [
+        {
+          "description": "The user pinned it.",
+          "type": "string",
+          "const": "pinned"
+        },
+        {
+          "description": "S2 forbids changing it (limits, QoS).",
+          "type": "string",
+          "const": "s2_limit"
+        },
+        {
+          "description": "An incompressible reduction S3 does not permit.",
+          "type": "string",
+          "const": "s3_not_met"
+        },
+        {
+          "description": "Memory is not enforced and S3(b) evidence is missing.",
+          "type": "string",
+          "const": "not_enforced"
+        },
+        {
+          "description": "A breaker is open (or unreadable) for reductions.",
+          "type": "string",
+          "const": "breaker"
+        },
+        {
+          "description": "The axis has no grid in v1 (ephemeral storage, shm).",
+          "type": "string",
+          "const": "no_grid"
+        },
+        {
+          "description": "GPU count is held for every unit in v1.",
+          "type": "string",
+          "const": "gpu_count_v1"
+        },
+        {
+          "description": "The unit is distributed: GPU count permanently held.",
+          "type": "string",
+          "const": "distributed"
+        },
+        {
+          "description": "GPU type changes are not allowed.",
+          "type": "string",
+          "const": "gpu_type"
+        },
+        {
+          "description": "The prior's GPU type is unknown and never changed.",
+          "type": "string",
+          "const": "unknown_gpu"
+        },
+        {
+          "description": "QoS class is held.",
+          "type": "string",
+          "const": "qos"
+        },
+        {
+          "description": "No prior on this axis and `enforce_without_prior` is off.",
+          "type": "string",
+          "const": "no_prior"
+        },
+        {
+          "description": "The estimate has nothing for this axis.",
+          "type": "string",
+          "const": "no_estimate"
+        },
+        {
+          "description": "The surface cannot get failures classified (S5): reductions recommend-only.",
+          "type": "string",
+          "const": "unclassifiable"
+        },
+        {
+          "description": "The store is unreachable past its TTL.",
+          "type": "string",
+          "const": "store_unreachable"
+        },
+        {
+          "description": "The request model's snap function is not known exactly (SPEC §5.8).",
+          "type": "string",
+          "const": "inexact_snap"
+        },
+        {
+          "description": "An adapter- or platform-specific hold (see detail).",
+          "type": "string",
+          "const": "platform"
+        }
+      ]
+    },
+    "InputFormat": {
+      "description": "Input formats readers understand (SPEC §5.2, §9).",
+      "oneOf": [
+        {
+          "description": "Apache Parquet.",
+          "type": "string",
+          "const": "parquet"
+        },
+        {
+          "description": "CSV.",
+          "type": "string",
+          "const": "csv"
+        },
+        {
+          "description": "JSON lines.",
+          "type": "string",
+          "const": "jsonl"
+        },
+        {
+          "description": "NumPy `.npy`.",
+          "type": "string",
+          "const": "npy"
+        },
+        {
+          "description": "safetensors.",
+          "type": "string",
+          "const": "safetensors"
+        },
+        {
+          "description": "Arrow IPC (M3).",
+          "type": "string",
+          "const": "arrow_ipc"
+        },
+        {
+          "description": "A directory listing.",
+          "type": "string",
+          "const": "dir"
+        },
+        {
+          "description": "Opaque bytes.",
+          "type": "string",
+          "const": "blob"
+        },
+        {
+          "description": "A scalar parameter.",
+          "type": "string",
+          "const": "scalar"
+        },
+        {
+          "description": "A model reference (e.g. `hf://`).",
+          "type": "string",
+          "const": "model_ref"
+        }
+      ]
+    },
+    "InputRef": {
+      "description": "Where an input lives and what is already known about it (plugins.md §2).\nThe engine reads metadata within its budget to build an [`InputMeta`].",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "description": "Size, when the platform already knows it (e.g. a Ray ObjectRef).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "format": {
+          "description": "Format hint.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "description": "Input name.",
+          "type": "string"
+        },
+        "scalar": {
+          "description": "Scalar value for scalar inputs.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uri": {
+          "description": "URI (`s3://…`, `gs://…`, `file://…`, a path). Never leaves the process.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "Limits": {
+      "description": "Resource limits (SPEC §5.1). GPU and shm have no separate limit.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral-storage limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ManifestFeatures": {
+      "description": "Adapter-derived manifest features (SPEC §5.2), e.g. memory-backed volume\nbytes and sidecars.",
+      "type": "object",
+      "properties": {
+        "distributed": {
+          "description": "Whether the unit is distributed (SPEC §5.4: GPU count permanently held).",
+          "type": "boolean",
+          "default": false
+        },
+        "distributed_markers": {
+          "description": "Distribution markers found (`torchrun`, `WORLD_SIZE`, `deepspeed`, …).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extra": {
+          "description": "Further adapter-specific features.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ScalarValue"
+          }
+        },
+        "init_containers": {
+          "description": "Number of init containers.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "launcher": {
+          "description": "Launcher, if detected (e.g. `\"accelerate\"`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_backed_bytes": {
+          "description": "Bytes staged into memory-backed volumes (charged to the memory cgroup);\nadded to demand to get platform need (SPEC §5.2).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sidecars": {
+          "description": "Number of sidecar containers.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    },
+    "MilliCpu": {
+      "description": "CPU in millicores (1000 = one core). JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "Prior": {
+      "description": "What the author declared, plus what platform defaults filled (SPEC §5.1).",
+      "type": "object",
+      "properties": {
+        "defaulted": {
+          "description": "Axes filled by platform defaults, not the author: not pins (SPEC §7.4).",
+          "$ref": "#/$defs/AxisSet",
+          "default": []
+        },
+        "qos": {
+          "description": "QoS class, where the platform has one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QosClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spec": {
+          "description": "The declared (origin) spec.",
+          "$ref": "#/$defs/ResourceSpec",
+          "default": {
+            "limits": {},
+            "requests": {}
+          }
+        }
+      }
+    },
+    "QosClass": {
+      "description": "Kubernetes-style QoS class (SPEC §5.1, §7.4).",
+      "oneOf": [
+        {
+          "description": "Limits = requests on every axis.",
+          "type": "string",
+          "const": "guaranteed"
+        },
+        {
+          "description": "Some request or limit set.",
+          "type": "string",
+          "const": "burstable"
+        },
+        {
+          "description": "Nothing set.",
+          "type": "string",
+          "const": "best_effort"
+        }
+      ]
+    },
+    "Requests": {
+      "description": "Resource requests of one unit (SPEC §5.1). `None` = not set.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral storage.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu": {
+          "description": "Accelerators.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shm": {
+          "description": "Shared memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ResourceSpec": {
+      "description": "Requests and limits of one unit.",
+      "type": "object",
+      "properties": {
+        "limits": {
+          "description": "Limits.",
+          "$ref": "#/$defs/Limits",
+          "default": {}
+        },
+        "requests": {
+          "description": "Requests.",
+          "$ref": "#/$defs/Requests",
+          "default": {}
+        }
+      }
+    },
+    "ScalarValue": {
+      "description": "A scalar input value. JSON: `{\"kind\": \"int\", \"value\": 3}`.",
+      "oneOf": [
+        {
+          "description": "Integer.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "int"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "Float.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "float"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "Boolean.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "bool"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "String (only if privacy allows).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "str"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "Unit": {
+      "description": "One resource-bearing thing in a submission (plugins.md §2).",
+      "type": "object",
+      "properties": {
+        "constraints": {
+          "description": "Pins, platform holds, floor, ceiling, allowed shapes (SPEC §7.4).",
+          "$ref": "#/$defs/Constraints",
+          "default": {
+            "ceiling": {},
+            "floor": {},
+            "held": [],
+            "pinned": []
+          }
+        },
+        "distributed": {
+          "description": "SPEC §5.4: GPU count permanently held.",
+          "type": "boolean",
+          "default": false
+        },
+        "group": {
+          "description": "Units sized identically (replicas of one replica type, array tasks).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GroupId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "Stable within the submission, e.g. `\"spec.template.spec.containers[trainer]\"`.",
+          "$ref": "#/$defs/UnitId"
+        },
+        "key_suffix": {
+          "description": "The user-overridable part of the workload key.",
+          "type": "string"
+        },
+        "prior": {
+          "description": "The origin prior.",
+          "$ref": "#/$defs/Prior"
+        },
+        "seed": {
+          "description": "Input refs, code ref, manifest features, labels.",
+          "$ref": "#/$defs/ContextSeed",
+          "default": {
+            "inputs": [],
+            "labels": {},
+            "manifest": {
+              "distributed": false,
+              "init_containers": 0,
+              "sidecars": 0
+            }
+          }
+        }
+      },
+      "required": [
+        "id",
+        "key_suffix",
+        "prior"
+      ]
+    },
+    "UnitId": {
+      "description": "A unit's id, stable within its submission (plugins.md §2).",
+      "type": "string"
+    }
+  }
+}

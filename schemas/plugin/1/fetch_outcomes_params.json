@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FetchOutcomesParams",
+  "description": "`fetch_outcomes` params.",
+  "type": "object",
+  "properties": {
+    "cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "keys": {
+      "description": "Only these keys.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/WorkloadKey"
+      }
+    },
+    "limit": {
+      "description": "Page size.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "since": {
+      "description": "Records since.",
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "since"
+  ],
+  "$defs": {
+    "WorkloadKey": {
+      "description": "Workload key `{platform}://{tenant}/{suffix}` (or `{platform}://{tenant}//{suffix}`).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}://.+/.+$"
+    }
+  }
+}

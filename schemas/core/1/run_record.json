@@ -1,0 +1,960 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunRecord",
+  "description": "One attempt's outcome (SPEC §5.7). Dedup key: `(key, invocation_id,\nattempt, source)`.",
+  "type": "object",
+  "properties": {
+    "attempt": {
+      "description": "1-based attempt.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "cluster": {
+      "description": "Cluster the run ran on (history is per cluster, SPEC §8.5).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "code_digest": {
+      "description": "Code digest.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cpu_mean": {
+      "description": "Mean cores.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Measurement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cpu_peak_window": {
+      "description": "Busiest-window cores.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Measurement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cpu_throttled_frac": {
+      "description": "Fraction of time throttled.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float"
+    },
+    "decision_id": {
+      "description": "Decision that sized this attempt.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "duration_s": {
+      "description": "Duration, seconds.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "gpu_memory_peak": {
+      "description": "Busiest device's GPU memory peak, bytes.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Measurement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "gpu_util_mean": {
+      "description": "Mean GPU utilization as a fraction in `[0, 1]`.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float"
+    },
+    "inputs": {
+      "description": "Inputs of the invocation.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/InputMeta"
+      }
+    },
+    "invocation_id": {
+      "description": "Invocation id, stable across attempts.",
+      "type": "string"
+    },
+    "key": {
+      "description": "Workload key.",
+      "$ref": "#/$defs/WorkloadKey"
+    },
+    "memory_peak": {
+      "description": "Container memory peak as measured (includes runtime overhead).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Measurement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "origin_prior": {
+      "description": "The origin prior's requests, when the writer knows it (webhook\nannotation, ladder lease). Used by attribution (S5). Extension to SPEC\n§5.7; absent = look it up from the decision.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Requests"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "requested": {
+      "description": "What was requested (`None` for local runs).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResourceSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "description": "Where the record came from.",
+      "$ref": "#/$defs/OutcomeSource"
+    },
+    "started_at": {
+      "description": "Start time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "description": "Status.",
+      "$ref": "#/$defs/RunStatus"
+    },
+    "status_confidence": {
+      "description": "Whether the platform said so, or it was inferred.",
+      "$ref": "#/$defs/Confidence",
+      "default": "observed"
+    },
+    "t_peak_frac": {
+      "description": "Fraction of the run elapsed at the memory peak.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float"
+    },
+    "trust": {
+      "description": "Trust level (SPEC §8.2).",
+      "$ref": "#/$defs/Trust"
+    },
+    "v": {
+      "description": "Wire version (1).",
+      "type": "integer",
+      "format": "uint16",
+      "default": 1,
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "key",
+    "invocation_id",
+    "attempt",
+    "started_at",
+    "status",
+    "source",
+    "trust"
+  ],
+  "$defs": {
+    "AcceleratorId": {
+      "description": "A canonical accelerator id with per-device memory and family (SPEC §5.1.1).\nJSON: the canonical string, e.g. `\"A100-80G\"`; parsing is case-insensitive.",
+      "oneOf": [
+        {
+          "description": "NVIDIA T4, 16 GB.",
+          "type": "string",
+          "const": "T4-16G"
+        },
+        {
+          "description": "NVIDIA L4, 24 GB.",
+          "type": "string",
+          "const": "L4-24G"
+        },
+        {
+          "description": "NVIDIA A10G (AWS), 24 GB.",
+          "type": "string",
+          "const": "A10G-24G"
+        },
+        {
+          "description": "NVIDIA A10, 24 GB.",
+          "type": "string",
+          "const": "A10-24G"
+        },
+        {
+          "description": "NVIDIA L40S, 48 GB.",
+          "type": "string",
+          "const": "L40S-48G"
+        },
+        {
+          "description": "NVIDIA A100, 40 GB.",
+          "type": "string",
+          "const": "A100-40G"
+        },
+        {
+          "description": "NVIDIA A100, 80 GB.",
+          "type": "string",
+          "const": "A100-80G"
+        },
+        {
+          "description": "NVIDIA H100, 80 GB.",
+          "type": "string",
+          "const": "H100-80G"
+        },
+        {
+          "description": "NVIDIA H200, 141 GB.",
+          "type": "string",
+          "const": "H200-141G"
+        },
+        {
+          "description": "NVIDIA B200, 180 GB.",
+          "type": "string",
+          "const": "B200-180G"
+        },
+        {
+          "description": "AMD MI300X, 192 GB.",
+          "type": "string",
+          "const": "MI300X-192G"
+        },
+        {
+          "description": "Google TPU v5e (per chip).",
+          "type": "string",
+          "const": "TPU-V5E"
+        },
+        {
+          "description": "Google TPU v5p (per chip).",
+          "type": "string",
+          "const": "TPU-V5P"
+        },
+        {
+          "description": "Google TPU v6e / Trillium (per chip).",
+          "type": "string",
+          "const": "TPU-V6E"
+        },
+        {
+          "description": "AWS Trainium 1 (per chip).",
+          "type": "string",
+          "const": "TRN1"
+        },
+        {
+          "description": "AWS Trainium 2 (per chip).",
+          "type": "string",
+          "const": "TRN2"
+        },
+        {
+          "description": "AWS Inferentia 2 (per chip).",
+          "type": "string",
+          "const": "INF2"
+        },
+        {
+          "description": "A GPU of unknown type. Its type is never changed (SPEC §5.1.1).",
+          "type": "string",
+          "const": "unknown-gpu"
+        }
+      ]
+    },
+    "Bytes": {
+      "description": "A byte count. JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "Censor": {
+      "description": "Censoring of a measurement (SPEC §5.7).",
+      "oneOf": [
+        {
+          "description": "The value.",
+          "type": "string",
+          "const": "exact"
+        },
+        {
+          "description": "A lower bound.",
+          "type": "string",
+          "const": "at_least"
+        },
+        {
+          "description": "An upper bound.",
+          "type": "string",
+          "const": "at_most"
+        }
+      ]
+    },
+    "ColumnsInfo": {
+      "description": "Column counts by kind; names only if privacy allows (SPEC §11).",
+      "type": "object",
+      "properties": {
+        "names": {
+          "description": "Column names, only if allowed.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "nested": {
+          "description": "Nested / list / struct columns.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "numeric": {
+          "description": "Numeric columns.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "other": {
+          "description": "Other columns (temporal, boolean, …).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "string": {
+          "description": "String / binary columns.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "total": {
+          "description": "Total columns.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "total"
+      ]
+    },
+    "Confidence": {
+      "description": "How the status is known (SPEC §5.7).",
+      "oneOf": [
+        {
+          "description": "The platform said so.",
+          "type": "string",
+          "const": "observed"
+        },
+        {
+          "description": "Inferred from metrics; never proof of an OOM.",
+          "type": "string",
+          "const": "inferred"
+        }
+      ]
+    },
+    "GpuShape": {
+      "description": "An accelerator type × count (SPEC §5.1, §5.4).",
+      "type": "object",
+      "properties": {
+        "accel": {
+          "description": "Canonical accelerator id.",
+          "$ref": "#/$defs/AcceleratorId"
+        },
+        "count": {
+          "description": "Number of devices.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "accel",
+        "count"
+      ]
+    },
+    "InputFormat": {
+      "description": "Input formats readers understand (SPEC §5.2, §9).",
+      "oneOf": [
+        {
+          "description": "Apache Parquet.",
+          "type": "string",
+          "const": "parquet"
+        },
+        {
+          "description": "CSV.",
+          "type": "string",
+          "const": "csv"
+        },
+        {
+          "description": "JSON lines.",
+          "type": "string",
+          "const": "jsonl"
+        },
+        {
+          "description": "NumPy `.npy`.",
+          "type": "string",
+          "const": "npy"
+        },
+        {
+          "description": "safetensors.",
+          "type": "string",
+          "const": "safetensors"
+        },
+        {
+          "description": "Arrow IPC (M3).",
+          "type": "string",
+          "const": "arrow_ipc"
+        },
+        {
+          "description": "A directory listing.",
+          "type": "string",
+          "const": "dir"
+        },
+        {
+          "description": "Opaque bytes.",
+          "type": "string",
+          "const": "blob"
+        },
+        {
+          "description": "A scalar parameter.",
+          "type": "string",
+          "const": "scalar"
+        },
+        {
+          "description": "A model reference (e.g. `hf://`).",
+          "type": "string",
+          "const": "model_ref"
+        }
+      ]
+    },
+    "InputMeta": {
+      "description": "Metadata of one input (SPEC §5.2). Readers read bounded byte ranges only.",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "description": "Size in bytes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "columns": {
+          "description": "Column counts.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColumnsInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dtype": {
+          "description": "Element dtype.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "description": "Detected format.",
+          "$ref": "#/$defs/InputFormat"
+        },
+        "name": {
+          "description": "Input name (parameter name).",
+          "type": "string"
+        },
+        "params": {
+          "description": "Model parameter count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rows": {
+          "description": "Row count (parquet footer only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "scalar": {
+          "description": "Scalar value.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shape": {
+          "description": "Array shape (npy, safetensors).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "uri_hash": {
+          "description": "Salted hash of the URI; URIs never leave the process.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "format"
+      ]
+    },
+    "Limits": {
+      "description": "Resource limits (SPEC §5.1). GPU and shm have no separate limit.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral-storage limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Measurement": {
+      "description": "A censored measurement (SPEC §5.7).",
+      "type": "object",
+      "properties": {
+        "censor": {
+          "description": "Censoring.",
+          "$ref": "#/$defs/Censor",
+          "default": "exact"
+        },
+        "resolution_s": {
+          "description": "Sampling interval, seconds (`None` = exact high-water mark).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "value": {
+          "description": "Value (bytes or cores).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "value"
+      ]
+    },
+    "MilliCpu": {
+      "description": "CPU in millicores (1000 = one core). JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "OutcomeSource": {
+      "description": "Where a run record came from (SPEC §5.7). JSON: `{\"kind\": \"cgroup\"}`,\n`{\"kind\": \"importer\", \"platform\": \"aws\"}`.",
+      "oneOf": [
+        {
+          "description": "The workload reported itself.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "self_report"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Child-side cgroup measurement.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cgroup"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Prometheus.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prometheus"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Slurm `sacct`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "sacct"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "`flyte.remote` backfill.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "flyte_remote"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Ray state API.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "ray_state"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The K8s watcher.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "watcher"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Another platform importer.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "importer"
+            },
+            "platform": {
+              "description": "Platform name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "platform"
+          ]
+        }
+      ]
+    },
+    "Requests": {
+      "description": "Resource requests of one unit (SPEC §5.1). `None` = not set.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral storage.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu": {
+          "description": "Accelerators.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shm": {
+          "description": "Shared memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ResourceSpec": {
+      "description": "Requests and limits of one unit.",
+      "type": "object",
+      "properties": {
+        "limits": {
+          "description": "Limits.",
+          "$ref": "#/$defs/Limits",
+          "default": {}
+        },
+        "requests": {
+          "description": "Requests.",
+          "$ref": "#/$defs/Requests",
+          "default": {}
+        }
+      }
+    },
+    "RunStatus": {
+      "description": "Run status (SPEC §5.7).",
+      "oneOf": [
+        {
+          "description": "Succeeded.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "Killed for memory (host).",
+          "type": "string",
+          "const": "oom_killed"
+        },
+        {
+          "description": "CUDA / device out of memory.",
+          "type": "string",
+          "const": "gpu_oom"
+        },
+        {
+          "description": "Evicted (e.g. node memory pressure).",
+          "type": "string",
+          "const": "evicted"
+        },
+        {
+          "description": "Hit its walltime.",
+          "type": "string",
+          "const": "timeout"
+        },
+        {
+          "description": "Preempted by the platform.",
+          "type": "string",
+          "const": "preempted"
+        },
+        {
+          "description": "Failed for another (application) reason.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Served from cache: no measurements, excluded from learning.",
+          "type": "string",
+          "const": "cached"
+        },
+        {
+          "description": "Unknown.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "ScalarValue": {
+      "description": "A scalar input value. JSON: `{\"kind\": \"int\", \"value\": 3}`.",
+      "oneOf": [
+        {
+          "description": "Integer.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "int"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "Float.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "float"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "Boolean.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "bool"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "String (only if privacy allows).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "str"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "Trust": {
+      "description": "Trust level of a record (SPEC §8.2). Ordered: `Unverified < Authenticated < Verified`.",
+      "oneOf": [
+        {
+          "description": "Anything else.",
+          "type": "string",
+          "const": "unverified"
+        },
+        {
+          "description": "Written with tenant-scoped credentials.",
+          "type": "string",
+          "const": "authenticated"
+        },
+        {
+          "description": "Written by a trusted component with an authenticated tenant.",
+          "type": "string",
+          "const": "verified"
+        }
+      ]
+    },
+    "WorkloadKey": {
+      "description": "Workload key `{platform}://{tenant}/{suffix}` (or `{platform}://{tenant}//{suffix}`).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}://.+/.+$"
+    }
+  }
+}

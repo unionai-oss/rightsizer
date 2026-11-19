@@ -1,0 +1,384 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextSeed",
+  "description": "What an adapter knows about a unit before the core reads anything\n(plugins.md §2).",
+  "type": "object",
+  "properties": {
+    "code": {
+      "description": "Code reference.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CodeRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "inputs": {
+      "description": "Inputs to read metadata for.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/InputRef"
+      }
+    },
+    "labels": {
+      "description": "Labels (allowlisting happens in the engine, SPEC §11).",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {}
+    },
+    "manifest": {
+      "description": "Manifest features.",
+      "$ref": "#/$defs/ManifestFeatures",
+      "default": {
+        "distributed": false,
+        "init_containers": 0,
+        "sidecars": 0
+      }
+    }
+  },
+  "$defs": {
+    "Bytes": {
+      "description": "A byte count. JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "CodeInfo": {
+      "description": "Code identity (SPEC §5.2).",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "description": "Normalized digest (comments, whitespace and resource directives stripped).",
+          "type": "string"
+        },
+        "source": {
+          "description": "Source text, only if privacy allows; truncated at 64 KiB.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokens": {
+          "description": "`features-v1` code tokens.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "digest"
+      ]
+    },
+    "CodeRef": {
+      "description": "Code reference (plugins.md §2): source text, or a reference the engine may\nresolve. JSON: `{\"kind\": \"source\", ...}`.",
+      "oneOf": [
+        {
+          "description": "Source text.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "source"
+            },
+            "language": {
+              "description": "Language hint (`\"python\"`, `\"bash\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "description": "The text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "description": "A local file path.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "path"
+            },
+            "path": {
+              "description": "Path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        },
+        {
+          "description": "Already-extracted code info.",
+          "type": "object",
+          "properties": {
+            "info": {
+              "description": "The info.",
+              "$ref": "#/$defs/CodeInfo"
+            },
+            "kind": {
+              "type": "string",
+              "const": "info"
+            }
+          },
+          "required": [
+            "kind",
+            "info"
+          ]
+        }
+      ]
+    },
+    "InputFormat": {
+      "description": "Input formats readers understand (SPEC §5.2, §9).",
+      "oneOf": [
+        {
+          "description": "Apache Parquet.",
+          "type": "string",
+          "const": "parquet"
+        },
+        {
+          "description": "CSV.",
+          "type": "string",
+          "const": "csv"
+        },
+        {
+          "description": "JSON lines.",
+          "type": "string",
+          "const": "jsonl"
+        },
+        {
+          "description": "NumPy `.npy`.",
+          "type": "string",
+          "const": "npy"
+        },
+        {
+          "description": "safetensors.",
+          "type": "string",
+          "const": "safetensors"
+        },
+        {
+          "description": "Arrow IPC (M3).",
+          "type": "string",
+          "const": "arrow_ipc"
+        },
+        {
+          "description": "A directory listing.",
+          "type": "string",
+          "const": "dir"
+        },
+        {
+          "description": "Opaque bytes.",
+          "type": "string",
+          "const": "blob"
+        },
+        {
+          "description": "A scalar parameter.",
+          "type": "string",
+          "const": "scalar"
+        },
+        {
+          "description": "A model reference (e.g. `hf://`).",
+          "type": "string",
+          "const": "model_ref"
+        }
+      ]
+    },
+    "InputRef": {
+      "description": "Where an input lives and what is already known about it (plugins.md §2).\nThe engine reads metadata within its budget to build an [`InputMeta`].",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "description": "Size, when the platform already knows it (e.g. a Ray ObjectRef).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "format": {
+          "description": "Format hint.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "description": "Input name.",
+          "type": "string"
+        },
+        "scalar": {
+          "description": "Scalar value for scalar inputs.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uri": {
+          "description": "URI (`s3://…`, `gs://…`, `file://…`, a path). Never leaves the process.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "ManifestFeatures": {
+      "description": "Adapter-derived manifest features (SPEC §5.2), e.g. memory-backed volume\nbytes and sidecars.",
+      "type": "object",
+      "properties": {
+        "distributed": {
+          "description": "Whether the unit is distributed (SPEC §5.4: GPU count permanently held).",
+          "type": "boolean",
+          "default": false
+        },
+        "distributed_markers": {
+          "description": "Distribution markers found (`torchrun`, `WORLD_SIZE`, `deepspeed`, …).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extra": {
+          "description": "Further adapter-specific features.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ScalarValue"
+          }
+        },
+        "init_containers": {
+          "description": "Number of init containers.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "launcher": {
+          "description": "Launcher, if detected (e.g. `\"accelerate\"`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_backed_bytes": {
+          "description": "Bytes staged into memory-backed volumes (charged to the memory cgroup);\nadded to demand to get platform need (SPEC §5.2).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sidecars": {
+          "description": "Number of sidecar containers.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    },
+    "ScalarValue": {
+      "description": "A scalar input value. JSON: `{\"kind\": \"int\", \"value\": 3}`.",
+      "oneOf": [
+        {
+          "description": "Integer.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "int"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "Float.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "float"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "Boolean.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "bool"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "String (only if privacy allows).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "str"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "rightsizer-slurm"
+description = "Slurm adapter for rightsizer: sbatch parsing, #SBATCH text edits, option tables, HMAC tokens, sacct importer, sbatch wrapper."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rightsizer-core.workspace = true
+rightsizer-plugin.workspace = true
+rightsizer-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+chrono.workspace = true
+base64.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+shlex.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -369,7 +369,7 @@ finally: memory peak = cgroup v2 memory.peak (kernel ≥ 5.19)
   from the action's `raw_data_path` bucket.
 - **Trust.** Records are `Authenticated` when the deployment gives each
   project/domain credentials scoped to its own prefix
-  (`{prefix}/v1/runs/{org}/{project}/{domain}/`). Otherwise they are
+  (`{prefix}/v1/runs/flyte/{org}/{project}/{domain}/`). Otherwise they are
   `Unverified`. In that case enforce relies on the escalation ladder (S3a,
   on by default for `retries == 0`) and on `flyte.remote` backfill, which is
   `Verified` for statuses but has no peaks in open-source Flyte. The operator can

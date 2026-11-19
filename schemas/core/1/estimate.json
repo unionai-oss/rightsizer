@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Estimate",
+  "description": "Per-axis distributions over demand, or a policy over actions (SPEC §5.5).",
+  "type": "object",
+  "properties": {
+    "cpu_mean": {
+      "description": "Mean cores over the run: drives stretch.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AxisEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cpu_peak": {
+      "description": "Busiest-window cores: reported and used for diagnostics, not cost.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AxisEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "duration_s": {
+      "description": "Run duration at stretch 1, seconds (`Quantiles` or `Point` only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AxisEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "gpu_memory": {
+      "description": "Total GPU memory demand, bytes; `Cells` index 0 = no GPU.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AxisEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "kind": {
+      "description": "Demand distribution, or action policy.",
+      "$ref": "#/$defs/EstimateKind",
+      "default": "demand"
+    },
+    "memory": {
+      "description": "Workload memory demand, bytes (excludes runtime overhead, SPEC §5.2).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AxisEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "novelty": {
+      "description": "Novelty ECDF value in `[0, 1]` (SPEC §6.5).",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float"
+    },
+    "parallelism": {
+      "description": "How GPU memory spreads over devices.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Parallelism"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "provenance": {
+      "description": "Who produced it.",
+      "$ref": "#/$defs/Provenance"
+    },
+    "t_peak_frac": {
+      "description": "Fraction of the run elapsed at the memory peak.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float"
+    },
+    "v": {
+      "description": "Wire version (1).",
+      "type": "integer",
+      "format": "uint16",
+      "default": 1,
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "provenance"
+  ],
+  "$defs": {
+    "AxisEstimate": {
+      "description": "One axis's estimate (SPEC §5.5). JSON: `{\"kind\": \"cells\", ...}`.",
+      "oneOf": [
+        {
+          "description": "Probabilities over a named grid's cells (sum to 1).",
+          "type": "object",
+          "properties": {
+            "grid": {
+              "description": "Grid id, e.g. `\"rs-grid-v1\"`.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "cells"
+            },
+            "probs": {
+              "description": "Per-cell probabilities.",
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "float"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "grid",
+            "probs"
+          ]
+        },
+        {
+          "description": "Quantile points `(level, value)`, ≥ 3 points.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "quantiles"
+            },
+            "q": {
+              "description": "`(level, value)` pairs.",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "number",
+                    "format": "float"
+                  },
+                  {
+                    "type": "number",
+                    "format": "double"
+                  }
+                ]
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "q"
+          ]
+        },
+        {
+          "description": "A point value.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "point"
+            },
+            "value": {
+              "description": "The value (bytes, cores or seconds).",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "EstimateKind": {
+      "description": "Demand distribution vs. action policy (SPEC §5.5).",
+      "oneOf": [
+        {
+          "description": "Distributions over workload demand; decoded by expected cost.",
+          "type": "string",
+          "const": "demand"
+        },
+        {
+          "description": "A policy over cells; decoded by argmax over the feasible set.",
+          "type": "string",
+          "const": "action"
+        }
+      ]
+    },
+    "Parallelism": {
+      "description": "How a run's GPU memory spreads over devices (SPEC §5.4).",
+      "type": "object",
+      "properties": {
+        "imbalance": {
+          "description": "Imbalance factor for sharded runs (default 1.25).",
+          "type": "number",
+          "format": "float",
+          "default": 1.25
+        },
+        "mode": {
+          "description": "Placement mode.",
+          "$ref": "#/$defs/ParallelismMode"
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    },
+    "ParallelismMode": {
+      "description": "GPU placement mode (SPEC §5.4).",
+      "oneOf": [
+        {
+          "description": "One device holds everything.",
+          "type": "string",
+          "const": "single"
+        },
+        {
+          "description": "Every device holds a full copy.",
+          "type": "string",
+          "const": "replicated"
+        },
+        {
+          "description": "Spread across all devices.",
+          "type": "string",
+          "const": "sharded"
+        }
+      ]
+    },
+    "Provenance": {
+      "description": "Who produced an estimate (SPEC §5.5).",
+      "type": "object",
+      "properties": {
+        "estimator": {
+          "description": "Estimator id.",
+          "type": "string"
+        },
+        "features": {
+          "description": "Feature schema version (e.g. `\"features-v1\"`).",
+          "type": "string",
+          "default": ""
+        },
+        "grid": {
+          "description": "Grid id the estimate uses.",
+          "type": "string",
+          "default": ""
+        },
+        "latency_ms": {
+          "description": "Estimation latency.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "version": {
+          "description": "Estimator version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "estimator",
+        "version"
+      ]
+    }
+  }
+}

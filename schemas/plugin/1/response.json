@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Response",
+  "description": "A JSON-RPC response.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "description": "Error.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RpcError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "description": "Id of the request.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "jsonrpc": {
+      "description": "`\"2.0\"`.",
+      "type": "string"
+    },
+    "result": {
+      "description": "Result."
+    }
+  },
+  "required": [
+    "jsonrpc"
+  ],
+  "$defs": {
+    "ErrorCode": {
+      "description": "Protocol error codes (plugins.md §3.3).",
+      "oneOf": [
+        {
+          "description": "Malformed message or native.",
+          "type": "string",
+          "const": "parse_error"
+        },
+        {
+          "description": "Not handled.",
+          "type": "string",
+          "const": "unsupported"
+        },
+        {
+          "description": "Invalid native submission.",
+          "type": "string",
+          "const": "invalid_native"
+        },
+        {
+          "description": "The platform could not be reached.",
+          "type": "string",
+          "const": "platform_unavailable"
+        },
+        {
+          "description": "Anything else.",
+          "type": "string",
+          "const": "internal"
+        }
+      ]
+    },
+    "ErrorData": {
+      "description": "Error data (plugins.md §3.3).",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Protocol error code.",
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "retryable": {
+          "description": "Whether a retry may succeed.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "retryable"
+      ]
+    },
+    "Id": {
+      "description": "A request id.",
+      "anyOf": [
+        {
+          "description": "Numeric.",
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "description": "String.",
+          "type": "string"
+        }
+      ]
+    },
+    "RpcError": {
+      "description": "A JSON-RPC error object.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "JSON-RPC code (`-32700` parse, `-32601` method not found, `-32000` application).",
+          "type": "integer",
+          "format": "int64"
+        },
+        "data": {
+          "description": "`{code, retryable}`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorData"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "description": "Message.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    }
+  }
+}

@@ -1,0 +1,42 @@
+[package]
+name = "rightsizer-history"
+description = "HistoryStore trait and backends (object store, sqlite, postgres) for rightsizer (SPEC §8)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["object-store", "sqlite"]
+object-store = []
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls", "dep:rustls"]
+s3 = ["object_store/aws"]
+gcs = ["object_store/gcp"]
+azure = ["object_store/azure"]
+
+[dependencies]
+rightsizer-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+object_store.workspace = true
+bytes.workspace = true
+url.workspace = true
+parquet = { workspace = true }
+tracing.workspace = true
+rusqlite = { workspace = true, optional = true }
+tokio-postgres = { workspace = true, optional = true }
+tokio-postgres-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

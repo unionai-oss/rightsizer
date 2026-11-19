@@ -1,0 +1,1278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Decision",
+  "description": "The outcome of the decision rule for one unit (SPEC §5.6).",
+  "type": "object",
+  "properties": {
+    "advisories": {
+      "description": "Recommend-only findings (SPEC §7.7).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Advisory"
+      }
+    },
+    "applied": {
+      "description": "What is (or, below enforce, would be) applied: recommended with held\naxes reset to the prior, within floor and trust region.",
+      "$ref": "#/$defs/ResourceSpec"
+    },
+    "context_digest": {
+      "description": "Digest of the context the decision was made from.",
+      "type": "string",
+      "default": ""
+    },
+    "estimate": {
+      "description": "The estimate, logged for audit and off-policy learning.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Estimate"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expected_cost": {
+      "description": "Expected cost of `applied` (dollars, penalties included).",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "explanation": {
+      "description": "Human-readable explanation lines.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "group": {
+      "description": "Group, when units are sized together.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GroupId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "held": {
+      "description": "Held axes and why.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Hold"
+      }
+    },
+    "id": {
+      "description": "Decision id.",
+      "type": "string"
+    },
+    "key": {
+      "description": "Workload key.",
+      "$ref": "#/$defs/WorkloadKey"
+    },
+    "mode": {
+      "description": "Effective mode.",
+      "$ref": "#/$defs/Mode"
+    },
+    "p_fail": {
+      "description": "Probability that `applied`'s first attempt fails.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float"
+    },
+    "prior": {
+      "description": "The origin prior.",
+      "$ref": "#/$defs/Prior"
+    },
+    "propensity": {
+      "description": "P(applied | context) under the decision policy.",
+      "type": "number",
+      "format": "float"
+    },
+    "recommended": {
+      "description": "The best spec within hard constraints only (pins, ceiling, S2).",
+      "$ref": "#/$defs/ResourceSpec"
+    },
+    "shape": {
+      "description": "The catalog / snap shape `applied` lands on, for adapters that render a\nmachine type (SPEC §5.8). Extension to SPEC §5.6.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "description": "Where the decision came from.",
+      "$ref": "#/$defs/DecisionSource"
+    },
+    "unit": {
+      "description": "Unit.",
+      "$ref": "#/$defs/UnitId"
+    },
+    "v": {
+      "description": "Wire version (1).",
+      "type": "integer",
+      "format": "uint16",
+      "default": 1,
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "id",
+    "key",
+    "unit",
+    "mode",
+    "recommended",
+    "applied",
+    "prior",
+    "source",
+    "propensity"
+  ],
+  "$defs": {
+    "AcceleratorId": {
+      "description": "A canonical accelerator id with per-device memory and family (SPEC §5.1.1).\nJSON: the canonical string, e.g. `\"A100-80G\"`; parsing is case-insensitive.",
+      "oneOf": [
+        {
+          "description": "NVIDIA T4, 16 GB.",
+          "type": "string",
+          "const": "T4-16G"
+        },
+        {
+          "description": "NVIDIA L4, 24 GB.",
+          "type": "string",
+          "const": "L4-24G"
+        },
+        {
+          "description": "NVIDIA A10G (AWS), 24 GB.",
+          "type": "string",
+          "const": "A10G-24G"
+        },
+        {
+          "description": "NVIDIA A10, 24 GB.",
+          "type": "string",
+          "const": "A10-24G"
+        },
+        {
+          "description": "NVIDIA L40S, 48 GB.",
+          "type": "string",
+          "const": "L40S-48G"
+        },
+        {
+          "description": "NVIDIA A100, 40 GB.",
+          "type": "string",
+          "const": "A100-40G"
+        },
+        {
+          "description": "NVIDIA A100, 80 GB.",
+          "type": "string",
+          "const": "A100-80G"
+        },
+        {
+          "description": "NVIDIA H100, 80 GB.",
+          "type": "string",
+          "const": "H100-80G"
+        },
+        {
+          "description": "NVIDIA H200, 141 GB.",
+          "type": "string",
+          "const": "H200-141G"
+        },
+        {
+          "description": "NVIDIA B200, 180 GB.",
+          "type": "string",
+          "const": "B200-180G"
+        },
+        {
+          "description": "AMD MI300X, 192 GB.",
+          "type": "string",
+          "const": "MI300X-192G"
+        },
+        {
+          "description": "Google TPU v5e (per chip).",
+          "type": "string",
+          "const": "TPU-V5E"
+        },
+        {
+          "description": "Google TPU v5p (per chip).",
+          "type": "string",
+          "const": "TPU-V5P"
+        },
+        {
+          "description": "Google TPU v6e / Trillium (per chip).",
+          "type": "string",
+          "const": "TPU-V6E"
+        },
+        {
+          "description": "AWS Trainium 1 (per chip).",
+          "type": "string",
+          "const": "TRN1"
+        },
+        {
+          "description": "AWS Trainium 2 (per chip).",
+          "type": "string",
+          "const": "TRN2"
+        },
+        {
+          "description": "AWS Inferentia 2 (per chip).",
+          "type": "string",
+          "const": "INF2"
+        },
+        {
+          "description": "A GPU of unknown type. Its type is never changed (SPEC §5.1.1).",
+          "type": "string",
+          "const": "unknown-gpu"
+        }
+      ]
+    },
+    "Advisory": {
+      "description": "A recommend-only finding (SPEC §7.7). JSON: `{\"kind\": \"gpu_lower_count\", ...}`.",
+      "oneOf": [
+        {
+          "description": "A lower GPU count would fit (busiest-device need).",
+          "type": "object",
+          "properties": {
+            "count": {
+              "description": "Current count.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "fits_count": {
+              "description": "Smallest count that fits.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "gpu_lower_count"
+            }
+          },
+          "required": [
+            "kind",
+            "count",
+            "fits_count"
+          ]
+        },
+        {
+          "description": "A cheaper GPU shape would fit.",
+          "type": "object",
+          "properties": {
+            "accel": {
+              "description": "Suggested accelerator.",
+              "$ref": "#/$defs/AcceleratorId"
+            },
+            "count": {
+              "description": "Suggested count.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "gpu_cheaper_shape"
+            },
+            "saving_per_hour": {
+              "description": "$/h saved.",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "accel",
+            "count",
+            "saving_per_hour"
+          ]
+        },
+        {
+          "description": "Mean GPU utilization was low over recent runs.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "gpu_low_util"
+            },
+            "mean_util": {
+              "description": "Mean utilization (fraction 0..1).",
+              "type": "number",
+              "format": "float"
+            },
+            "runs": {
+              "description": "Runs considered.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "mean_util",
+            "runs"
+          ]
+        },
+        {
+          "description": "P(need > device memory) at the prior exceeds 0.2.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "gpu_oom_predicted"
+            },
+            "p": {
+              "description": "Probability.",
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "p"
+          ]
+        },
+        {
+          "description": "A timeout is predicted (P > 0.1).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "walltime_timeout"
+            },
+            "p": {
+              "description": "Probability.",
+              "type": "number",
+              "format": "float"
+            },
+            "suggested_s": {
+              "description": "Suggested walltime, seconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "p",
+            "suggested_s"
+          ]
+        },
+        {
+          "description": "The walltime is over 10× the p95 duration.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "walltime_excessive"
+            },
+            "p95_s": {
+              "description": "p95 duration, seconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "walltime_s": {
+              "description": "Walltime, seconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "walltime_s",
+            "p95_s"
+          ]
+        },
+        {
+          "description": "The prior is more than 4× the size-scaled p95 demand.",
+          "type": "object",
+          "properties": {
+            "axis": {
+              "description": "Axis.",
+              "$ref": "#/$defs/Axis"
+            },
+            "kind": {
+              "type": "string",
+              "const": "prior_oversized"
+            },
+            "ratio": {
+              "description": "prior / p95.",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "axis",
+            "ratio"
+          ]
+        },
+        {
+          "description": "The floor exceeded the ceiling; the ceiling was used (SPEC §7.4).",
+          "type": "object",
+          "properties": {
+            "axis": {
+              "description": "Axis.",
+              "$ref": "#/$defs/Axis"
+            },
+            "kind": {
+              "type": "string",
+              "const": "infeasible_floor"
+            }
+          },
+          "required": [
+            "kind",
+            "axis"
+          ]
+        },
+        {
+          "description": "An increase was clamped to the ceiling (S4).",
+          "type": "object",
+          "properties": {
+            "axis": {
+              "description": "Axis.",
+              "$ref": "#/$defs/Axis"
+            },
+            "kind": {
+              "type": "string",
+              "const": "clamped"
+            },
+            "reason": {
+              "description": "What clamped it (`\"shape\"`, `\"quota\"`, `\"user\"`).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "axis",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "Axis": {
+      "description": "A resource axis (SPEC §5.1).",
+      "oneOf": [
+        {
+          "description": "Host memory (incompressible).",
+          "type": "string",
+          "const": "memory"
+        },
+        {
+          "description": "Host CPU (compressible).",
+          "type": "string",
+          "const": "cpu"
+        },
+        {
+          "description": "Number of accelerators.",
+          "type": "string",
+          "const": "gpu_count"
+        },
+        {
+          "description": "Accelerator type.",
+          "type": "string",
+          "const": "gpu_type"
+        },
+        {
+          "description": "Ephemeral storage (no grid in v1: always held).",
+          "type": "string",
+          "const": "ephemeral_storage"
+        },
+        {
+          "description": "Shared memory (`/dev/shm`; no grid in v1: always held).",
+          "type": "string",
+          "const": "shm"
+        }
+      ]
+    },
+    "AxisEstimate": {
+      "description": "One axis's estimate (SPEC §5.5). JSON: `{\"kind\": \"cells\", ...}`.",
+      "oneOf": [
+        {
+          "description": "Probabilities over a named grid's cells (sum to 1).",
+          "type": "object",
+          "properties": {
+            "grid": {
+              "description": "Grid id, e.g. `\"rs-grid-v1\"`.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "cells"
+            },
+            "probs": {
+              "description": "Per-cell probabilities.",
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "float"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "grid",
+            "probs"
+          ]
+        },
+        {
+          "description": "Quantile points `(level, value)`, ≥ 3 points.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "quantiles"
+            },
+            "q": {
+              "description": "`(level, value)` pairs.",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "number",
+                    "format": "float"
+                  },
+                  {
+                    "type": "number",
+                    "format": "double"
+                  }
+                ]
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "q"
+          ]
+        },
+        {
+          "description": "A point value.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "point"
+            },
+            "value": {
+              "description": "The value (bytes, cores or seconds).",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "AxisSet": {
+      "description": "A set of axes; aliases `gpu` = {gpu_count, gpu_type}, `disk` = ephemeral_storage.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "memory",
+          "cpu",
+          "gpu_count",
+          "gpu_type",
+          "ephemeral_storage",
+          "shm",
+          "gpu",
+          "disk",
+          "mem"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "Bytes": {
+      "description": "A byte count. JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "DecisionSource": {
+      "description": "Where a decision came from (SPEC §5.6). JSON: `{\"kind\": \"estimator\", ...}`.",
+      "oneOf": [
+        {
+          "description": "A fresh estimate.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "description": "Estimator id.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "estimator"
+            },
+            "version": {
+              "description": "Estimator version.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "version"
+          ]
+        },
+        {
+          "description": "A memoized normalized estimate (SPEC §6.3).",
+          "type": "object",
+          "properties": {
+            "id": {
+              "description": "Estimator id.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "memo"
+            },
+            "version": {
+              "description": "Estimator version.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "version"
+          ]
+        },
+        {
+          "description": "The prior, unchanged.",
+          "type": "object",
+          "properties": {
+            "detail": {
+              "description": "Optional detail.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "prior"
+            },
+            "reason": {
+              "description": "Why.",
+              "$ref": "#/$defs/PriorReason"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "Estimate": {
+      "description": "Per-axis distributions over demand, or a policy over actions (SPEC §5.5).",
+      "type": "object",
+      "properties": {
+        "cpu_mean": {
+          "description": "Mean cores over the run: drives stretch.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AxisEstimate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cpu_peak": {
+          "description": "Busiest-window cores: reported and used for diagnostics, not cost.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AxisEstimate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_s": {
+          "description": "Run duration at stretch 1, seconds (`Quantiles` or `Point` only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AxisEstimate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu_memory": {
+          "description": "Total GPU memory demand, bytes; `Cells` index 0 = no GPU.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AxisEstimate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "description": "Demand distribution, or action policy.",
+          "$ref": "#/$defs/EstimateKind",
+          "default": "demand"
+        },
+        "memory": {
+          "description": "Workload memory demand, bytes (excludes runtime overhead, SPEC §5.2).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AxisEstimate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "novelty": {
+          "description": "Novelty ECDF value in `[0, 1]` (SPEC §6.5).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "parallelism": {
+          "description": "How GPU memory spreads over devices.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Parallelism"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provenance": {
+          "description": "Who produced it.",
+          "$ref": "#/$defs/Provenance"
+        },
+        "t_peak_frac": {
+          "description": "Fraction of the run elapsed at the memory peak.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "v": {
+          "description": "Wire version (1).",
+          "type": "integer",
+          "format": "uint16",
+          "default": 1,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "provenance"
+      ]
+    },
+    "EstimateKind": {
+      "description": "Demand distribution vs. action policy (SPEC §5.5).",
+      "oneOf": [
+        {
+          "description": "Distributions over workload demand; decoded by expected cost.",
+          "type": "string",
+          "const": "demand"
+        },
+        {
+          "description": "A policy over cells; decoded by argmax over the feasible set.",
+          "type": "string",
+          "const": "action"
+        }
+      ]
+    },
+    "GpuShape": {
+      "description": "An accelerator type × count (SPEC §5.1, §5.4).",
+      "type": "object",
+      "properties": {
+        "accel": {
+          "description": "Canonical accelerator id.",
+          "$ref": "#/$defs/AcceleratorId"
+        },
+        "count": {
+          "description": "Number of devices.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "accel",
+        "count"
+      ]
+    },
+    "GroupId": {
+      "description": "A group id: units sized identically (SPEC §4).",
+      "type": "string"
+    },
+    "Hold": {
+      "description": "One held axis (SPEC §5.6 `held: Vec<(Axis, HoldReason)>`; an object on\nthe wire so it can carry detail).",
+      "type": "object",
+      "properties": {
+        "axis": {
+          "description": "The axis.",
+          "$ref": "#/$defs/Axis"
+        },
+        "detail": {
+          "description": "Optional detail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why.",
+          "$ref": "#/$defs/HoldReason"
+        }
+      },
+      "required": [
+        "axis",
+        "reason"
+      ]
+    },
+    "HoldReason": {
+      "description": "Why an axis was held at the prior (SPEC §5.6, §7.4).",
+      "oneOf": [
+        {
+          "description": "The user pinned it.",
+          "type": "string",
+          "const": "pinned"
+        },
+        {
+          "description": "S2 forbids changing it (limits, QoS).",
+          "type": "string",
+          "const": "s2_limit"
+        },
+        {
+          "description": "An incompressible reduction S3 does not permit.",
+          "type": "string",
+          "const": "s3_not_met"
+        },
+        {
+          "description": "Memory is not enforced and S3(b) evidence is missing.",
+          "type": "string",
+          "const": "not_enforced"
+        },
+        {
+          "description": "A breaker is open (or unreadable) for reductions.",
+          "type": "string",
+          "const": "breaker"
+        },
+        {
+          "description": "The axis has no grid in v1 (ephemeral storage, shm).",
+          "type": "string",
+          "const": "no_grid"
+        },
+        {
+          "description": "GPU count is held for every unit in v1.",
+          "type": "string",
+          "const": "gpu_count_v1"
+        },
+        {
+          "description": "The unit is distributed: GPU count permanently held.",
+          "type": "string",
+          "const": "distributed"
+        },
+        {
+          "description": "GPU type changes are not allowed.",
+          "type": "string",
+          "const": "gpu_type"
+        },
+        {
+          "description": "The prior's GPU type is unknown and never changed.",
+          "type": "string",
+          "const": "unknown_gpu"
+        },
+        {
+          "description": "QoS class is held.",
+          "type": "string",
+          "const": "qos"
+        },
+        {
+          "description": "No prior on this axis and `enforce_without_prior` is off.",
+          "type": "string",
+          "const": "no_prior"
+        },
+        {
+          "description": "The estimate has nothing for this axis.",
+          "type": "string",
+          "const": "no_estimate"
+        },
+        {
+          "description": "The surface cannot get failures classified (S5): reductions recommend-only.",
+          "type": "string",
+          "const": "unclassifiable"
+        },
+        {
+          "description": "The store is unreachable past its TTL.",
+          "type": "string",
+          "const": "store_unreachable"
+        },
+        {
+          "description": "The request model's snap function is not known exactly (SPEC §5.8).",
+          "type": "string",
+          "const": "inexact_snap"
+        },
+        {
+          "description": "An adapter- or platform-specific hold (see detail).",
+          "type": "string",
+          "const": "platform"
+        }
+      ]
+    },
+    "Limits": {
+      "description": "Resource limits (SPEC §5.1). GPU and shm have no separate limit.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral-storage limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory limit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "MilliCpu": {
+      "description": "CPU in millicores (1000 = one core). JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "Mode": {
+      "description": "Mode, ordered `off < observe < recommend < enforce` (SPEC §4).",
+      "oneOf": [
+        {
+          "description": "Do nothing.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Record outcomes only.",
+          "type": "string",
+          "const": "observe"
+        },
+        {
+          "description": "Decide and record, change nothing.",
+          "type": "string",
+          "const": "recommend"
+        },
+        {
+          "description": "Apply under the safety contract.",
+          "type": "string",
+          "const": "enforce"
+        }
+      ]
+    },
+    "Parallelism": {
+      "description": "How a run's GPU memory spreads over devices (SPEC §5.4).",
+      "type": "object",
+      "properties": {
+        "imbalance": {
+          "description": "Imbalance factor for sharded runs (default 1.25).",
+          "type": "number",
+          "format": "float",
+          "default": 1.25
+        },
+        "mode": {
+          "description": "Placement mode.",
+          "$ref": "#/$defs/ParallelismMode"
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    },
+    "ParallelismMode": {
+      "description": "GPU placement mode (SPEC §5.4).",
+      "oneOf": [
+        {
+          "description": "One device holds everything.",
+          "type": "string",
+          "const": "single"
+        },
+        {
+          "description": "Every device holds a full copy.",
+          "type": "string",
+          "const": "replicated"
+        },
+        {
+          "description": "Spread across all devices.",
+          "type": "string",
+          "const": "sharded"
+        }
+      ]
+    },
+    "Prior": {
+      "description": "What the author declared, plus what platform defaults filled (SPEC §5.1).",
+      "type": "object",
+      "properties": {
+        "defaulted": {
+          "description": "Axes filled by platform defaults, not the author: not pins (SPEC §7.4).",
+          "$ref": "#/$defs/AxisSet",
+          "default": []
+        },
+        "qos": {
+          "description": "QoS class, where the platform has one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QosClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spec": {
+          "description": "The declared (origin) spec.",
+          "$ref": "#/$defs/ResourceSpec",
+          "default": {
+            "limits": {},
+            "requests": {}
+          }
+        }
+      }
+    },
+    "PriorReason": {
+      "description": "Why a decision fell back to the prior (S1, SPEC §7.5).",
+      "oneOf": [
+        {
+          "description": "The decision budget expired.",
+          "type": "string",
+          "const": "budget"
+        },
+        {
+          "description": "Every estimator declined (`Insufficient`).",
+          "type": "string",
+          "const": "insufficient"
+        },
+        {
+          "description": "An estimator failed.",
+          "type": "string",
+          "const": "estimator_error"
+        },
+        {
+          "description": "A panic was caught.",
+          "type": "string",
+          "const": "panic"
+        },
+        {
+          "description": "A configuration error.",
+          "type": "string",
+          "const": "config_error"
+        },
+        {
+          "description": "The adapter's `validate` rejected the patch.",
+          "type": "string",
+          "const": "rejected"
+        },
+        {
+          "description": "The estimate could not be normalized.",
+          "type": "string",
+          "const": "invalid_estimate"
+        },
+        {
+          "description": "Mode is `off` or `observe`.",
+          "type": "string",
+          "const": "mode"
+        },
+        {
+          "description": "The workload is skipped (already sized, opted out, …).",
+          "type": "string",
+          "const": "skipped"
+        },
+        {
+          "description": "Any other internal error.",
+          "type": "string",
+          "const": "internal"
+        }
+      ]
+    },
+    "Provenance": {
+      "description": "Who produced an estimate (SPEC §5.5).",
+      "type": "object",
+      "properties": {
+        "estimator": {
+          "description": "Estimator id.",
+          "type": "string"
+        },
+        "features": {
+          "description": "Feature schema version (e.g. `\"features-v1\"`).",
+          "type": "string",
+          "default": ""
+        },
+        "grid": {
+          "description": "Grid id the estimate uses.",
+          "type": "string",
+          "default": ""
+        },
+        "latency_ms": {
+          "description": "Estimation latency.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "version": {
+          "description": "Estimator version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "estimator",
+        "version"
+      ]
+    },
+    "QosClass": {
+      "description": "Kubernetes-style QoS class (SPEC §5.1, §7.4).",
+      "oneOf": [
+        {
+          "description": "Limits = requests on every axis.",
+          "type": "string",
+          "const": "guaranteed"
+        },
+        {
+          "description": "Some request or limit set.",
+          "type": "string",
+          "const": "burstable"
+        },
+        {
+          "description": "Nothing set.",
+          "type": "string",
+          "const": "best_effort"
+        }
+      ]
+    },
+    "Requests": {
+      "description": "Resource requests of one unit (SPEC §5.1). `None` = not set.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral storage.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu": {
+          "description": "Accelerators.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shm": {
+          "description": "Shared memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ResourceSpec": {
+      "description": "Requests and limits of one unit.",
+      "type": "object",
+      "properties": {
+        "limits": {
+          "description": "Limits.",
+          "$ref": "#/$defs/Limits",
+          "default": {}
+        },
+        "requests": {
+          "description": "Requests.",
+          "$ref": "#/$defs/Requests",
+          "default": {}
+        }
+      }
+    },
+    "UnitId": {
+      "description": "A unit's id, stable within its submission (plugins.md §2).",
+      "type": "string"
+    },
+    "WorkloadKey": {
+      "description": "Workload key `{platform}://{tenant}/{suffix}` (or `{platform}://{tenant}//{suffix}`).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}://.+/.+$"
+    }
+  }
+}

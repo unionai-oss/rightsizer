@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BreakerScope",
+  "description": "What a breaker covers (SPEC §2.3 S5). JSON: `{\"kind\": \"workload\", \"key\": ...}`.",
+  "oneOf": [
+    {
+      "description": "One workload key.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "description": "The key.",
+          "$ref": "#/$defs/WorkloadKey"
+        },
+        "kind": {
+          "type": "string",
+          "const": "workload"
+        }
+      },
+      "required": [
+        "kind",
+        "key"
+      ]
+    },
+    {
+      "description": "One input-size bucket of a workload key.",
+      "type": "object",
+      "properties": {
+        "bucket": {
+          "description": "The bucket (e.g. the memory-ladder cell of the input bytes).",
+          "type": "string"
+        },
+        "key": {
+          "description": "The key.",
+          "$ref": "#/$defs/WorkloadKey"
+        },
+        "kind": {
+          "type": "string",
+          "const": "input_bucket"
+        }
+      },
+      "required": [
+        "kind",
+        "key",
+        "bucket"
+      ]
+    },
+    {
+      "description": "Every decision from one estimator version.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Estimator id.",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "estimator_version"
+        },
+        "version": {
+          "description": "Version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "version"
+      ]
+    },
+    {
+      "description": "The whole store prefix.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "fleet"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    }
+  ],
+  "$defs": {
+    "WorkloadKey": {
+      "description": "Workload key `{platform}://{tenant}/{suffix}` (or `{platform}://{tenant}//{suffix}`).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}://.+/.+$"
+    }
+  }
+}

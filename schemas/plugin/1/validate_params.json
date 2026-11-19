@@ -1,0 +1,393 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ValidateParams",
+  "description": "`validate` params.",
+  "type": "object",
+  "properties": {
+    "deadline_ms": {
+      "description": "Deadline.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "env": {
+      "description": "Hosting environment.",
+      "$ref": "#/$defs/AdapterEnv",
+      "default": {
+        "settings": {}
+      }
+    },
+    "native": {
+      "description": "The submission.",
+      "$ref": "#/$defs/Native"
+    },
+    "patch": {
+      "description": "The patch.",
+      "$ref": "#/$defs/Patch"
+    }
+  },
+  "required": [
+    "native",
+    "patch"
+  ],
+  "$defs": {
+    "AdapterEnv": {
+      "description": "What the hosting surface tells an adapter (cluster, caller identity, deadline).",
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "description": "Cluster name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deadline_ms": {
+          "description": "Remaining budget, ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "namespace": {
+          "description": "Authenticated namespace / account / project.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "description": "Authenticated caller (admission `userInfo.username`, Slurm `submit_uid`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settings": {
+          "description": "Adapter-specific settings (the `[k8s]`, `[slurm]`, … config section).",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        }
+      }
+    },
+    "JsonPatchOp": {
+      "description": "An RFC 6902 JSON Patch operation (K8s admission responses).",
+      "oneOf": [
+        {
+          "description": "`add`.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "add"
+            },
+            "path": {
+              "description": "JSON pointer.",
+              "type": "string"
+            },
+            "value": {
+              "description": "Value."
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "value"
+          ]
+        },
+        {
+          "description": "`remove`.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "remove"
+            },
+            "path": {
+              "description": "JSON pointer.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path"
+          ]
+        },
+        {
+          "description": "`replace`.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "replace"
+            },
+            "path": {
+              "description": "JSON pointer.",
+              "type": "string"
+            },
+            "value": {
+              "description": "Value."
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "value"
+          ]
+        },
+        {
+          "description": "`move`.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "description": "Source pointer.",
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "move"
+            },
+            "path": {
+              "description": "Target pointer.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "from",
+            "path"
+          ]
+        },
+        {
+          "description": "`copy`.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "description": "Source pointer.",
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "copy"
+            },
+            "path": {
+              "description": "Target pointer.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "from",
+            "path"
+          ]
+        },
+        {
+          "description": "`test`.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "test"
+            },
+            "path": {
+              "description": "JSON pointer.",
+              "type": "string"
+            },
+            "value": {
+              "description": "Expected value."
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "value"
+          ]
+        }
+      ]
+    },
+    "Native": {
+      "description": "A native submission, as the plugin received it (plugins.md §2).\nJSON: `{\"kind\": \"document\", \"media_type\": ..., \"bytes\": \"<base64>\"}`, …",
+      "oneOf": [
+        {
+          "description": "YAML/JSON manifests, sbatch scripts, pipeline definitions.",
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "description": "The bytes (base64 on the wire).",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "document"
+            },
+            "media_type": {
+              "description": "Media type (`application/yaml`, `text/x-shellscript`).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "media_type",
+            "bytes"
+          ]
+        },
+        {
+          "description": "Admission request objects, Slurm option tables, Ray option dicts.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "object"
+            },
+            "value": {
+              "description": "The object."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "A cloud API request before signing (`\"sagemaker\"` / `\"CreateTrainingJob\"`).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "api_call"
+            },
+            "operation": {
+              "description": "Operation.",
+              "type": "string"
+            },
+            "params": {
+              "description": "Parameters."
+            },
+            "service": {
+              "description": "Service.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "service",
+            "operation",
+            "params"
+          ]
+        }
+      ]
+    },
+    "Patch": {
+      "description": "A rendered change (plugins.md §2). JSON: `{\"kind\": \"json_patch\", \"ops\": [...]}`, …",
+      "oneOf": [
+        {
+          "description": "Nothing to change.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "K8s admission responses.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "json_patch"
+            },
+            "ops": {
+              "description": "Operations.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/JsonPatchOp"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "ops"
+          ]
+        },
+        {
+          "description": "Byte-range edits (YAML, sbatch).",
+          "type": "object",
+          "properties": {
+            "edits": {
+              "description": "Edits.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TextEdit"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "text_edits"
+            }
+          },
+          "required": [
+            "kind",
+            "edits"
+          ]
+        },
+        {
+          "description": "Option tables (Slurm cli_filter/job_submit, Ray `.options()`, Flyte Resources).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "options"
+            },
+            "options": {
+              "description": "Options.",
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ]
+        }
+      ]
+    },
+    "TextEdit": {
+      "description": "A byte-range edit; comments and formatting elsewhere are preserved.",
+      "type": "object",
+      "properties": {
+        "end": {
+          "description": "End byte offset (exclusive).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "replacement": {
+          "description": "Replacement text.",
+          "type": "string"
+        },
+        "start": {
+          "description": "Start byte offset (inclusive).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "replacement"
+      ]
+    }
+  }
+}

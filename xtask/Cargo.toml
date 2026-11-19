@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+description = "Workspace tasks: deps-check (dependency boundaries) and schemas (JSON Schema generation)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rightsizer-core = { workspace = true, features = ["schema"] }
+rightsizer-plugin = { workspace = true, features = ["schema"] }
+anyhow.workspace = true
+serde_json.workspace = true
+schemars.workspace = true

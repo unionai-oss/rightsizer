@@ -1,0 +1,132 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rightsizer-core",
+    "crates/rightsizer-features",
+    "crates/rightsizer-estimators",
+    "crates/rightsizer-history",
+    "crates/rightsizer-engine",
+    "crates/rightsizer-plugin",
+    "crates/rightsizer-k8s",
+    "crates/rightsizer-slurm",
+    "crates/rightsizer-cli",
+    "crates/rightsizer-py",
+    "xtask",
+]
+default-members = [
+    "crates/rightsizer-core",
+    "crates/rightsizer-features",
+    "crates/rightsizer-estimators",
+    "crates/rightsizer-history",
+    "crates/rightsizer-engine",
+    "crates/rightsizer-plugin",
+    "crates/rightsizer-k8s",
+    "crates/rightsizer-slurm",
+    "crates/rightsizer-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/unionai-oss/rightsizer"
+publish = false
+
+[workspace.dependencies]
+# ── workspace crates ────────────────────────────────────────────────────
+rightsizer-core = { path = "crates/rightsizer-core", version = "0.1.0" }
+rightsizer-features = { path = "crates/rightsizer-features", version = "0.1.0", default-features = false }
+rightsizer-estimators = { path = "crates/rightsizer-estimators", version = "0.1.0", default-features = false }
+rightsizer-history = { path = "crates/rightsizer-history", version = "0.1.0", default-features = false }
+rightsizer-engine = { path = "crates/rightsizer-engine", version = "0.1.0", default-features = false }
+rightsizer-plugin = { path = "crates/rightsizer-plugin", version = "0.1.0" }
+rightsizer-k8s = { path = "crates/rightsizer-k8s", version = "0.1.0", default-features = false }
+rightsizer-slurm = { path = "crates/rightsizer-slurm", version = "0.1.0" }
+
+# ── core set (pure) ─────────────────────────────────────────────────────
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
+ulid = { version = "3.0.0", features = ["serde"] }
+sha2 = "0.11.1"
+enumflags2 = "0.7.12"
+schemars = { version = "1.2.3", features = ["chrono04"] }
+
+# ── serialization / config ──────────────────────────────────────────────
+# serde_yaml is deprecated; serde_norway is its maintained drop-in fork.
+serde_norway = "0.9.42"
+toml = "1.2.1"
+base64 = "0.23.1"
+hex = "0.4.3"
+humantime = "2.4.0"
+humantime-serde = "1.1.1"
+url = "2.5.8"
+bytes = "1.12.2"
+
+# ── crypto ──────────────────────────────────────────────────────────────
+hmac = "0.13.0"
+
+# ── async ───────────────────────────────────────────────────────────────
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "net", "signal"] }
+async-trait = "0.1.92"
+futures = "0.3.34"
+
+# ── I/O backends ────────────────────────────────────────────────────────
+object_store = { version = "0.14.2", default-features = false, features = ["fs"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1", "with-chrono-0_4"] }
+tokio-postgres-rustls = "0.14.0"
+parquet = { version = "60.1.0", default-features = false }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+
+# ── servers / TLS ───────────────────────────────────────────────────────
+axum = { version = "0.8.9", default-features = false, features = ["http1", "http2", "json", "tokio"] }
+hyper = "1.12.0"
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "http1", "http2"] }
+tower = "0.5.3"
+http = "1.5.0"
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "logging", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pemfile = "2.2.0"
+rcgen = "0.14.10"
+
+# ── Kubernetes ──────────────────────────────────────────────────────────
+kube = { version = "5.1.0", default-features = false, features = ["client", "rustls-tls", "ring", "runtime"] }
+k8s-openapi = { version = "0.29.0", default-features = false, features = ["std", "v1_33"] }
+json-patch = "5.0.0"
+
+# ── Python ──────────────────────────────────────────────────────────────
+pyo3 = { version = "0.30.1", features = ["abi3-py310"] }
+pyo3-async-runtimes = { version = "0.30.0", features = ["tokio-runtime"] }
+
+# ── CLI / observability ─────────────────────────────────────────────────
+clap = { version = "4.6.8", features = ["derive", "env"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+prometheus = { version = "0.14.0", default-features = false }
+anyhow = "1.0.104"
+which = "8.0.6"
+shlex = "2.0.1"
+cargo_metadata = "0.23.1"
+
+# ── testing ─────────────────────────────────────────────────────────────
+proptest = "1.12.0"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3.27.0"
+pretty_assertions = "1.4.1"
+insta = { version = "1.49.0", features = ["json"] }
+jsonschema = { version = "0.61.2", default-features = false }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.bench]
+debug = false

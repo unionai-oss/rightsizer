@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatusResult",
+  "description": "`status` result.",
+  "type": "object",
+  "properties": {
+    "fleet_breaker": {
+      "description": "Fleet breaker.",
+      "$ref": "#/$defs/BreakerState"
+    },
+    "mode_ceiling": {
+      "description": "Fleet `mode_ceiling`, if readable.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Mode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "plugins": {
+      "description": "Loaded plugins by kind.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "protocol": {
+      "description": "Protocol.",
+      "type": "string"
+    },
+    "store_reachable": {
+      "description": "Store reachable.",
+      "type": "boolean"
+    },
+    "version": {
+      "description": "Daemon version.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol",
+    "version",
+    "fleet_breaker",
+    "store_reachable"
+  ],
+  "$defs": {
+    "BreakerState": {
+      "description": "A breaker's state.",
+      "oneOf": [
+        {
+          "description": "Not tripped.",
+          "type": "string",
+          "const": "closed"
+        },
+        {
+          "description": "Tripped: enforce demotes to recommend.",
+          "type": "string",
+          "const": "open"
+        },
+        {
+          "description": "Per-workload only: recovered in shadow; the next enforced decision is a trial.",
+          "type": "string",
+          "const": "half_open"
+        }
+      ]
+    },
+    "Mode": {
+      "description": "Mode, ordered `off < observe < recommend < enforce` (SPEC §4).",
+      "oneOf": [
+        {
+          "description": "Do nothing.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Record outcomes only.",
+          "type": "string",
+          "const": "observe"
+        },
+        {
+          "description": "Decide and record, change nothing.",
+          "type": "string",
+          "const": "recommend"
+        },
+        {
+          "description": "Apply under the safety contract.",
+          "type": "string",
+          "const": "enforce"
+        }
+      ]
+    }
+  }
+}

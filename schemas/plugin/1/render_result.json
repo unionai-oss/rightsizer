@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Patch",
+  "description": "A rendered change (plugins.md §2). JSON: `{\"kind\": \"json_patch\", \"ops\": [...]}`, …",
+  "oneOf": [
+    {
+      "description": "Nothing to change.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "none"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "K8s admission responses.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "json_patch"
+        },
+        "ops": {
+          "description": "Operations.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonPatchOp"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "ops"
+      ]
+    },
+    {
+      "description": "Byte-range edits (YAML, sbatch).",
+      "type": "object",
+      "properties": {
+        "edits": {
+          "description": "Edits.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TextEdit"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "const": "text_edits"
+        }
+      },
+      "required": [
+        "kind",
+        "edits"
+      ]
+    },
+    {
+      "description": "Option tables (Slurm cli_filter/job_submit, Ray `.options()`, Flyte Resources).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "options"
+        },
+        "options": {
+          "description": "Options.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "kind",
+        "options"
+      ]
+    }
+  ],
+  "$defs": {
+    "JsonPatchOp": {
+      "description": "An RFC 6902 JSON Patch operation (K8s admission responses).",
+      "oneOf": [
+        {
+          "description": "`add`.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "add"
+            },
+            "path": {
+              "description": "JSON pointer.",
+              "type": "string"
+            },
+            "value": {
+              "description": "Value."
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "value"
+          ]
+        },
+        {
+          "description": "`remove`.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "remove"
+            },
+            "path": {
+              "description": "JSON pointer.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path"
+          ]
+        },
+        {
+          "description": "`replace`.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "replace"
+            },
+            "path": {
+              "description": "JSON pointer.",
+              "type": "string"
+            },
+            "value": {
+              "description": "Value."
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "value"
+          ]
+        },
+        {
+          "description": "`move`.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "description": "Source pointer.",
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "move"
+            },
+            "path": {
+              "description": "Target pointer.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "from",
+            "path"
+          ]
+        },
+        {
+          "description": "`copy`.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "description": "Source pointer.",
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "copy"
+            },
+            "path": {
+              "description": "Target pointer.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "from",
+            "path"
+          ]
+        },
+        {
+          "description": "`test`.",
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "test"
+            },
+            "path": {
+              "description": "JSON pointer.",
+              "type": "string"
+            },
+            "value": {
+              "description": "Expected value."
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "value"
+          ]
+        }
+      ]
+    },
+    "TextEdit": {
+      "description": "A byte-range edit; comments and formatting elsewhere are preserved.",
+      "type": "object",
+      "properties": {
+        "end": {
+          "description": "End byte offset (exclusive).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "replacement": {
+          "description": "Replacement text.",
+          "type": "string"
+        },
+        "start": {
+          "description": "Start byte offset (inclusive).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "replacement"
+      ]
+    }
+  }
+}

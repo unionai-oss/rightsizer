@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Request",
+  "description": "A JSON-RPC request (a notification when `id` is absent).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "Id.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "jsonrpc": {
+      "description": "`\"2.0\"`.",
+      "type": "string"
+    },
+    "method": {
+      "description": "Method.",
+      "type": "string"
+    },
+    "params": {
+      "description": "Params.",
+      "default": null
+    }
+  },
+  "required": [
+    "jsonrpc",
+    "method"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "A request id.",
+      "anyOf": [
+        {
+          "description": "Numeric.",
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "description": "String.",
+          "type": "string"
+        }
+      ]
+    }
+  }
+}

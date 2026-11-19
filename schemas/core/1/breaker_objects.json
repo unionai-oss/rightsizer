@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BreakerObjects",
+  "description": "All objects of one breaker scope.",
+  "type": "object",
+  "properties": {
+    "resets": {
+      "description": "Resets.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Reset"
+      }
+    },
+    "trips": {
+      "description": "Trips.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Trip"
+      }
+    }
+  },
+  "$defs": {
+    "BreakerScope": {
+      "description": "What a breaker covers (SPEC §2.3 S5). JSON: `{\"kind\": \"workload\", \"key\": ...}`.",
+      "oneOf": [
+        {
+          "description": "One workload key.",
+          "type": "object",
+          "properties": {
+            "key": {
+              "description": "The key.",
+              "$ref": "#/$defs/WorkloadKey"
+            },
+            "kind": {
+              "type": "string",
+              "const": "workload"
+            }
+          },
+          "required": [
+            "kind",
+            "key"
+          ]
+        },
+        {
+          "description": "One input-size bucket of a workload key.",
+          "type": "object",
+          "properties": {
+            "bucket": {
+              "description": "The bucket (e.g. the memory-ladder cell of the input bytes).",
+              "type": "string"
+            },
+            "key": {
+              "description": "The key.",
+              "$ref": "#/$defs/WorkloadKey"
+            },
+            "kind": {
+              "type": "string",
+              "const": "input_bucket"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "bucket"
+          ]
+        },
+        {
+          "description": "Every decision from one estimator version.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "description": "Estimator id.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "estimator_version"
+            },
+            "version": {
+              "description": "Version.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "version"
+          ]
+        },
+        {
+          "description": "The whole store prefix.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fleet"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "Reset": {
+      "description": "An operator-written reset.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "When.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "by": {
+          "description": "Who.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "Scope.",
+          "$ref": "#/$defs/BreakerScope"
+        },
+        "v": {
+          "description": "Wire version (1).",
+          "type": "integer",
+          "format": "uint16",
+          "default": 1,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scope",
+        "at"
+      ]
+    },
+    "Trip": {
+      "description": "A trip object (`breakers/{scope}/trips/{ulid}.json`, `If-None-Match: *`).",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "When.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "detail": {
+          "description": "Detail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Trip id.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why.",
+          "$ref": "#/$defs/TripReason"
+        },
+        "scope": {
+          "description": "Scope.",
+          "$ref": "#/$defs/BreakerScope"
+        },
+        "v": {
+          "description": "Wire version (1).",
+          "type": "integer",
+          "format": "uint16",
+          "default": 1,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "scope",
+        "at",
+        "reason"
+      ]
+    },
+    "TripReason": {
+      "description": "Why a breaker tripped.",
+      "oneOf": [
+        {
+          "description": "A caused failure escalation did not recover.",
+          "type": "string",
+          "const": "unrecovered_failure"
+        },
+        {
+          "description": "Per-estimator-version failure rate.",
+          "type": "string",
+          "const": "estimator_rate"
+        },
+        {
+          "description": "Fleet fast-burn.",
+          "type": "string",
+          "const": "fast_burn"
+        },
+        {
+          "description": "Fleet slow-burn.",
+          "type": "string",
+          "const": "slow_burn"
+        },
+        {
+          "description": "Tripped by hand (`rsz breaker trip`).",
+          "type": "string",
+          "const": "manual"
+        }
+      ]
+    },
+    "WorkloadKey": {
+      "description": "Workload key `{platform}://{tenant}/{suffix}` (or `{platform}://{tenant}//{suffix}`).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}://.+/.+$"
+    }
+  }
+}

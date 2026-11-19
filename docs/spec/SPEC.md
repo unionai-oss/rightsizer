@@ -957,6 +957,11 @@ Off by default. With `exploration = ε` (≤ 0.05), incompressible axes go one c
 {prefix}/v1/snapshots/{tenant}/{date}.parquet           compacted, for analytics and export
 ```
 
+`{tenant}` in these paths is the workload key's `{platform}://{tenant}` with `://`
+replaced by `/` (for example `flyte/acme/ml/development`), so platforms never
+share a prefix; `{key-hash}` is the first 32 hex characters of the SHA-256 of
+the full key string.
+
 - **Reads.** GET the `latest` pointer, then LIST only shards newer than its
   watermark (`start-after`). That is one GET plus one small LIST per key, and
   the result is cached per process (§8.4).

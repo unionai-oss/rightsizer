@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlatformRef",
+  "description": "Static facts about the platform (SPEC §5.2): part of the context digest,\nso nothing here may change minute to minute.",
+  "type": "object",
+  "properties": {
+    "cpu_window_s": {
+      "description": "CPU measurement window, seconds.",
+      "type": "integer",
+      "format": "uint32",
+      "default": 15,
+      "minimum": 0
+    },
+    "kind": {
+      "description": "Platform kind (`\"k8s\"`, `\"slurm\"`, …).",
+      "type": "string"
+    },
+    "memory_enforced": {
+      "description": "Whether the platform enforces memory such that an under-ask fails the\nunit itself (SPEC §2.3 S3).",
+      "type": "boolean",
+      "default": true
+    },
+    "overhead": {
+      "description": "Runtime overhead distribution.",
+      "$ref": "#/$defs/OverheadModel",
+      "default": {
+        "cpu_millis": 0,
+        "memory_mib": []
+      }
+    },
+    "retry": {
+      "description": "Retry semantics (SPEC §7.2).",
+      "$ref": "#/$defs/PlatformRetry",
+      "default": {
+        "same_size": 0
+      }
+    },
+    "version": {
+      "description": "Platform version string.",
+      "type": "string",
+      "default": ""
+    },
+    "walltime_s": {
+      "description": "Walltime limit, seconds.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "kind"
+  ],
+  "$defs": {
+    "AcceleratorId": {
+      "description": "A canonical accelerator id with per-device memory and family (SPEC §5.1.1).\nJSON: the canonical string, e.g. `\"A100-80G\"`; parsing is case-insensitive.",
+      "oneOf": [
+        {
+          "description": "NVIDIA T4, 16 GB.",
+          "type": "string",
+          "const": "T4-16G"
+        },
+        {
+          "description": "NVIDIA L4, 24 GB.",
+          "type": "string",
+          "const": "L4-24G"
+        },
+        {
+          "description": "NVIDIA A10G (AWS), 24 GB.",
+          "type": "string",
+          "const": "A10G-24G"
+        },
+        {
+          "description": "NVIDIA A10, 24 GB.",
+          "type": "string",
+          "const": "A10-24G"
+        },
+        {
+          "description": "NVIDIA L40S, 48 GB.",
+          "type": "string",
+          "const": "L40S-48G"
+        },
+        {
+          "description": "NVIDIA A100, 40 GB.",
+          "type": "string",
+          "const": "A100-40G"
+        },
+        {
+          "description": "NVIDIA A100, 80 GB.",
+          "type": "string",
+          "const": "A100-80G"
+        },
+        {
+          "description": "NVIDIA H100, 80 GB.",
+          "type": "string",
+          "const": "H100-80G"
+        },
+        {
+          "description": "NVIDIA H200, 141 GB.",
+          "type": "string",
+          "const": "H200-141G"
+        },
+        {
+          "description": "NVIDIA B200, 180 GB.",
+          "type": "string",
+          "const": "B200-180G"
+        },
+        {
+          "description": "AMD MI300X, 192 GB.",
+          "type": "string",
+          "const": "MI300X-192G"
+        },
+        {
+          "description": "Google TPU v5e (per chip).",
+          "type": "string",
+          "const": "TPU-V5E"
+        },
+        {
+          "description": "Google TPU v5p (per chip).",
+          "type": "string",
+          "const": "TPU-V5P"
+        },
+        {
+          "description": "Google TPU v6e / Trillium (per chip).",
+          "type": "string",
+          "const": "TPU-V6E"
+        },
+        {
+          "description": "AWS Trainium 1 (per chip).",
+          "type": "string",
+          "const": "TRN1"
+        },
+        {
+          "description": "AWS Trainium 2 (per chip).",
+          "type": "string",
+          "const": "TRN2"
+        },
+        {
+          "description": "AWS Inferentia 2 (per chip).",
+          "type": "string",
+          "const": "INF2"
+        },
+        {
+          "description": "A GPU of unknown type. Its type is never changed (SPEC §5.1.1).",
+          "type": "string",
+          "const": "unknown-gpu"
+        }
+      ]
+    },
+    "Bytes": {
+      "description": "A byte count. JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "GpuShape": {
+      "description": "An accelerator type × count (SPEC §5.1, §5.4).",
+      "type": "object",
+      "properties": {
+        "accel": {
+          "description": "Canonical accelerator id.",
+          "$ref": "#/$defs/AcceleratorId"
+        },
+        "count": {
+          "description": "Number of devices.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "accel",
+        "count"
+      ]
+    },
+    "Ladder": {
+      "description": "An escalation ladder (SPEC §7.2).",
+      "type": "object",
+      "properties": {
+        "driver": {
+          "description": "Who drives the ladder.",
+          "$ref": "#/$defs/LadderDriver"
+        },
+        "final_floor": {
+          "description": "The last step is raised to at least this: max(origin prior, largest\nobserved success). The core also computes it from the context and\nuses the larger.",
+          "$ref": "#/$defs/Requests",
+          "default": {}
+        },
+        "max_steps": {
+          "description": "Number of steps (2).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "memory_factor": {
+          "description": "Memory multiplier per step (2.0).",
+          "type": "number",
+          "format": "float",
+          "default": 2.0
+        }
+      },
+      "required": [
+        "driver"
+      ]
+    },
+    "LadderDriver": {
+      "description": "Who drives a ladder (SPEC §7.2).",
+      "oneOf": [
+        {
+          "description": "A rightsizer wrapper owns the wait and returns only the final attempt.",
+          "type": "string",
+          "const": "caller"
+        },
+        {
+          "description": "The orchestrator retries through a rightsizer hook that sees the attempt.",
+          "type": "string",
+          "const": "orchestrator"
+        }
+      ]
+    },
+    "MilliCpu": {
+      "description": "CPU in millicores (1000 = one core). JSON: an unsigned integer.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "OverheadModel": {
+      "description": "Runtime overhead: memory the platform runtime holds before user code\nallocates (SPEC §5.2), as quantiles in MiB, e.g. Flyte\n`[[0.5, 70], [0.9, 242]]`. Empty = no overhead.",
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "description": "Fixed CPU overhead, millicores.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "memory_mib": {
+          "description": "`(quantile level, MiB)` pairs.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "number",
+                "format": "float"
+              },
+              {
+                "type": "number",
+                "format": "double"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "PlatformRetry": {
+      "description": "Retry semantics of the platform (SPEC §7.2).",
+      "type": "object",
+      "properties": {
+        "ladder": {
+          "description": "Resubmission at a larger size, if the integration drives one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ladder"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "same_size": {
+          "description": "Retries the platform performs at the same size (K8s `backoffLimit`,\nFlyte retries, Ray `max_retries`).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    },
+    "Requests": {
+      "description": "Resource requests of one unit (SPEC §5.1). `None` = not set.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilliCpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ephemeral_storage": {
+          "description": "Ephemeral storage.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu": {
+          "description": "Accelerators.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "description": "Memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shm": {
+          "description": "Shared memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OutcomeResult",
+  "description": "`outcome` result.",
+  "type": "object",
+  "properties": {
+    "accepted": {
+      "description": "Accepted (buffered or written).",
+      "type": "boolean"
+    },
+    "duplicate": {
+      "description": "Already recorded.",
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "accepted"
+  ]
+}

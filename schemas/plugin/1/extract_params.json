@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtractParams",
+  "description": "`extract` params.",
+  "type": "object",
+  "properties": {
+    "deadline_ms": {
+      "description": "Deadline.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "env": {
+      "description": "Hosting environment.",
+      "$ref": "#/$defs/AdapterEnv",
+      "default": {
+        "settings": {}
+      }
+    },
+    "native": {
+      "description": "The submission.",
+      "$ref": "#/$defs/Native"
+    }
+  },
+  "required": [
+    "native"
+  ],
+  "$defs": {
+    "AdapterEnv": {
+      "description": "What the hosting surface tells an adapter (cluster, caller identity, deadline).",
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "description": "Cluster name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deadline_ms": {
+          "description": "Remaining budget, ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "namespace": {
+          "description": "Authenticated namespace / account / project.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "description": "Authenticated caller (admission `userInfo.username`, Slurm `submit_uid`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settings": {
+          "description": "Adapter-specific settings (the `[k8s]`, `[slurm]`, … config section).",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        }
+      }
+    },
+    "Native": {
+      "description": "A native submission, as the plugin received it (plugins.md §2).\nJSON: `{\"kind\": \"document\", \"media_type\": ..., \"bytes\": \"<base64>\"}`, …",
+      "oneOf": [
+        {
+          "description": "YAML/JSON manifests, sbatch scripts, pipeline definitions.",
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "description": "The bytes (base64 on the wire).",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "document"
+            },
+            "media_type": {
+              "description": "Media type (`application/yaml`, `text/x-shellscript`).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "media_type",
+            "bytes"
+          ]
+        },
+        {
+          "description": "Admission request objects, Slurm option tables, Ray option dicts.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "object"
+            },
+            "value": {
+              "description": "The object."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "A cloud API request before signing (`\"sagemaker\"` / `\"CreateTrainingJob\"`).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "api_call"
+            },
+            "operation": {
+              "description": "Operation.",
+              "type": "string"
+            },
+            "params": {
+              "description": "Parameters."
+            },
+            "service": {
+              "description": "Service.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "service",
+            "operation",
+            "params"
+          ]
+        }
+      ]
+    }
+  }
+}

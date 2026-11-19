@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ValidateResult",
+  "description": "`validate` result.",
+  "type": "object",
+  "properties": {
+    "ok": {
+      "description": "Accepted.",
+      "type": "boolean"
+    },
+    "rejection": {
+      "description": "Why not.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Rejection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "ok"
+  ],
+  "$defs": {
+    "Rejection": {
+      "description": "Why `validate` rejected a patch: the core drops it and records\n`Prior{reason = rejected}` (plugins.md §2).",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "Detail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "The offending field, if known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Machine-readable reason (`\"exceeds_node_shape\"`, `\"limitrange\"`, `\"quota\"`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ]
+    }
+  }
+}

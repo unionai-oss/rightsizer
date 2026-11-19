@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InitializeParams",
+  "description": "`initialize` params.",
+  "type": "object",
+  "properties": {
+    "features": {
+      "description": "Feature schema (`\"features-v1\"`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "protocol": {
+      "description": "`\"rightsizer-plugin/1\"`.",
+      "type": "string"
+    },
+    "schemas": {
+      "description": "Schema versions spoken (`{\"context\": \"1\", \"decision\": \"1\", \"run\": \"1\"}`).",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {}
+    }
+  },
+  "required": [
+    "protocol"
+  ]
+}
