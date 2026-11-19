@@ -9,7 +9,7 @@ conformance-test items.
 ## 0. Day one
 
 ```bash
-rightsize audit modal --since 14d        # tier A: per-function waste and GPU advisories from Modal's stats and billing APIs
+rsz audit modal --since 14d        # tier A: per-function waste and GPU advisories from Modal's stats and billing APIs
 ```
 
 ```python
@@ -147,7 +147,7 @@ per call once warm (measured in M5).
 
 ## 3. Deploy-time sizing
 
-`rightsize suggest app.py` (SPEC §12.4) reads the `@app.function` /
+`rsz suggest app.py` (SPEC §12.4) reads the `@app.function` /
 `@app.cls` decorator arguments with a Python parser and proposes **text edits**
 to `memory=`, `cpu=` and `gpu=` from history: increases always, reductions
 only where S3(b) holds. It never edits a call whose arguments are not
@@ -186,7 +186,7 @@ and batched functions, and for deployed functions called from outside Python.
   `torch.OutOfMemoryError` → `GpuOom`.
 - **Enforcing reductions needs the importer.** The proxy alone cannot tell an
   OOM from a user exception, so a reduced call's failure stays unclassified
-  until `rightsize history import modal` runs, and S5 counts it as
+  until `rsz history import modal` runs, and S5 counts it as
   rightsizer-caused meanwhile. The proxy enforces reductions only when the
   importer's last successful run is within `[modal] import_max_lag`
   (default 30 min, read from the store); otherwise reductions are

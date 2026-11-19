@@ -37,7 +37,7 @@ It ships as Rust crates (data model, features, estimators, decision rule,
 history, platform adapters), Python packages (`rightsizer`, native; and
 `rightsizer-runtime`, pure Python) with integrations for Flyte v2, Ray,
 Metaflow, Airflow, SkyPilot, dstack, Modal and AWS (SageMaker AI, Batch), a
-**`rightsize` CLI** that also runs the Kubernetes admission webhook and a local
+**`rsz` CLI** that also runs the Kubernetes admission webhook and a local
 daemon, and the **Estimator Protocol**, so the model can be hosted anywhere.
 Platforms without any hook point still get a read-only **audit** (§12.3) and
 resource edits proposed as code changes (§12.4).
@@ -50,7 +50,7 @@ resource edits proposed as code changes (§12.4).
   memory or GPU memory is enforced only when the platform can recover from a
   wrong guess (an escalation ladder) or history proves it safe (§2.3 S3). Where
   memory is enforced *and* a ladder exists — Flyte tasks whose memory has a limit,
-  `rightsize apply --watch` and `rightsize slurm sbatch --watch` on clusters that
+  `rsz apply --watch` and `rsz slurm sbatch --watch` on clusters that
   enforce memory, Metaflow and Airflow tasks with enough retries on backends
   that enforce memory, and jobs
   launched through `rs.aws.sagemaker.run` — savings start on the first run.
@@ -62,7 +62,7 @@ resource edits proposed as code changes (§12.4).
   (aws.md §2, modal.md §2), and everything else gets audit and
   recommendations.
 - **Shadow mode first.** `recommend` changes nothing and records what would
-  have happened; `rightsize shadow` reports savings, would-be failures and a
+  have happened; `rsz shadow` reports savings, would-be failures and a
   per-workload readiness verdict (§12.2) before anyone enforces.
 
 ### 1.2 Positioning
@@ -173,7 +173,7 @@ plugins.md §5.
     **origin prior**: what the author wrote before any rightsizer layer
     changed it. Every value rightsizer persists — webhook patches (the signed
     `rightsizer.io/prior` annotation), deploy-time sizing, edits merged from
-    `rightsize suggest` (a `rightsizer: prior=… decision=…` marker next to the
+    `rsz suggest` (a `rightsizer: prior=… decision=…` marker next to the
     edited value, §12.4) — carries the origin prior, and attribution, ladders'
     `final_floor` and the re-attribution rule use it.
   - **Breakers.** Breakers demote from `enforce` to `recommend`. Their state
@@ -188,8 +188,8 @@ plugins.md §5.
 
   - **Recovery.** A per-workload breaker goes half-open after
     `recovery_shadow_fits` (default 5) shadow decisions whose measured outcomes
-    fit. The others need `rightsize breaker reset`. Any breaker can be tripped by
-    hand: `rightsize breaker trip [--fleet | KEY]`.
+    fit. The others need `rsz breaker reset`. Any breaker can be tripped by
+    hand: `rsz breaker trip [--fleet | KEY]`.
 - **Global ceiling.** `mode_ceiling` (off | observe | recommend | enforce) is
   read dynamically by every client from the store (`{prefix}/control/mode.json`,
   60 s cache). It caps every policy at every level, and is the fleet kill switch.
@@ -567,7 +567,7 @@ pub trait SnapFn: Send + Sync { fn snap(&self, ask: &Requests) -> Option<Shape>;
   §1.2), the unit is recommend-only.
 - Catalogs are data: they ship as versioned JSON (`catalog/*.json`), are
   refreshed from the provider's price and instance APIs
-  (`rightsize <platform> catalog refresh`), and are part of `PlatformState`,
+  (`rsz <platform> catalog refresh`), and are part of `PlatformState`,
   never of the context digest.
 
 ## 6. Estimators
@@ -705,7 +705,7 @@ pub struct Ladder {
     pub driver: LadderDriver,
 }
 pub enum LadderDriver {
-    Caller,          // a rightsizer wrapper owns the wait and returns the final attempt: Flyte parent (`on_oom`), `apply --watch`, `slurm sbatch --watch`, `rs.aws.sagemaker.run`, `rightsize aws batch submit --wait`
+    Caller,          // a rightsizer wrapper owns the wait and returns the final attempt: Flyte parent (`on_oom`), `apply --watch`, `slurm sbatch --watch`, `rs.aws.sagemaker.run`, `rsz aws batch submit --wait`
     Orchestrator,    // the orchestrator retries the unit through a rightsizer hook that sees the attempt number (escalate-on-retry, below): Metaflow, Airflow
 }
 ```
@@ -960,7 +960,7 @@ Off by default. With `exploration = ε` (≤ 0.05), incompressible axes go one c
 - **Reads.** GET the `latest` pointer, then LIST only shards newer than its
   watermark (`start-after`). That is one GET plus one small LIST per key, and
   the result is cached per process (§8.4).
-- **Compaction.** `rightsize history compact` runs as a **singleton**: a
+- **Compaction.** `rsz history compact` runs as a **singleton**: a
   scheduled job (CronJob, systemd timer or Flyte schedule) holding a lease
   object created with a conditional PUT (`If-None-Match: *`), with expiry. It
   does three things:
@@ -1080,7 +1080,7 @@ rightsizer-plugin      adapter traits, plugin protocol types and client (no serv
 rightsizer-k8s         K8s adapter, webhook, watcher, Prometheus importer (kube-rs)
 rightsizer-slurm       Slurm adapter, sbatch wrapper, tokens, sacct importer
 rightsizer-cloud       shape catalogs and price importers; AWS, GCP, Azure, Modal, Databricks history importers (features: aws, gcp, azure, modal, databricks)
-rightsizer-cli         `rightsize`: CLI, daemon (plugin protocol server), all adapters
+rightsizer-cli         `rsz`: CLI, daemon (plugin protocol server), all adapters
 rightsizer-py          PyO3 module: core + features + estimators + history(object-store, sqlite) — no kube-rs, no postgres
 ```
 
@@ -1095,7 +1095,7 @@ the botocore hook in Python. KubeRay is part of `rightsizer-k8s`.
 |---|---|---|
 | `rightsizer-runtime` | pure Python: policy model, measurement (cgroup, NVML via `pynvml` if present), `RunRecord` writer (through `flyte.storage` or `fsspec`), Flyte and Ray child-side code | `py3-none-any` |
 | `rightsizer` | depends on `rightsizer-runtime`; native module `rightsizer._core` (decisions, features, estimators, store reads); `rightsizer.flyte`, `rightsizer.ray`, `rightsizer.serve`, `rightsizer.export` | abi3 for CPython ≥ 3.10: manylinux2014 x86_64 and aarch64, macOS arm64 and x86_64. Later: musllinux, Windows, free-threaded `cp313t` |
-| `rightsizer-cli` | the `rightsize` binary as a wheel (maturin `bindings = "bin"`) | per platform |
+| `rightsizer-cli` | the `rsz` binary as a wheel (maturin `bindings = "bin"`) | per platform |
 | `metaflow-rightsizer` | the `metaflow_extensions.rightsizer` namespace package (Metaflow requires extensions to be their own distribution); depends on `rightsizer` | `py3-none-any` |
 
 Integration modules ship inside `rightsizer` (`rightsizer.aws`, `.modal`,
@@ -1154,38 +1154,38 @@ see everything.
 | numeric scalars, sizes, shapes, dtypes, parameter counts | sent | `redact = [...]` |
 | history (peaks, statuses, sizes) | sent | `history_limit` |
 
-## 12. CLI (`rightsize`)
+## 12. CLI (`rsz`)
 
 One static binary (musl on Linux), also published as the `rightsizer-cli` wheel
-and installed as `kubectl-rightsize`.
+and installed as `kubectl-rsz`.
 
 ### 12.1 Commands
 
 ```
-rightsize recommend  [-p PLATFORM] FILE|-                decisions for a submission (mode=recommend)
-rightsize apply      FILE|- [-o FILE] [--diff] [--watch] rewrite (mode=enforce under §2.3); --watch resubmits on OOM (Ladder)
-rightsize explain    FILE|- | --decision ID              distributions, cost table, constraints, holds, advisories
-rightsize shadow     [--tenant T|-n NS|--key K] [--since 14d] [--format html]   savings / would-fail / readiness (§12.2)
-rightsize history    import k8s|slurm|flyte|ray|aws|modal|dstack|vertex|azureml|databricks [...] | show KEY | export --parquet | compact
-rightsize audit      PLATFORM [--since 30d] [--format text|json|html]    read-only waste and risk report from platform history (§12.3)
-rightsize suggest    PATH... [--write | --pr]             resource edits to code and config from history (§12.4)
-rightsize mcp                                             MCP server for coding agents (§12.5)
-rightsize outcome    KEY --status S [--memory-peak Q]    manual outcome record
-rightsize breaker    status | trip [--fleet|KEY] | reset [KEY]
-rightsize control    mode-ceiling [off|observe|recommend|enforce]
-rightsize serve      [--socket PATH | --listen ADDR]     daemon (plugins.md §3)
-rightsize webhook    serve | manifests | rotate-key       kubernetes.md
-rightsize k8s        restore -f FILE|-                    reverse webhook mutations from the signed prior annotation
-rightsize slurm      sbatch [--watch] ARGS... | install [--disable] | keygen | rotate-key
-rightsize ray        submit -- ENTRYPOINT
-rightsize aws        run -- CMD | batch submit [--wait] ARGS... | catalog refresh | reconcile
-rightsize metaflow   reconcile
-rightsize databricks reconcile | catalog refresh          (M7)
-rightsize vertex     reconcile | catalog refresh          (M7)
-rightsize <platform> catalog refresh                      rebuild a shape catalog from provider APIs (§5.8)
-rightsize flyte      run ... | deploy [--restore] ... | reconcile
-rightsize plugin     list | check NAME
-rightsize config     show | validate
+rsz recommend  [-p PLATFORM] FILE|-                decisions for a submission (mode=recommend)
+rsz apply      FILE|- [-o FILE] [--diff] [--watch] rewrite (mode=enforce under §2.3); --watch resubmits on OOM (Ladder)
+rsz explain    FILE|- | --decision ID              distributions, cost table, constraints, holds, advisories
+rsz shadow     [--tenant T|-n NS|--key K] [--since 14d] [--format html]   savings / would-fail / readiness (§12.2)
+rsz history    import k8s|slurm|flyte|ray|aws|modal|dstack|vertex|azureml|databricks [...] | show KEY | export --parquet | compact
+rsz audit      PLATFORM [--since 30d] [--format text|json|html]    read-only waste and risk report from platform history (§12.3)
+rsz suggest    PATH... [--write | --pr]             resource edits to code and config from history (§12.4)
+rsz mcp                                             MCP server for coding agents (§12.5)
+rsz outcome    KEY --status S [--memory-peak Q]    manual outcome record
+rsz breaker    status | trip [--fleet|KEY] | reset [KEY]
+rsz control    mode-ceiling [off|observe|recommend|enforce]
+rsz serve      [--socket PATH | --listen ADDR]     daemon (plugins.md §3)
+rsz webhook    serve | manifests | rotate-key       kubernetes.md
+rsz k8s        restore -f FILE|-                    reverse webhook mutations from the signed prior annotation
+rsz slurm      sbatch [--watch] ARGS... | install [--disable] | keygen | rotate-key
+rsz ray        submit -- ENTRYPOINT
+rsz aws        run -- CMD | batch submit [--wait] ARGS... | catalog refresh | reconcile
+rsz metaflow   reconcile
+rsz databricks reconcile | catalog refresh          (M7)
+rsz vertex     reconcile | catalog refresh          (M7)
+rsz <platform> catalog refresh                      rebuild a shape catalog from provider APIs (§5.8)
+rsz flyte      run ... | deploy [--restore] ... | reconcile
+rsz plugin     list | check NAME
+rsz config     show | validate
 ```
 
 - Output is `text` (default), `json` or `yaml`. Manifests are edited with
@@ -1200,7 +1200,7 @@ rightsize config     show | validate
   `/etc/rightsizer/config.toml`. Any key can be overridden with an env var
   `RIGHTSIZER__SECTION__KEY`.
 
-### 12.2 `rightsize shadow`
+### 12.2 `rsz shadow`
 
 For each key, the report gives:
 
@@ -1218,20 +1218,20 @@ For each key, the report gives:
 `--format html` writes a single shareable page.
 
 ```
-$ rightsize shadow --tenant flyte://acme/ml/development --since 14d
+$ rsz shadow --tenant flyte://acme/ml/development --since 14d
 KEY                       RUNS  PRIOR mem   DECIDED mem (p50)  WOULD SAVE           WOULD FAIL  READINESS
 etl.clean                  412  16Gi        3Gi                  41.2k GiB·h ($1.9k)  0 / 412     ready
 train.finetune              38  64Gi        48Gi                 2.1k GiB·h ($310)    1 / 38 (?)  ladder-only
 embed.batch               9,870 8Gi         4Gi                  88.0k GiB·h ($4.0k)  0 / 9,870   ready
 ```
 
-### 12.3 `rightsize audit`
+### 12.3 `rsz audit`
 
 The first thing a new user runs, on any platform, with read-only credentials
 and nothing installed on the platform:
 
 ```
-$ rightsize audit aws --since 30d --format html
+$ rsz audit aws --since 30d --format html
 ```
 
 - It runs the platform's importer (`history import`) into a temporary local
@@ -1254,7 +1254,7 @@ $ rightsize audit aws --since 30d --format html
   for platforms without per-run memory metrics, the report covers status,
   duration and GPU advisories only and says so.
 
-### 12.4 `rightsize suggest`
+### 12.4 `rsz suggest`
 
 Resource edits proposed as code changes, for platforms where resources live
 in code or config and for teams that want human review before anything
@@ -1288,7 +1288,7 @@ changes:
 
 ### 12.5 MCP server
 
-`rightsize mcp` serves the Model Context Protocol over stdio so coding agents
+`rsz mcp` serves the Model Context Protocol over stdio so coding agents
 can size workloads while they write them. Tools: `estimate` (code, input URIs
 or sizes, platform → resources and explanation), `explain` (a decision id or
 key), `audit` (platform, window → summary). It is read-only: it never writes
@@ -1343,25 +1343,25 @@ A `PrometheusRule` and a Grafana dashboard ship in `deploy/`. They alert on:
 - **Upgrade order:** readers (webhook, daemon, Python clients), then writers,
   then raise `write_version`.
 - **Keys** (K8s prior signing, Slurm tokens) carry a key id. Two keys are active
-  during rotation (`rightsize slurm rotate-key`, `rightsize webhook rotate-key`).
+  during rotation (`rsz slurm rotate-key`, `rsz webhook rotate-key`).
 
 ### 13.3 Turning it off and reverting
 
-- **Off everywhere:** `rightsize control mode-ceiling recommend` (or `off`),
+- **Off everywhere:** `rsz control mode-ceiling recommend` (or `off`),
   read by every client within 60 s.
-- **K8s:** `rightsize k8s restore` rewrites objects from the signed
+- **K8s:** `rsz k8s restore` rewrites objects from the signed
   `rightsizer.io/prior` annotation. New objects are unaffected once the mode
   ceiling drops.
-- **Flyte:** `rightsize flyte deploy --restore` redeploys from source with
+- **Flyte:** `rsz flyte deploy --restore` redeploys from source with
   sizing disabled. Deploy-time *reductions* exist only where
-  `rightsize flyte reconcile` is scheduled (flyte.md §6.3), which redeploys
+  `rsz flyte reconcile` is scheduled (flyte.md §6.3), which redeploys
   affected tasks at the prior within 10 minutes of a breaker opening or
   `mode_ceiling` dropping below `enforce`; without it, deploy-time sizing is
   increases-only, so the kill switch always holds.
-- **Slurm:** `rightsize slurm install --disable` removes the table and
+- **Slurm:** `rsz slurm install --disable` removes the table and
   short-circuits both Lua scripts.
 - **Client-side hooks** (AWS, Modal, SkyPilot, dstack, Airflow, Metaflow) read
-  `mode_ceiling` like every other client. Edits merged from `rightsize suggest`
+  `mode_ceiling` like every other client. Edits merged from `rsz suggest`
   are ordinary code changes and are reverted with the version control system.
 
 ## 14. Security
@@ -1383,7 +1383,7 @@ Every decision and patch is logged with its decision id.
 
 ### 14.1 Data for the model factory
 
-`rightsize history export --parquet` writes the tuner's corpus columns from
+`rsz history export --parquet` writes the tuner's corpus columns from
 production outcomes and decision logs: inputs, code tokens, requests, censored
 peaks, statuses and propensities. The model factory trains on them, and the
 tuner's scorer replays rightsizer's decisions.
@@ -1393,13 +1393,13 @@ tuner's scorer replays rightsizer's decisions.
 | | scope | exit criterion |
 |---|---|---|
 | **M0** core | types, units, grids, normalization, cost model, constraints, `rules-sized` / `history-peak` / `prior`, trees/1 evaluator and exporters, object-store and sqlite stores (compaction, pointers), breakers, mode ceiling, CLI `recommend` / `explain` / `shadow` on JSON contexts | rightsizer's decision rule, fed the tuner's oracle demands, reproduces the tuner's scorer costs on the k8s-2 rows within 1%; `rules-sized` reproduces the tuner's `rules-sized` regret within 1 point; < 5 ms per decision |
-| **A** adoption (after M0, in parallel with M1) | the importer and catalog half of `rightsizer-cloud` (AWS and Modal catalogs, prices, importers); `rightsize audit` for Kubernetes (Prometheus), Slurm (`sacct`), AWS (SageMaker, Batch, CloudWatch) and Modal; HTML report; `rightsize suggest` for Kubernetes YAML and Flyte/Ray literals (other key rules arrive with their milestones); `rightsize mcp` | a 30-day audit of a real AWS account finishes in < 10 min with read-only credentials; counterfactual decisions equal `shadow`'s on the same history |
+| **A** adoption (after M0, in parallel with M1) | the importer and catalog half of `rightsizer-cloud` (AWS and Modal catalogs, prices, importers); `rsz audit` for Kubernetes (Prometheus), Slurm (`sacct`), AWS (SageMaker, Batch, CloudWatch) and Modal; HTML report; `rsz suggest` for Kubernetes YAML and Flyte/Ray literals (other key rules arrive with their milestones); `rsz mcp` | a 30-day audit of a real AWS account finishes in < 10 min with read-only credentials; counterfactual decisions equal `shadow`'s on the same history |
 | **M1** Flyte | `rightsizer-runtime`, `rightsizer` wheels; Flyte task, action, run and environment levels; child-side measurement; `flyte.remote` backfill; escalation; deploy-time sizing and `reconcile`; the request-only-memory integration test (§16, open question 5) | demo workflows in `enforce` with 0 rightsizer-caused failures over 1,000 invocations; 10k-way `flyte.map` overhead < 2 ms per call once memoized |
 | **M2** K8s | CLI, webhook (Pods, Jobs, JobSets, PyTorchJob), watcher, Prometheus importer, postgres store, Helm chart, alerts, `k8s restore` | 2 weeks shadow on a real cluster with join ratio ≥ 0.95; webhook p99 < 100 ms |
 | **M3** plugins | plugin protocol and daemon; Slurm (wrapper, `cli_filter`, `job_submit` token verification); Ray (functions, actors, Ray Data, Jobs); KubeRay, TrainJob, Volcano; node agent; Arrow/HF readers | Slurm test cluster with HMAC verification and rotation; Ray 10k-task fan-out < 5 ms per task |
 | **M4** models | Estimator Protocol reference server; tuner models served; pool and gate with novelty/1; GPU type changes (opt-in); Slurm decision table | the gate beats `rules-sized` on the tuner's unseen split under rightsizer's decoder |
-| **M5** managed clouds I | AWS botocore hook, SageMaker (training, processing, transform, Pipelines deploy-time) and Batch (EC2, Fargate, EKS) adapters, caller ladders; `rightsizer_aws.pth` start-up hook, `rightsize aws reconcile`; Modal proxy and `measure` | SDK v2, SDK v3 and boto3 fixtures sized identically; 0 rightsizer-caused failures over 500 enforced SageMaker and Batch jobs; a 10k-input Modal `.map` stays within the variant budget |
-| **M6** launchers and orchestrators | `AttemptContext` and escalate-on-retry; SkyPilot policy; dstack plugin and importer; `metaflow-rightsizer` and `rightsize metaflow reconcile`; Airflow hooks and listener | fault injection (raise, hang, missing `_core`) leaves every SkyPilot, dstack and Airflow submission unchanged; an orchestrator retry after a reduced attempt escalates |
+| **M5** managed clouds I | AWS botocore hook, SageMaker (training, processing, transform, Pipelines deploy-time) and Batch (EC2, Fargate, EKS) adapters, caller ladders; `rightsizer_aws.pth` start-up hook, `rsz aws reconcile`; Modal proxy and `measure` | SDK v2, SDK v3 and boto3 fixtures sized identically; 0 rightsizer-caused failures over 500 enforced SageMaker and Batch jobs; a 10k-input Modal `.map` stays within the variant budget |
+| **M6** launchers and orchestrators | `AttemptContext` and escalate-on-retry; SkyPilot policy; dstack plugin and importer; `metaflow-rightsizer` and `rsz metaflow reconcile`; Airflow hooks and listener | fault injection (raise, hang, missing `_core`) leaves every SkyPilot, dstack and Airflow submission unchanged; an orchestrator retry after a reduced attempt escalates |
 | **M7** managed clouds II | Vertex AI custom jobs and KFP-on-Vertex (snap function derived from observed machine types), Azure ML (including Kubernetes instance types), Databricks single-node and GPU jobs; native KFP, Dagster and Prefect integrations | each service: audit on a real account, then 2 weeks of recommend with join ratio ≥ 0.9 |
 
 ## 16. Open questions

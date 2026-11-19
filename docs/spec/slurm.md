@@ -8,10 +8,10 @@ Status: **draft v2**. Core concepts: [SPEC.md](SPEC.md); plugin contract:
 ## 0. Day one
 
 ```bash
-rightsize slurm install --cluster gpu-a && systemctl enable --now rightsizer   # daemon on login nodes (recommend mode)
-rightsize history import slurm --since 30d                                     # sacct backfill
-rightsize slurm sbatch train.sh                                                 # prints the diff and explanation, submits unchanged
-rightsize shadow --tenant slurm://gpu-a/mlteam --since 14d
+rsz slurm install --cluster gpu-a && systemctl enable --now rightsizer   # daemon on login nodes (recommend mode)
+rsz history import slurm --since 30d                                     # sacct backfill
+rsz slurm sbatch train.sh                                                 # prints the diff and explanation, submits unchanged
+rsz shadow --tenant slurm://gpu-a/mlteam --since 14d
 # then: mode = "enforce" for the account in rightsizer.toml, and CliFilterPlugins=cli_filter/lua
 ```
 
@@ -19,16 +19,16 @@ rightsize shadow --tenant slurm://gpu-a/mlteam --since 14d
 
 | surface | runs where | role | retry |
 |---|---|---|---|
-| `rightsize slurm sbatch [sbatch args] script.sh` | login node, as the user | parse, decide, rewrite, call `sbatch`; `--watch` resubmits on `OUT_OF_MEMORY` | `same_size = 0`; a ladder with `--watch` |
+| `rsz slurm sbatch [sbatch args] script.sh` | login node, as the user | parse, decide, rewrite, call `sbatch`; `--watch` resubmits on `OUT_OF_MEMORY` | `same_size = 0`; a ladder with `--watch` |
 | `contrib/slurm/cli_filter.lua` | inside `sbatch`/`salloc`/`srun`, as the user | transparent client-side sizing (enforce for `sbatch`; recommend for `salloc`/`srun`) | `same_size = 0` |
 | `contrib/slurm/job_submit.lua` | inside `slurmctld`, as SlurmUser | verification, attribution, and (M4) history-based sizing for jobs that bypassed the client side | `same_size = 0` |
-| `rightsize history import slurm` | anywhere with `sacct` | outcomes | — |
+| `rsz history import slurm` | anywhere with `sacct` | outcomes | — |
 
-The **daemon** (`rightsize serve --socket /run/rightsizer.sock`) runs on each
+The **daemon** (`rsz serve --socket /run/rightsizer.sock`) runs on each
 login node as a dedicated service user. It holds the estimators, the
 connection to the shared history store (postgres or object store — SPEC
 §8.1), and the signing keys (with key ids, two active during rotation:
-`rightsize slurm rotate-key`). It runs under systemd with `WatchdogSec`. `cli_filter` and the `sbatch` wrapper talk to it;
+`rsz slurm rotate-key`). It runs under systemd with `WatchdogSec`. `cli_filter` and the `sbatch` wrapper talk to it;
 they never hold the key.
 
 `cli_filter` is a convenience, not a control: SchedMD documents that it
@@ -194,12 +194,12 @@ negative cache bounds the cost to one 1 s timeout per minute per login node.
 ## 9. Installation
 
 ```bash
-rightsize slurm install --cluster gpu-a \
+rsz slurm install --cluster gpu-a \
     --cli-filter /etc/slurm/cli_filter.lua \
     --job-submit /etc/slurm/job_submit.lua    # writes the scripts, prints the slurm.conf lines:
 # CliFilterPlugins=cli_filter/lua
 # JobSubmitPlugins=lua
-rightsize slurm keygen --out /etc/slurm/rightsizer.key   # 0600 SlurmUser; the daemon's copy is 0600 rightsizer
+rsz slurm keygen --out /etc/slurm/rightsizer.key   # 0600 SlurmUser; the daemon's copy is 0600 rightsizer
 ```
 
 The Lua scripts depend only on the Lua standard library plus a vendored

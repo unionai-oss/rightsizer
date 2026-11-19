@@ -104,12 +104,12 @@ reload rule were re-checked in source before being accepted.
 | O5 | Quota race; Kueue quota. | kubernetes.md §3.4: reservation ledger; parallelism × pod request; ClusterQueue nominal quota. |
 | O6/O7 | Breaker false positives; neighbour impact of request-only memory. | Re-attribution rules; `memory_enforced = false` for limitless memory, so S3(b) plus a neighbour premium; evictions count. |
 | O8–O12 | Node agent timing, webhook operations, store outage, RBAC, metrics. | kubernetes.md §6.2, §3.2, §7; SPEC §8.4, §13.1. |
-| O13 | No global off switch or revert. | `mode_ceiling`; `rightsize k8s restore`; `flyte deploy --restore`; `slurm install --disable`. |
+| O13 | No global off switch or revert. | `mode_ceiling`; `rsz k8s restore`; `flyte deploy --restore`; `slurm install --disable`. |
 | O14 | Slurm daemon as a single point of failure; arrays. | Negative cache, systemd watchdog, one decision per array. |
 | O15 | Ray and Slurm used different rules for unenforced memory. | One rule (SPEC S3). |
 | O16 | Cluster identity. | `cluster` on records; `history.share`. |
 | O17 | Savings never arrive under code churn. | §1.1 "what to expect"; S3(b) counts other-digest same-key runs at 1.25× headroom; `on_oom="auto"` escalates when `retries == 0`. |
-| O18 | No shadow report. | `rightsize shadow` (SPEC §12.2); `report` renamed to `outcome`. |
+| O18 | No shadow report. | `rsz shadow` (SPEC §12.2); `report` renamed to `outcome`. |
 | O19 | Too many concepts on day one. | Day-one sections in every platform doc; `rightsize="enforce"` shorthand; `auto_image=True`; default store URI. |
 | O20/O21 | GPU value was thin; walltimes. | Advisories (SPEC §7.7), including predicted GPU OOM and walltime raises only. |
 | O22 | Fan-out fell back to the prior. | Single-flight per memo key. |
@@ -140,7 +140,7 @@ confirmed against `_task.py:514-554`.
 | R2 | **Blocker.** Root actions have no parent to catch an OOM, yet were treated as escalating. | flyte.md §6.1: roots have `ladder = None`, so reductions need S3(b). |
 | R3 | **Blocker.** Ray's `max_retries=0` makes consumers other than rightsizer see failures Ray would have absorbed (S2). | ray.md §7: no Ray escalation in v1; `max_retries` is never changed. |
 | R4 | **Blocker.** `flyte://` keys taken from pod labels let any pod write another project's `Verified` history. | kubernetes.md §2 and flyte.md §12: namespace-template check; otherwise the pod is keyed `k8s://`. |
-| R5 | **Blocker.** Deploy-time reductions outlive breakers and the mode ceiling. | flyte.md §6.3 and SPEC §13.3: reductions only with `rightsize flyte reconcile` scheduled; otherwise increases only. |
+| R5 | **Blocker.** Deploy-time reductions outlive breakers and the mode ceiling. | flyte.md §6.3 and SPEC §13.3: reductions only with `rsz flyte reconcile` scheduled; otherwise increases only. |
 | R6/R7 | Task `docs` cannot hold the prior; reusable tasks cannot be overridden at deploy time. | flyte.md §6.3: the prior is the source definition; reusable environments are recommend-only. |
 | R8 | S3(b) ignored resolution, so Ray samples could never count. | SPEC §2.3 and §5.7: sampled peaks are `Exact` with `resolution_s`; coarse samples get headroom 1.25. |
 | R9 | §1.1 overpromised first-run savings. | Reworded. |
@@ -188,7 +188,7 @@ Findings that shaped v3:
   (SPEC §7.2).
 - **SkyPilot, dstack, Airflow and botocore fail closed** on hook errors,
   which became the S1 "fail-closed hosts" rule.
-- **Adoption surfaces:** `rightsize audit`, `rightsize suggest` (pull
+- **Adoption surfaces:** `rsz audit`, `rsz suggest` (pull
   requests) and an MCP server (SPEC §12.3–12.5), with milestone A shipping
   audit right after M0.
 

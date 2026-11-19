@@ -45,7 +45,7 @@ surface, the highest tier it reaches:
 
 | tier | what it does | needs |
 |---|---|---|
-| **A**udit | imports history, reports waste, risk and advisories (`rightsize audit`, SPEC §12.3) | an `OutcomeSource`, read-only credentials |
+| **A**udit | imports history, reports waste, risk and advisories (`rsz audit`, SPEC §12.3) | an `OutcomeSource`, read-only credentials |
 | **R**ecommend | decides at submit time and reports, changing nothing | an `Adapter` with `extract` and a point that sees submissions |
 | **E**nforce | rewrites the submission under the safety contract | `render` and `validate`, at a point that can change the submission |
 | **L**adder | escalates after an OOM-class failure, so reductions are S3(a)-recoverable | a `Caller` or `Orchestrator` ladder driver (SPEC §7.2) |
@@ -60,7 +60,7 @@ reaches every platform with an importer, so it ships first (milestone A).
 | **server-side mutation** | K8s mutating webhook, Slurm `job_submit.lua`, SkyPilot `AdminPolicy`, dstack `ApplyPolicy` | yes | every submission to that server |
 | **client-side submit hook** | botocore `before-parameter-build` (aws.md §2.1), Slurm `cli_filter`, Airflow `pod_mutation_hook` | yes | processes or hosts that load the hook |
 | **SDK wrapper or subclass** | Flyte `RightsizedTask`, Ray `RightsizedRemoteFunction`, Modal `rs.modal.sized`, `rs.azureml.sized` | yes | calls that go through the wrapper |
-| **compiled spec or IaC** | `rightsize apply` on manifests and pipeline specs; `rightsize suggest` on code | yes, at deploy time (increases only unless reconciled) or through review | definitions in files |
+| **compiled spec or IaC** | `rsz apply` on manifests and pipeline specs; `rsz suggest` on code | yes, at deploy time (increases only unless reconciled) or through review | definitions in files |
 | **none** (accounting only) | AWS console, Step Functions service integrations, Replicate | no | audit only |
 
 **Deny-only controls are not hook points.** IAM and SCP conditions, Google Org
@@ -191,7 +191,7 @@ Two directions:
 
 | direction | who calls | methods |
 |---|---|---|
-| **core → plugin** (a plugin *is* an adapter) | `rightsize` spawns `rightsize-plugin-<kind>` | `initialize`, `extract`, `render`, `validate`, `reference`, `state`, `fetch_outcomes`, `shutdown` |
+| **core → plugin** (a plugin *is* an adapter) | `rsz` spawns `rsz-plugin-<kind>` | `initialize`, `extract`, `render`, `validate`, `reference`, `state`, `fetch_outcomes`, `shutdown` |
 | **shim → core** (a shim *uses* rightsizer) | a Lua/Go/Python shim calls the daemon | `initialize`, `decide`, `outcome`, `status` |
 
 `decide` is the composite most shims need: `{ kind, native, mode }` →
@@ -226,15 +226,15 @@ pass through unchanged (S1).
 
 ### 3.4 Discovery and trust
 
-- **Interactive CLI:** plugins are found as `rightsize-plugin-<kind>` on `PATH`
+- **Interactive CLI:** plugins are found as `rsz-plugin-<kind>` on `PATH`
   (like `kubectl` and `cargo` plugins) **and** in `[plugins]` config.
-- **Server modes** (`rightsize serve`, `rightsize webhook serve`): **only**
+- **Server modes** (`rsz serve`, `rsz webhook serve`): **only**
   plugins listed in config with an **absolute path**, optionally pinned by
   `sha256`. No `PATH` discovery.
 
 ```toml
 [plugins.nomad]
-path = "/opt/rightsizer/plugins/rightsize-plugin-nomad"
+path = "/opt/rightsizer/plugins/rsz-plugin-nomad"
 sha256 = "9f2c…"
 ```
 
@@ -275,7 +275,7 @@ Flyte) render `Patch.Options` and never touch bytes.
     driver means reductions need S3(b).
 11. **Tier per surface** (§1.1), stated in the plugin's document.
 
-A conformance suite (`rightsize plugin check NAME`) runs a plugin against
+A conformance suite (`rsz plugin check NAME`) runs a plugin against
 fixture submissions and checks: handshake, determinism of `extract`,
 idempotence of `render` (rendering an already-rendered submission is
 `Patch::None`), that `validate` rejects the fixture's invalid cases, and
@@ -376,5 +376,5 @@ None has a mutating server-side hook (§1.2). The enforce point is the client.
   importer and client wrapper, and the Vertex Pipelines machine matching must
   first be derived from observation.
 - Every platform not listed with a plugin can still be added as an
-  out-of-process plugin (§3) or reached through `rightsize suggest` when its
+  out-of-process plugin (§3) or reached through `rsz suggest` when its
   resources live in code or config.

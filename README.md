@@ -4,7 +4,7 @@ Right-size AI workloads before they run: choose memory, CPU and GPU requests
 from a workload's code, its inputs' metadata, its platform and its history.
 It can recommend or enforce, under an explicit safety contract.
 
-- Rust core, Python bindings (`pip install rightsizer`), and the `rightsize` CLI
+- Rust core, Python bindings (`pip install rightsizer`), and the `rsz` CLI
 - Integrations:
   - orchestrators: **Flyte v2** (task, action, run and environment levels),
     **Metaflow**, **Airflow**
@@ -13,9 +13,9 @@ It can recommend or enforce, under an explicit safety contract.
   - GPU launchers: **SkyPilot**, **dstack**
   - managed services: **SageMaker AI**, **AWS Batch**, **Modal**; Vertex AI,
     Azure ML and Databricks planned
-- `rightsize audit`: a read-only waste and risk report from any supported
+- `rsz audit`: a read-only waste and risk report from any supported
   platform's history, with nothing installed on the platform
-- `rightsize suggest`: resource edits proposed as pull requests
+- `rsz suggest`: resource edits proposed as pull requests
 - A platform plugin interface for other schedulers, and an Estimator Protocol
   so the model can be hosted anywhere
 
